@@ -1,0 +1,13 @@
+import Link from "next/link";
+import { notFound } from "next/navigation";
+import { DisabledWorkAction, PageHeader, SampleNotice, StatusPill } from "../../../components/workspace-components";
+import { getSampleAgent } from "../../../lib/sample-data";
+import { sampleDefinitions } from "../../../lib/ui-preview-data";
+
+export default async function AgentInstancePage({ params }: { params: Promise<{ agentId: string }> }) {
+  const { agentId } = await params;
+  const agent = getSampleAgent(agentId);
+  if (!agent) notFound();
+  const definition = sampleDefinitions.find((entry) => entry.name === agent.role);
+  return <div className="page-stack"><PageHeader eyebrow="Agent instance" title={agent.name} description="An instance is a placed identity; it is distinct from its reusable definition and any runtime session."><Link className="text-link" href="/agents">Back to agent list</Link></PageHeader><SampleNotice /><div className="run-layout"><section className="content-section run-main"><div className="section-heading"><h2>Instance overview</h2><StatusPill>{agent.presence} · Sample</StatusPill></div><div className="run-facts"><div><span>Instance ID</span><strong>{agent.id}</strong></div><div><span>Project</span><strong>{agent.project}</strong></div><div><span>Office location</span><strong>{agent.room} · visual only</strong></div><div><span>Runtime connection</span><strong>Not connected</strong></div><div><span>Runtime session</span><strong>Not available</strong></div><div><span>Activity freshness</span><strong>Sample record · not live</strong></div></div><h2>Current activity</h2><p>{agent.summary}</p><p>Work state, connection health, and task acceptance are separate. No live event source is connected.</p><div className="preview-actions">{agent.runId ? <Link className="text-link" href={`/runs/${agent.runId}`}>Open sample run</Link> : <span className="muted">No sample run</span>}<DisabledWorkAction>Start task</DisabledWorkAction><DisabledWorkAction>Move agent</DisabledWorkAction></div></section><aside className="run-side-panel"><section className="content-section"><h2>Definition</h2>{definition ? <><strong>{definition.name}</strong><p>{definition.version} · Sample</p><p>{definition.description}</p><Link className="text-link" href="/agents/definitions">Open definition library</Link></> : <p>No matching sample definition is available.</p>}</section><section className="content-section"><h2>Skill and permissions</h2><p>{definition?.skills.join(", ") || "No sample skill attached."}</p><p>{definition?.permission ?? "Permission scope unavailable."}</p><StatusPill tone="amber">Not enforced</StatusPill></section></aside></div></div>;
+}
