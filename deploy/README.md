@@ -1,12 +1,10 @@
 # Private pilot operations
 
-This directory contains the local deployment boundary for the Phase 2
-application foundation. Phase 1/M0 remains in progress; Phase 2 is complete and
-provides the private web/API/database foundation and minimal owner-scoped
-project persistence, plus a one-shot migration runner. Dispatcher and runner
-process boundaries are documented, but execution is deferred until later phases.
-Backup/restore evidence is recorded in `docs/progress.md`; this does not prove
-runtime readiness.
+This directory documents the local deployment boundary. Phase 1/M0 remains in
+progress; Phase 2 foundation is complete, and Phase 3 now has owner-scoped
+project, versioned definition/skill, and Agent Instance persistence.
+Dispatcher and runner execution remain deferred to later phases. Backup/restore
+evidence is recorded in `docs/progress.md`; this does not prove runtime readiness.
 
 ## Topology and exposure boundary
 
@@ -95,12 +93,14 @@ All secrets and URLs are supplied at runtime by `.env` through Compose. Nothing
 is baked into the application images, and no default production credentials
 exist:
 
-- `POSTGRES_USER`/`POSTGRES_PASSWORD` are database-administrator credentials
-  available to PostgreSQL and the one-shot migration service only.
-- `APP_DB_USER`/`APP_DB_PASSWORD` provision a separate non-superuser API role.
-  The API receives only `DATABASE_URL`; the migration service applies the
-  project schema, revokes inherited/admin privileges, and grants only project
-  reads and inserts.
+- `APP_DB_USER`/`APP_DB_PASSWORD` provision a separate non-admin API role. The
+  API receives only `DATABASE_URL`; the migration service applies the project,
+  versioned definition, versioned skill, and agent-instance schemas, revokes inherited/admin
+  privileges, then grants project `SELECT`/`INSERT`, stable definition and skill
+  `SELECT`/`INSERT`/`UPDATE`, agent-instance `SELECT`/`INSERT`/`UPDATE`, and immutable
+  definition-version, skill-version, and pinned-link `SELECT`/`INSERT`.
+  The API role has no immutable-row update/delete, schema-create, superuser, or
+  database-admin rights.
 - `MIGRATION_DATABASE_URL` is the one-shot migration administrator connection.
 - `SESSION_SECRET` is at least 32 random bytes; rotating it invalidates
   sessions.
@@ -221,11 +221,14 @@ The restore script is intentionally non-destructive. The Phase 2 restore
 demonstration and its scratch-database evidence are recorded in
 `docs/progress.md`; repeat it after material schema or backup changes.
 
-## Known Phase 2 limits
+## Known Phase 2 and Phase 3 limits
 
 - Phase 1/M0 remains in progress; its gates are neither complete nor waived.
-- The API currently persists only minimal owner-scoped project records. It does
-  not yet implement canonical task/run/event domain state.
+- Phase 3 is in progress. The API persists minimal owner-scoped projects,
+  versioned agent definitions and text Skills with pinned versions, plus
+  owner-scoped Agent Instances with optional Project context. Tasks/runs/events,
+  provider/runtime configuration, compatibility/preflight, run snapshots, and
+  other canonical domain records remain unimplemented.
 - Dispatcher/runner boundaries are documented under `apps/dispatcher/` and
   `apps/runner/`, but there is no production dispatch, runtime, provider, or
   work-execution implementation; those remain later-phase work.

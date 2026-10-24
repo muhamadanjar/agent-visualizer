@@ -2,7 +2,6 @@ import Link from "next/link";
 import {
   sampleArtifacts,
   sampleAuditEntries,
-  sampleSkills,
 } from "../lib/ui-preview-data";
 import {
   DisabledWorkAction,
@@ -13,41 +12,6 @@ import {
 
 
 
-export function SkillsView() {
-  return (
-    <div className="page-stack">
-      <PageHeader eyebrow="Agent library" title="Skills" description="Text instructions and declared dependencies are separate from tools and permissions.">
-        <Link className="button button-secondary" href="/skills/import">Import text skill</Link>
-        <DisabledWorkAction>Add blank skill</DisabledWorkAction>
-      </PageHeader>
-      <SampleNotice />
-      <div className="preview-grid">
-        {sampleSkills.map((skill) => (
-          <article className="content-section preview-card" key={skill.id}>
-            <div className="preview-card-heading">
-              <div><p className="eyebrow">{skill.id} · {skill.version}</p><h2>{skill.name}</h2></div>
-              <StatusPill tone={skill.status === "Declared dependency unavailable" ? "amber" : "neutral"}>{skill.status}</StatusPill>
-            </div>
-            <p>{skill.description}</p>
-            <dl className="preview-facts">
-              <div><dt>Declared dependencies</dt><dd>{skill.dependencies.length ? skill.dependencies.join(", ") : "None declared"}</dd></div>
-              <div><dt>Sample definitions</dt><dd>{skill.attachedTo.length ? skill.attachedTo.join(", ") : "Not attached"}</dd></div>
-            </dl>
-            <div className="preview-actions">
-              <Link className="text-link" href={`/skills/${skill.id}`}>Open sample skill</Link>
-              <DisabledWorkAction>Attach to definition</DisabledWorkAction>
-              <DisabledWorkAction>Archive</DisabledWorkAction>
-            </div>
-          </article>
-        ))}
-      </div>
-      <section className="content-section">
-        <div className="section-heading"><h2>Import safety</h2><StatusPill>Text only</StatusPill></div>
-        <p className="muted">An undeclared dependency is not proof of runtime compatibility. Uploaded scripts are not executed by this preview; attaching a skill grants no file, network, secret, or tool access.</p>
-      </section>
-    </div>
-  );
-}
 
 export function ConnectionsView() {
   return (

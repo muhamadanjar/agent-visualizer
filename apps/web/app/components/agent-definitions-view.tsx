@@ -14,9 +14,12 @@ type Definition = {
   unmapped_metadata: Record<string, unknown>;
   archived: boolean;
   created_at: string;
+  skills: DefinitionSkillReference[];
 };
 
-type DefinitionSummary = Omit<Definition, "source_markdown" | "unmapped_metadata">;
+type DefinitionSkillReference = { skill_id: string; version: number; name: string };
+type SkillSummary = { id: string; version: number; name: string; archived: boolean };
+type DefinitionSummary = Omit<Definition, "source_markdown" | "unmapped_metadata" | "skills">;
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
@@ -149,8 +152,10 @@ export function AgentDefinitionDetailView({ definitionId }: { definitionId: stri
   const [version, setVersion] = useState<number | null>(null);
   const [latestVersion, setLatestVersion] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [skillsError, setSkillsError] = useState<string | null>(null);
+  const [skills, setSkills] = useState<SkillSummary[] | null>(null);
+  const [selectedPins, setSelectedPins] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
-
   useEffect(() => {
     let active = true;
     setDefinition(null);
@@ -160,12 +165,21 @@ export function AgentDefinitionDetailView({ definitionId }: { definitionId: stri
       .then((data) => {
         if (active) {
           setDefinition(data);
+          setSelectedPins(data.skills.map((item) => `${item.skill_id}:${item.version}`));
           if (version === null) setLatestVersion(data.version);
         }
       })
       .catch((reason: unknown) => { if (active) setError(reason instanceof Error ? reason.message : "Could not load this definition."); });
     return () => { active = false; };
   }, [definitionId, version]);
+
+  useEffect(() => {
+    let active = true;
+    request<SkillSummary[]>("/api/v1/skills")
+      .then((data) => { if (active) setSkills(data); })
+      .catch((reason: unknown) => { if (active) setSkillsError(reason instanceof Error ? reason.message : "Could not load skills."); });
+    return () => { active = false; };
+  }, []);
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -191,6 +205,31 @@ export function AgentDefinitionDetailView({ definitionId }: { definitionId: stri
     }
   }
 
+  async function saveSkills() {
+    if (!definition) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const updated = await request<Definition>(`/api/v1/agent-definitions/${definition.id}/skills`, {
+        method: "PUT",
+        body: JSON.stringify({
+          skills: selectedPins.map((item) => {
+            const [skillId, selectedVersion] = item.split(":");
+            return { skill_id: skillId, version: Number(selectedVersion) };
+          }),
+        }),
+      });
+      setDefinition(updated);
+      setLatestVersion(updated.version);
+      setVersion(null);
+      setSelectedPins(updated.skills.map((item) => `${item.skill_id}:${item.version}`));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not update pinned skills.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function archive() {
     if (!definition) return;
     setSaving(true);
@@ -208,6 +247,16 @@ export function AgentDefinitionDetailView({ definitionId }: { definitionId: stri
   if (error && !definition) return <div className="page-stack"><PageHeader eyebrow="Agent definition" title="Definition unavailable" description={error} /><Link className="text-link" href="/agents/definitions">Back to definitions</Link></div>;
   if (!definition) return <main className="workspace-gate" role="status">Loading saved definition…</main>;
   const readOnly = definition.archived || definition.version !== latestVersion;
+  const skillOptions = new Map<string, string>();
+  for (const skill of skills ?? []) {
+    for (let skillVersion = 1; skillVersion <= skill.version; skillVersion += 1) {
+      skillOptions.set(`${skill.id}:${skillVersion}`, `${skill.name} · v${skillVersion}`);
+    }
+  }
+  for (const pin of definition.skills) {
+    const key = `${pin.skill_id}:${pin.version}`;
+    if (!skillOptions.has(key)) skillOptions.set(key, `${pin.name} · v${pin.version} (currently pinned; unavailable)`);
+  }
 
   return (
     <div className="page-stack">
@@ -224,6 +273,27 @@ export function AgentDefinitionDetailView({ definitionId }: { definitionId: stri
         {!readOnly ? <div className="form-actions"><button className="button button-primary" type="submit" disabled={saving}>{saving ? "Saving…" : "Save new version"}<span className="visually-hidden"> Current version {definition.version}; the next saved version is immutable.</span></button><button className="button button-secondary" type="button" disabled={saving} onClick={() => void archive()}>Archive</button></div> : null}
       </form>
       {Object.keys(definition.unmapped_metadata).length ? <section className="content-section"><h2>Preserved unmapped metadata</h2><pre>{JSON.stringify(definition.unmapped_metadata, null, 2)}</pre></section> : null}
+      <section className="content-section draft-form">
+        <div className="section-heading"><h2>Pinned skill versions</h2><StatusPill>{definition.skills.length} pinned</StatusPill></div>
+        <p className="field-note">Pins reference exact saved versions. A changed pin list creates a new immutable definition version; skill updates do not rewrite existing pins.</p>
+        {skillsError ? <p className="inline-error" role="alert">{skillsError}</p> : null}
+        {skills === null && !skillsError ? <p role="status">Loading available skills…</p> : null}
+        {skills?.length === 0 ? <p className="muted">No saved skills yet. <Link className="text-link" href="/skills/import">Import a text skill</Link>.</p> : null}
+        {skills !== null ? <>
+          <label className="preview-field">Select skill versions
+            <select multiple size={Math.min(8, Math.max(4, skillOptions.size))} value={selectedPins} disabled={readOnly || saving || Boolean(skillsError)} onChange={(event) => {
+              const selected = Array.from(event.currentTarget.selectedOptions, (option) => option.value);
+              setSelectedPins((current) => [
+                ...current.filter((value) => selected.includes(value)),
+                ...selected.filter((value) => !current.includes(value)),
+              ]);
+            }}>
+              {Array.from(skillOptions, ([value, label]) => <option key={value} value={value}>{label}</option>)}
+            </select>
+          </label>
+          {!readOnly ? <div className="form-actions"><button className="button button-primary" type="button" disabled={saving || Boolean(skillsError)} onClick={() => void saveSkills()}>{saving ? "Saving…" : "Save pinned versions"}</button></div> : null}
+        </> : null}
+      </section>
     </div>
   );
 }

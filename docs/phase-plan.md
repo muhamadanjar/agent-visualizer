@@ -10,7 +10,7 @@
 
 This roadmap translates the P0 requirements and delivery stages in the PRD into implementation phases. It is not an implementation claim. A phase is **Not started** until work begins, **In progress** while its deliverables are being produced, **Blocked** when an explicit dependency prevents progress, and **Complete** only when its exit criteria have evidence recorded in `progress.md`.
 
-No calendar estimates are assigned. Phase 1/M0 remains in progress; Phase 2 is complete with its exit-criteria evidence recorded in `progress.md`. The production web app now exposes authenticated API-backed owner-scoped project routes plus sample-labeled previews for later domain areas; those later-phase previews remain presentation-only. The isolated M0 runtime and 3D spikes remain feasibility evidence, not operational application behavior.
+No calendar estimates are assigned. Phase 1/M0 remains in progress; Phase 2 is complete with its exit-criteria evidence recorded in `progress.md`. Phase 3 now persists owner-scoped projects, versioned definitions, text Skills with pinned references, and agent instances with optional project context through API-backed workflows. Task/run/event persistence, provider configuration/capability evidence, skill compatibility/preflight, run snapshots, and remaining Phase 3 exit criteria remain open. UI previews in later areas are not operational evidence. The isolated M0 runtime and 3D spikes remain feasibility evidence, not operational application behavior.
 
 ## Confirmed planning baseline
 
@@ -92,7 +92,7 @@ The following choices were confirmed in the planning conversation:
 
 ## Phase 3 — Canonical domain, configuration, and persistence
 
-**Status: In progress — UI-only slices remain present.** Phase 2's application foundation is complete; canonical domain models, provider/runtime configuration persistence, and domain migrations remain unimplemented.
+**Status: In progress — projects, versioned definitions, text Skills and pinned references, owner-scoped agent instances, and a canonical persisted Backlog Task slice are implemented.** Task create/list/detail/update/revision-history APIs and board/detail/edit views are verified; Tasks use immutable revisions and same-owner dependencies. Run/Attempt records, dispatch, runtime state, event persistence, provider configuration/capability evidence, skill compatibility/preflight, run snapshots, and remaining Phase 3 exit criteria remain open.
 
 ### Work
 - Implement versioned agent definitions and skills, links, import/export, archive, and configuration snapshots.
@@ -106,13 +106,13 @@ The following choices were confirmed in the planning conversation:
 
 ### Exit criteria
 - PRD AC-01–05, AC-22, and persistence portions of AC-19 pass with evidence.
-- Definition/skill edits create new versions; existing runs retain their original effective configuration.
+- Definition/skill edits and changed pin sets append immutable versions. The task-persistence portion of AC-19 is verified; run retention remains open until canonical Runs / Attempts preserve their effective configuration snapshots.
 - Archived definitions remain historically inspectable and do not start new runs.
 - PRD FR-19 configuration and persistence portions pass; run snapshots identify the chosen endpoint/model/version and contain no secret values. Provider execution and egress acceptance remain in Phase 6.
 
 ## Phase 4 — Durable event pipeline and work views
 
-**Status: In progress — the authorized UI-only slice now has a Sample-data Task Board, Run Detail, and Inbox with local search/filter behavior. Durable event ingestion, projections, acknowledgements, WebSocket freshness, and reconciliation remain unimplemented and depend on Phase 3 contracts.**
+**Status: In progress — Task Board now displays API-backed persisted Backlog tasks; Run Detail and Inbox remain sample-data UI views. Durable event ingestion, projections, acknowledgements, WebSocket freshness, reconciliation, and event-driven Run views remain unimplemented and depend on Phase 3 contracts.**
 
 ### Work
 - Implement event ingestion, source/scope validation, deduplication, durable acknowledgement, cursor/snapshot handling, and event projections.
@@ -213,7 +213,7 @@ Candidate work: additional Runtime Adapters (including Codex app-server or ACP-c
 
 ## User-directed UI-first sequence
 
-On 2026-10-23, the user authorized prioritizing the application UI through the 3D office while Phase 1 remains open. Complete UI-relevant Phase 2 work, then proceed with UI-only slices of Phases 3–5. The latest direction extends this to finish all P0-facing UI previews across Phases 3–8 while backend/runtime integration remains deferred. This is an explicit sequencing exception, not a claim that Phase 2 or later phases are complete.
+On 2026-10-23, the user authorized prioritizing the application UI while Phase 1 remains open. Phase 2 was completed first; the user then directed work to continue with Phase 3. The earlier UI-first sequence remains applicable to P0 preview work in Phases 3–8, but the current Phase 3 work includes operational persistence where the roadmap requires it. Presentation-only work does not close operational exit criteria.
 
 The agreed UI contract:
 - After login, the 3D office is the desktop home; Agent List, Task Board, Run Detail, Inbox, and Settings stay one click away.
@@ -222,6 +222,6 @@ The agreed UI contract:
 - Camera, navigation, search, filters, panels, and player movement may work locally. Start, Cancel, Assign, and Approval remain disabled with a reason until a real connected path exists; do not simulate work state.
 - Preserve the PRD's tablet and mobile list/detail fallback, keyboard access, reduced-motion behavior, WebGL fallback, and state separation.
 
-Phase 2 remains in progress while its deferred backend boundaries/project scope are open. Phase 1 remains in progress; UI work does not close or waive its runtime safety gates. Phases 3–8 operational acceptance criteria remain open.
+Phase 2 is complete. Phase 1 remains in progress and its runtime safety gates are not waived. Phase 3 is in progress; Phases 4–8 operational acceptance criteria remain open.
 
-The current preview includes list/detail and draft/import surfaces where useful. It keeps sample state local, labels it as Sample, and disables persistence, dispatch, approval, assignment, and runtime-changing controls.
+UI-only areas still use deterministic local fixtures labeled “Sample” and keep unsupported actions disabled. Project and agent-definition views are now API-backed; sample run/status data does not become canonical work state.

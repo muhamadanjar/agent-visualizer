@@ -13,6 +13,24 @@ type Project = {
 
 type ProjectResponse = Project | Project[];
 
+type AgentInstanceSummary = {
+  id: string;
+  display_name: string;
+  definition_name: string;
+  project_name: string | null;
+};
+
+async function requestAgentInstances(projectId: string, signal: AbortSignal): Promise<AgentInstanceSummary[]> {
+  const response = await fetch(`/api/v1/agent-instances?project_id=${encodeURIComponent(projectId)}`, {
+    cache: "no-store",
+    credentials: "same-origin",
+    signal,
+    headers: { accept: "application/json" },
+  });
+  if (!response.ok) throw new Error("Could not load project agent instances.");
+  return response.json() as Promise<AgentInstanceSummary[]>;
+}
+
 async function requestProjects(path: string, init?: RequestInit): Promise<ProjectResponse> {
   const headers = new Headers(init?.headers);
   headers.set("accept", "application/json");
@@ -98,17 +116,22 @@ export function ProjectsView() {
           </div>
         ) : null}
       </section>
-      <p className="muted">Repository connections, agent assignments, tasks, and runtime execution are not configured in this phase.</p>
+      <p className="muted">Agent instances can be linked to projects. Repository connections, tasks, and runtime execution remain unconfigured.</p>
     </div>
   );
 }
 
 export function ProjectDetailView({ projectId }: { projectId: string }) {
   const [project, setProject] = useState<Project | null>(null);
+  const [instances, setInstances] = useState<AgentInstanceSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [instanceError, setInstanceError] = useState<string | null>(null);
+
   useEffect(() => {
     setProject(null);
+    setInstances(null);
     setError(null);
+    setInstanceError(null);
     const controller = new AbortController();
     void requestProjects(`/api/v1/projects/${encodeURIComponent(projectId)}`, { signal: controller.signal })
       .then((result) => {
@@ -118,6 +141,11 @@ export function ProjectDetailView({ projectId }: { projectId: string }) {
       })
       .catch((reason: unknown) => {
         if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Could not load project data.");
+      });
+    void requestAgentInstances(projectId, controller.signal)
+      .then((result) => { if (!controller.signal.aborted) setInstances(result); })
+      .catch((reason: unknown) => {
+        if (!controller.signal.aborted) setInstanceError(reason instanceof Error ? reason.message : "Could not load project agents.");
       });
     return () => controller.abort();
   }, [projectId]);
@@ -139,7 +167,19 @@ export function ProjectDetailView({ projectId }: { projectId: string }) {
           <div><dt>Created</dt><dd>{new Date(project.created_at).toLocaleString()}</dd></div>
         </dl>
       </section>
-      <p className="muted">This project is isolated by server-side owner scope. Repository resources and runtime work are not part of Phase 2.</p>
+      <section className="content-section">
+        <div className="section-heading"><h2>Assigned agent instances</h2><Link className="text-link" href="/agents/new">Add instance</Link></div>
+        {instanceError ? <p className="inline-error" role="alert">{instanceError}</p> : null}
+        {!instances && !instanceError ? <p className="muted" role="status">Loading project agents…</p> : null}
+        {instances?.length === 0 ? <p className="muted">No active agent instances are assigned to this project.</p> : null}
+        {instances?.length ? <div className="preview-grid">{instances.map((instance) => (
+          <article className="preview-card" key={instance.id}>
+            <div className="preview-card-heading"><h3><Link href={`/agents/${instance.id}`}>{instance.display_name}</Link></h3><StatusPill>Registered</StatusPill></div>
+            <p>{instance.definition_name}</p>
+          </article>
+        ))}</div> : null}
+      </section>
+      <p className="muted">Project association is context only; it does not grant repository access or change permissions. Repository resources and runtime work are not configured.</p>
       <Link className="text-link" href="/projects">Back to projects</Link>
     </div>
   );

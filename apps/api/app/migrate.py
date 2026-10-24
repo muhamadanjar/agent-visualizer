@@ -141,7 +141,10 @@ async def ensure_application_role(
                 UNION ALL
                 SELECT 1 FROM pg_class
                 WHERE relname = ANY(ARRAY[
-                    'projects', 'agent_definitions', 'agent_definition_versions'
+                    'projects', 'agent_definitions', 'agent_definition_versions',
+                    'skills', 'skill_versions', 'agent_definition_version_skills',
+                    'agent_instances', 'tasks', 'task_revisions',
+                    'task_revision_dependencies'
                 ]::text[])
                   AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
                   AND relowner = (SELECT oid FROM pg_roles WHERE rolname = $1)
@@ -194,6 +197,34 @@ async def ensure_application_role(
             "SELECT format('GRANT SELECT, INSERT ON TABLE agent_definition_versions TO %I', $1::text)",
             role_name,
         )
+        grant_skills = await connection.fetchval(
+            "SELECT format('GRANT SELECT, INSERT, UPDATE ON TABLE skills TO %I', $1::text)",
+            role_name,
+        )
+        grant_skill_versions = await connection.fetchval(
+            "SELECT format('GRANT SELECT, INSERT ON TABLE skill_versions TO %I', $1::text)",
+            role_name,
+        )
+        grant_definition_skills = await connection.fetchval(
+            "SELECT format('GRANT SELECT, INSERT ON TABLE agent_definition_version_skills TO %I', $1::text)",
+            role_name,
+        )
+        grant_agent_instances = await connection.fetchval(
+            "SELECT format('GRANT SELECT, INSERT, UPDATE ON TABLE agent_instances TO %I', $1::text)",
+            role_name,
+        )
+        grant_tasks = await connection.fetchval(
+            "SELECT format('GRANT SELECT, INSERT, UPDATE ON TABLE tasks TO %I', $1::text)",
+            role_name,
+        )
+        grant_task_revisions = await connection.fetchval(
+            "SELECT format('GRANT SELECT, INSERT ON TABLE task_revisions TO %I', $1::text)",
+            role_name,
+        )
+        grant_task_dependencies = await connection.fetchval(
+            "SELECT format('GRANT SELECT, INSERT ON TABLE task_revision_dependencies TO %I', $1::text)",
+            role_name,
+        )
         for statement in (
             revoke_public_create,
             revoke_app_schema,
@@ -204,7 +235,14 @@ async def ensure_application_role(
             grant_schema,
             grant_projects,
             grant_definitions,
+            grant_skills,
+            grant_skill_versions,
+            grant_definition_skills,
             grant_definition_versions,
+            grant_agent_instances,
+            grant_tasks,
+            grant_task_revisions,
+            grant_task_dependencies,
         ):
             await connection.execute(statement)
     finally:

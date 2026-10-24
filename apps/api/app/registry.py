@@ -10,9 +10,12 @@ from uuid import UUID, uuid4
 
 import asyncpg
 import yaml
+from app.domain import SkillPin, SkillReference
 
 MAX_SOURCE_BYTES = 1_048_576
-MAX_YAML_ALIASES = 50
+MAX_YAML_ALIASES = 0
+MAX_METADATA_DEPTH = 64
+MAX_YAML_NODES = 20_000
 FRONT_MATTER = re.compile(r"\A\ufeff?---\r?\n(?P<metadata>[\s\S]*?)\r?\n---(?:\r?\n|\Z)")
 
 
@@ -20,13 +23,25 @@ class LimitedSafeLoader(yaml.SafeLoader):
     def __init__(self, stream: str) -> None:
         super().__init__(stream)
         self._alias_count = 0
+        self._depth = 0
+        self._node_count = 0
 
     def compose_node(self, parent: object, index: object) -> object:
         if self.check_event(yaml.AliasEvent):
             self._alias_count += 1
             if self._alias_count > MAX_YAML_ALIASES:
-                raise yaml.YAMLError("front matter contains too many YAML aliases")
-        return super().compose_node(parent, index)
+                raise yaml.YAMLError("YAML aliases are not supported")
+        self._node_count += 1
+        if self._node_count > MAX_YAML_NODES:
+            raise yaml.YAMLError("front matter contains too many nodes")
+        self._depth += 1
+        if self._depth > MAX_METADATA_DEPTH:
+            self._depth -= 1
+            raise yaml.YAMLError("front matter nesting is too deep")
+        try:
+            return super().compose_node(parent, index)
+        finally:
+            self._depth -= 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,12 +56,15 @@ class AgentDefinition:
     unmapped_metadata: dict[str, object]
     archived_at: datetime | None
     created_at: datetime
+    skills: tuple[SkillReference, ...] = ()
 
 class AgentDefinitionInputError(ValueError):
     """Definition source or metadata is unsafe or invalid."""
 
 
-def _json_value(value: object, active: set[int] | None = None) -> object:
+def _json_value(value: object, active: set[int] | None = None, depth: int = 0) -> object:
+    if depth > MAX_METADATA_DEPTH:
+        raise AgentDefinitionInputError("front matter nesting is too deep")
     if isinstance(value, float) and not math.isfinite(value):
         raise AgentDefinitionInputError("front matter numbers must be finite")
     if value is None or isinstance(value, (str, bool, int, float)):
@@ -60,7 +78,7 @@ def _json_value(value: object, active: set[int] | None = None) -> object:
             raise AgentDefinitionInputError("front matter cannot contain recursive aliases")
         active.add(identity)
         try:
-            return [_json_value(item, active) for item in value]
+            return [_json_value(item, active, depth + 1) for item in value]
         finally:
             active.remove(identity)
     if isinstance(value, dict):
@@ -72,7 +90,7 @@ def _json_value(value: object, active: set[int] | None = None) -> object:
         try:
             if any(not isinstance(key, str) for key in value):
                 raise AgentDefinitionInputError("front matter keys must be strings")
-            return {key: _json_value(item, active) for key, item in value.items()}
+            return {key: _json_value(item, active, depth + 1) for key, item in value.items()}
         finally:
             active.remove(identity)
     raise AgentDefinitionInputError("front matter contains a value that cannot be preserved as JSON data")
@@ -88,7 +106,11 @@ def parse_agent_markdown(
 ) -> tuple[str, str, dict[str, object]]:
     if not source_markdown or "\x00" in source_markdown:
         raise AgentDefinitionInputError("source Markdown must be non-empty text without NUL bytes")
-    if len(source_markdown.encode("utf-8")) > MAX_SOURCE_BYTES:
+    try:
+        source_size = len(source_markdown.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise AgentDefinitionInputError("source Markdown must be valid UTF-8 text") from error
+    if source_size > MAX_SOURCE_BYTES:
         raise AgentDefinitionInputError("source Markdown exceeds the 1 MiB limit")
     front_matter = FRONT_MATTER.match(source_markdown)
     metadata: dict[str, object] = {}
@@ -97,8 +119,12 @@ def parse_agent_markdown(
     if front_matter:
         try:
             parsed = yaml.load(front_matter.group("metadata"), Loader=LimitedSafeLoader)
-        except yaml.YAMLError as error:
-            raise AgentDefinitionInputError("front matter must be valid safe YAML") from error
+        except MemoryError:
+            raise
+        except Exception as error:
+            raise AgentDefinitionInputError(
+                "front matter must be valid safe YAML within resource limits"
+            ) from error
         if parsed is None:
             parsed = {}
         if not isinstance(parsed, dict) or any(not isinstance(key, str) for key in parsed):
@@ -141,6 +167,25 @@ def _metadata_value(value: object) -> dict[str, object]:
     return value
 
 
+def _skill_references(value: object) -> tuple[SkillReference, ...]:
+    decoded = json.loads(value) if isinstance(value, str) else value
+    if not isinstance(decoded, list):
+        raise RuntimeError("stored definition skill references are invalid")
+    result: list[SkillReference] = []
+    for item in decoded:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("skill_id"), str)
+            or not isinstance(item.get("version"), int)
+            or not isinstance(item.get("name"), str)
+        ):
+            raise RuntimeError("stored definition skill reference is invalid")
+        result.append(
+            SkillReference(UUID(item["skill_id"]), item["version"], item["name"])
+        )
+    return tuple(result)
+
+
 def _definition(row: asyncpg.Record) -> AgentDefinition:
     return AgentDefinition(
         id=row["id"],
@@ -152,6 +197,7 @@ def _definition(row: asyncpg.Record) -> AgentDefinition:
         unmapped_metadata=_metadata_value(row["unmapped_metadata"]),
         archived_at=row["archived_at"],
         created_at=row["created_at"],
+        skills=_skill_references(row["skill_refs"]),
     )
 
 
@@ -186,6 +232,10 @@ class AgentRegistryRepository(Protocol):
         self, owner_id: str, definition_id: UUID
     ) -> AgentDefinition | None: ...
 
+    async def set_skills_for_owner(
+        self, owner_id: str, definition_id: UUID, pins: list[SkillPin]
+    ) -> AgentDefinition | None: ...
+
 
 class PostgresAgentRegistryRepository:
     def __init__(self, pool: asyncpg.Pool) -> None:
@@ -211,11 +261,12 @@ class PostgresAgentRegistryRepository:
                 row = await connection.fetchrow(
                     """
                     INSERT INTO agent_definition_versions
-                        (definition_id, version, name, description, source_markdown, unmapped_metadata)
-                    VALUES ($1, 1, $2, $3, $4, $5::jsonb)
+                        (owner_id, definition_id, version, name, description, source_markdown, unmapped_metadata)
+                    VALUES ($1, $2, 1, $3, $4, $5, $6::jsonb)
                     RETURNING definition_id AS id, 1 AS version, name, description,
                               source_markdown, unmapped_metadata, created_at
                     """,
+                    owner_id,
                     definition_id,
                     name,
                     description,
@@ -247,7 +298,8 @@ class PostgresAgentRegistryRepository:
         rows = await self._pool.fetch(
             """
             SELECT d.id, d.owner_id, d.archived_at, v.version, v.name, v.description,
-                   ''::text AS source_markdown, '{}'::jsonb AS unmapped_metadata, v.created_at
+                   ''::text AS source_markdown, '{}'::jsonb AS unmapped_metadata,
+                   '[]'::jsonb AS skill_refs, v.created_at
             FROM agent_definitions d
             JOIN agent_definition_versions v
               ON v.definition_id = d.id AND v.version = d.current_version
@@ -268,7 +320,24 @@ class PostgresAgentRegistryRepository:
         row = await self._pool.fetchrow(
             """
             SELECT d.id, d.owner_id, d.archived_at, v.version, v.name, v.description,
-                   v.source_markdown, v.unmapped_metadata, v.created_at
+                   v.source_markdown, v.unmapped_metadata, v.created_at,
+                   COALESCE((
+                       SELECT jsonb_agg(
+                           jsonb_build_object(
+                               'skill_id', pin.skill_id,
+                               'version', pin.skill_version,
+                               'name', skill_version.name
+                           ) ORDER BY pin.position
+                       )
+                       FROM agent_definition_version_skills pin
+                       JOIN skill_versions skill_version
+                         ON skill_version.owner_id = pin.owner_id
+                        AND skill_version.skill_id = pin.skill_id
+                        AND skill_version.version = pin.skill_version
+                       WHERE pin.owner_id = d.owner_id
+                         AND pin.definition_id = d.id
+                         AND pin.definition_version = v.version
+                   ), '[]'::jsonb) AS skill_refs
             FROM agent_definitions d
             JOIN agent_definition_versions v ON v.definition_id = d.id
             WHERE d.owner_id = $1 AND d.id = $2
@@ -301,6 +370,17 @@ class PostgresAgentRegistryRepository:
                 if current is None or current["archived_at"] is not None:
                     return None
                 version = current["current_version"] + 1
+                current_links = await connection.fetch(
+                    """
+                    SELECT skill_id, skill_version, position
+                    FROM agent_definition_version_skills
+                    WHERE owner_id = $1 AND definition_id = $2 AND definition_version = $3
+                    ORDER BY position
+                    """,
+                    owner_id,
+                    definition_id,
+                    current["current_version"],
+                )
                 values = {
                     "name": changes.get("name", current["name"]),
                     "description": changes.get("description", current["description"]),
@@ -312,9 +392,10 @@ class PostgresAgentRegistryRepository:
                 await connection.execute(
                     """
                     INSERT INTO agent_definition_versions
-                        (definition_id, version, name, description, source_markdown, unmapped_metadata)
-                    VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+                        (owner_id, definition_id, version, name, description, source_markdown, unmapped_metadata)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
                     """,
+                    owner_id,
                     definition_id,
                     version,
                     values["name"],
@@ -322,6 +403,25 @@ class PostgresAgentRegistryRepository:
                     values["source_markdown"],
                     json.dumps(values["unmapped_metadata"], ensure_ascii=False, allow_nan=False),
                 )
+                if current_links:
+                    await connection.executemany(
+                        """
+                        INSERT INTO agent_definition_version_skills
+                            (owner_id, definition_id, definition_version, skill_id, skill_version, position)
+                        VALUES ($1, $2, $3, $4, $5, $6)
+                        """,
+                        [
+                            (
+                                owner_id,
+                                definition_id,
+                                version,
+                                item["skill_id"],
+                                item["skill_version"],
+                                item["position"],
+                            )
+                            for item in current_links
+                        ],
+                    )
                 await connection.execute(
                     """
                     UPDATE agent_definitions
@@ -333,6 +433,116 @@ class PostgresAgentRegistryRepository:
                     version,
                     _slug(str(values["name"])),
                 )
+        return await self.get_for_owner(owner_id, definition_id)
+
+    async def set_skills_for_owner(
+        self, owner_id: str, definition_id: UUID, pins: list[SkillPin]
+    ) -> AgentDefinition | None:
+        if len(pins) > 100 or len({pin.skill_id for pin in pins}) != len(pins):
+            raise AgentDefinitionInputError("a definition can pin up to 100 distinct skills")
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                current = await connection.fetchrow(
+                    """
+                    SELECT d.current_version, d.archived_at, v.name, v.description,
+                           v.source_markdown, v.unmapped_metadata, v.created_at
+                    FROM agent_definitions d
+                    JOIN agent_definition_versions v
+                      ON v.definition_id = d.id AND v.version = d.current_version
+                    WHERE d.owner_id = $1 AND d.id = $2
+                    FOR UPDATE OF d
+                    """,
+                    owner_id,
+                    definition_id,
+                )
+                if current is None or current["archived_at"] is not None:
+                    return None
+                current_links = await connection.fetch(
+                    """
+                    SELECT skill_id, skill_version
+                    FROM agent_definition_version_skills
+                    WHERE owner_id = $1 AND definition_id = $2 AND definition_version = $3
+                    ORDER BY position
+                    """,
+                    owner_id,
+                    definition_id,
+                    current["current_version"],
+                )
+                current_pins = [
+                    SkillPin(item["skill_id"], item["skill_version"])
+                    for item in current_links
+                ]
+                if current_pins != pins:
+                    requested_links = await connection.fetch(
+                        """
+                        SELECT requested.skill_id, requested.skill_version,
+                               (requested.position - 1)::smallint AS position
+                        FROM unnest($2::uuid[], $3::integer[])
+                             WITH ORDINALITY AS requested(skill_id, skill_version, position)
+                        JOIN skills s
+                          ON s.owner_id = $1
+                         AND s.id = requested.skill_id
+                         AND s.archived_at IS NULL
+                        JOIN skill_versions v
+                          ON v.owner_id = s.owner_id
+                         AND v.skill_id = s.id
+                         AND v.version = requested.skill_version
+                        ORDER BY requested.position
+                        FOR SHARE OF s
+                        """,
+                        owner_id,
+                        [pin.skill_id for pin in pins],
+                        [pin.version for pin in pins],
+                    )
+                    if len(requested_links) != len(pins):
+                        raise AgentDefinitionInputError(
+                            "pinned skills must be active versions owned by this user"
+                        )
+                    version = current["current_version"] + 1
+                    await connection.execute(
+                        """
+                        INSERT INTO agent_definition_versions
+                            (owner_id, definition_id, version, name, description,
+                             source_markdown, unmapped_metadata)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+                        """,
+                        owner_id,
+                        definition_id,
+                        version,
+                        current["name"],
+                        current["description"],
+                        current["source_markdown"],
+                        json.dumps(_metadata_value(current["unmapped_metadata"]), ensure_ascii=False, allow_nan=False),
+                    )
+                    if requested_links:
+                        await connection.executemany(
+                            """
+                            INSERT INTO agent_definition_version_skills
+                                (owner_id, definition_id, definition_version, skill_id, skill_version, position)
+                            VALUES ($1, $2, $3, $4, $5, $6)
+                            """,
+                            [
+                                (
+                                    owner_id,
+                                    definition_id,
+                                    version,
+                                    item["skill_id"],
+                                    item["skill_version"],
+                                    item["position"],
+                                )
+                                for item in requested_links
+                            ],
+                        )
+                    await connection.execute(
+                        """
+                        UPDATE agent_definitions
+                        SET current_version = $3, updated_at = now()
+                        WHERE owner_id = $1 AND id = $2
+                        """,
+                        owner_id,
+                        definition_id,
+                        version,
+                    )
         return await self.get_for_owner(owner_id, definition_id)
 
     async def archive_for_owner(

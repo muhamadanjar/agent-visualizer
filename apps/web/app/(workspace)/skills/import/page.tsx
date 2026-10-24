@@ -1,5 +1,5 @@
-import { SkillImportPreview } from "../../../components/skill-import-preview";
+import { SkillImportView } from "../../../components/skills-view";
 
 export default function SkillImportPage() {
-  return <SkillImportPreview />;
+  return <SkillImportView />;
 }

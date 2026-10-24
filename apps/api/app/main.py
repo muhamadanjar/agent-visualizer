@@ -1,4 +1,4 @@
-"""Private owner API for authenticated sessions and scoped project resources."""
+"""Private owner API for authenticated sessions and scoped domain resources."""
 
 from __future__ import annotations
 
@@ -25,11 +25,34 @@ from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import Response
 
 from app.config import Settings, load_settings
+from app.domain import SkillPin
+from app.skills import (
+    PostgresSkillRepository,
+    Skill,
+    SkillInputError,
+    SkillRepository,
+    SkillSummary,
+    normalize_skill_content,
+)
+from app.instances import (
+    AgentInstance,
+    AgentInstanceInputError,
+    AgentInstanceRepository,
+    PostgresAgentInstanceRepository,
+)
+from app.projects import PostgresProjectRepository, ProjectRepository
+from app.tasks import (
+    PostgresTaskRepository,
+    Task,
+    TaskInputError,
+    TaskRepository,
+    TaskSpec,
+)
 from app.registry import (
     AgentDefinition,
     AgentDefinitionInputError,
@@ -237,6 +260,171 @@ class ProjectResponse(BaseModel):
     created_at: datetime
 
 
+class TaskWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: UUID
+    agent_instance_id: UUID | None = None
+    title: StrictStr = Field(min_length=1, max_length=200)
+    goal: StrictStr = Field(min_length=1, max_length=10000)
+    input_text: StrictStr = Field(default="", max_length=10000)
+    resource_refs: list[StrictStr] = Field(default_factory=list, max_length=100)
+    acceptance_criteria: list[StrictStr] = Field(min_length=1, max_length=100)
+    blocked_by_task_ids: list[UUID] = Field(default_factory=list, max_length=100)
+    max_duration_minutes: StrictInt | None = Field(default=None, ge=1, le=1440)
+    max_child_runs: StrictInt | None = Field(default=None, ge=0, le=100)
+
+    @field_validator("title", "goal")
+    @classmethod
+    def normalize_required_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("text must not be blank")
+        return normalized
+
+    @field_validator("resource_refs")
+    @classmethod
+    def normalize_resource_refs(cls, values: list[str]) -> list[str]:
+        normalized = [value.strip() for value in values]
+        if any(not value or len(value) > 2048 for value in normalized):
+            raise ValueError("resource references must contain 1 to 2048 characters")
+        return normalized
+
+    @field_validator("acceptance_criteria")
+    @classmethod
+    def normalize_acceptance_criteria(cls, values: list[str]) -> list[str]:
+        normalized = [value.strip() for value in values]
+        if any(not value or len(value) > 2000 for value in normalized):
+            raise ValueError("acceptance criteria must contain 1 to 2000 characters")
+        return normalized
+
+    @field_validator("blocked_by_task_ids")
+    @classmethod
+    def unique_dependencies(cls, values: list[UUID]) -> list[UUID]:
+        if len(values) != len(set(values)):
+            raise ValueError("task dependencies must be unique")
+        return sorted(values)
+
+
+class TaskResponse(BaseModel):
+    id: UUID
+    revision: int
+    stage: str
+    project_id: UUID
+    project_name: str
+    agent_instance_id: UUID | None
+    agent_instance_name: str | None
+    title: str
+    goal: str
+    input_text: str
+    resource_refs: list[str]
+    acceptance_criteria: list[str]
+    blocked_by_task_ids: list[UUID]
+    max_duration_minutes: int | None
+    max_child_runs: int | None
+    created_at: datetime
+    updated_at: datetime
+    revision_created_at: datetime
+
+
+def _task_spec(body: TaskWrite) -> TaskSpec:
+    return TaskSpec(
+        project_id=body.project_id,
+        agent_instance_id=body.agent_instance_id,
+        title=body.title,
+        goal=body.goal,
+        input_text=body.input_text,
+        resource_refs=tuple(body.resource_refs),
+        acceptance_criteria=tuple(body.acceptance_criteria),
+        blocked_by_task_ids=tuple(body.blocked_by_task_ids),
+        max_duration_minutes=body.max_duration_minutes,
+        max_child_runs=body.max_child_runs,
+    )
+
+
+def _task_response(task: Task) -> TaskResponse:
+    return TaskResponse(
+        id=task.id,
+        revision=task.revision,
+        stage=task.stage,
+        project_id=task.project_id,
+        project_name=task.project_name,
+        agent_instance_id=task.agent_instance_id,
+        agent_instance_name=task.agent_instance_name,
+        title=task.title,
+        goal=task.goal,
+        input_text=task.input_text,
+        resource_refs=list(task.resource_refs),
+        acceptance_criteria=list(task.acceptance_criteria),
+        blocked_by_task_ids=list(task.blocked_by_task_ids),
+        max_duration_minutes=task.max_duration_minutes,
+        max_child_runs=task.max_child_runs,
+        created_at=task.created_at,
+        updated_at=task.updated_at,
+        revision_created_at=task.revision_created_at,
+    )
+
+
+class AgentInstanceCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: StrictStr = Field(min_length=1, max_length=120)
+    definition_id: UUID
+    project_id: UUID | None = None
+
+    @field_validator("display_name")
+    @classmethod
+    def normalize_display_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("display_name must not be blank")
+        return normalized
+
+
+class AgentInstanceUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: StrictStr | None = Field(default=None, min_length=1, max_length=120)
+    definition_id: UUID | None = None
+    project_id: UUID | None = None
+
+    @field_validator("display_name")
+    @classmethod
+    def normalize_display_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("display_name must not be blank")
+        return normalized
+
+
+class AgentInstanceResponse(BaseModel):
+    id: UUID
+    display_name: str
+    definition_id: UUID
+    definition_name: str
+    project_id: UUID | None
+    project_name: str | None
+    archived: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+def _agent_instance_response(instance: AgentInstance) -> AgentInstanceResponse:
+    return AgentInstanceResponse(
+        id=instance.id,
+        display_name=instance.display_name,
+        definition_id=instance.definition_id,
+        definition_name=instance.definition_name,
+        project_id=instance.project_id,
+        project_name=instance.project_name,
+        archived=instance.archived_at is not None,
+        created_at=instance.created_at,
+        updated_at=instance.updated_at,
+    )
+
+
 class AgentDefinitionImport(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -253,6 +441,76 @@ class AgentDefinitionUpdate(BaseModel):
     description: StrictStr | None = Field(default=None, max_length=500)
 
 
+class SkillResourceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: StrictStr = Field(min_length=1, max_length=256)
+    content: StrictStr = Field(max_length=100_000)
+
+
+class SkillWriteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: StrictStr = Field(min_length=1, max_length=120)
+    description: StrictStr = Field(default="", max_length=500)
+    instructions: StrictStr = Field(min_length=1, max_length=1_048_576)
+    dependencies: list[StrictStr] = Field(default_factory=list, max_length=100)
+    resources: list[SkillResourceRequest] = Field(default_factory=list, max_length=10)
+
+
+class SkillPinRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    skill_id: UUID
+    version: int = Field(ge=1)
+
+
+class DefinitionSkillsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    skills: list[SkillPinRequest] = Field(max_length=100)
+
+    @field_validator("skills")
+    @classmethod
+    def require_distinct_skills(cls, value: list[SkillPinRequest]) -> list[SkillPinRequest]:
+        if len({item.skill_id for item in value}) != len(value):
+            raise ValueError("a skill can be pinned only once per definition version")
+        return value
+
+
+class SkillResourceResponse(BaseModel):
+    path: str
+    content: str
+
+
+class SkillResponse(BaseModel):
+    id: UUID
+    version: int
+    name: str
+    description: str
+    instructions: str
+    dependencies: list[str]
+    resources: list[SkillResourceResponse]
+    archived: bool
+    created_at: datetime
+
+
+class SkillSummaryResponse(BaseModel):
+    id: UUID
+    version: int
+    name: str
+    description: str
+    dependencies: list[str]
+    archived: bool
+    created_at: datetime
+
+
+class DefinitionSkillReferenceResponse(BaseModel):
+    skill_id: UUID
+    version: int
+    name: str
+
+
 class AgentDefinitionResponse(BaseModel):
     id: UUID
     version: int
@@ -262,6 +520,7 @@ class AgentDefinitionResponse(BaseModel):
     unmapped_metadata: dict[str, object]
     archived: bool
     created_at: datetime
+    skills: list[DefinitionSkillReferenceResponse] = Field(default_factory=list)
 
 
 class AgentDefinitionSummary(BaseModel):
@@ -294,6 +553,43 @@ def _agent_definition_response(definition: AgentDefinition) -> AgentDefinitionRe
         unmapped_metadata=definition.unmapped_metadata,
         archived=definition.archived_at is not None,
         created_at=definition.created_at,
+        skills=[
+            DefinitionSkillReferenceResponse(
+                skill_id=reference.skill_id,
+                version=reference.version,
+                name=reference.name,
+            )
+            for reference in definition.skills
+        ],
+    )
+
+
+def _skill_summary(skill: SkillSummary) -> SkillSummaryResponse:
+    return SkillSummaryResponse(
+        id=skill.id,
+        version=skill.version,
+        name=skill.name,
+        description=skill.description,
+        dependencies=list(skill.dependencies),
+        archived=skill.archived_at is not None,
+        created_at=skill.created_at,
+    )
+
+
+def _skill_response(skill: Skill) -> SkillResponse:
+    return SkillResponse(
+        id=skill.id,
+        version=skill.version,
+        name=skill.name,
+        description=skill.description,
+        instructions=skill.instructions,
+        dependencies=list(skill.dependencies),
+        resources=[
+            SkillResourceResponse(path=resource.path, content=resource.content)
+            for resource in skill.resources
+        ],
+        archived=skill.archived_at is not None,
+        created_at=skill.created_at,
     )
 
 def _configure_logging(level: str) -> None:
@@ -344,6 +640,9 @@ def create_app(
     database_check: Callable[[], Awaitable[None]] | None = None,
     project_repository: ProjectRepository | None = None,
     agent_registry_repository: AgentRegistryRepository | None = None,
+    skill_repository: SkillRepository | None = None,
+    agent_instance_repository: AgentInstanceRepository | None = None,
+    task_repository: TaskRepository | None = None,
 ) -> FastAPI:
     configured = settings or load_settings()
     _configure_logging(configured.log_level)
@@ -357,15 +656,27 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
-        if project_repository is not None or agent_registry_repository is not None:
+        if (
+            project_repository is not None
+            or agent_registry_repository is not None
+            or skill_repository is not None
+            or agent_instance_repository is not None
+            or task_repository is not None
+        ):
             application.state.project_repository = project_repository
             application.state.agent_registry_repository = agent_registry_repository
+            application.state.skill_repository = skill_repository
+            application.state.agent_instance_repository = agent_instance_repository
+            application.state.task_repository = task_repository
             yield
             return
         dsn = configured.database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
         pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=10)
         application.state.project_repository = PostgresProjectRepository(pool)
         application.state.agent_registry_repository = PostgresAgentRegistryRepository(pool)
+        application.state.skill_repository = PostgresSkillRepository(pool)
+        application.state.agent_instance_repository = PostgresAgentInstanceRepository(pool)
+        application.state.task_repository = PostgresTaskRepository(pool)
         try:
             yield
         finally:
@@ -391,6 +702,28 @@ def create_app(
         if repository is None:
             raise HTTPException(status_code=503, detail="Agent definition storage is not ready")
         return repository
+
+    def require_skill_repository(request: Request) -> SkillRepository:
+        repository = getattr(request.app.state, "skill_repository", None)
+        if repository is None:
+            raise HTTPException(status_code=503, detail="Skill storage is not ready")
+        return repository
+
+    def require_agent_instance_repository(request: Request) -> AgentInstanceRepository:
+        repository = getattr(request.app.state, "agent_instance_repository", None)
+        if repository is None:
+            raise HTTPException(status_code=503, detail="Agent instance storage is not ready")
+        return repository
+
+    def require_task_repository(request: Request) -> TaskRepository:
+        repository = getattr(request.app.state, "task_repository", None)
+        if repository is None:
+            raise HTTPException(status_code=503, detail="Task storage is not ready")
+        return repository
+
+    def optional_agent_instance_repository(request: Request) -> AgentInstanceRepository | None:
+        return getattr(request.app.state, "agent_instance_repository", None)
+
 
     @application.middleware("http")
     async def request_context(request: Request, call_next: Callable[..., Awaitable[Response]]) -> Response:
@@ -508,6 +841,259 @@ def create_app(
             created_at=project.created_at,
         )
 
+    async def validate_task_references(
+        principal: OwnerPrincipal,
+        body: TaskWrite,
+        projects: ProjectRepository,
+        instances: AgentInstanceRepository | None,
+    ) -> None:
+        project = await projects.get_for_owner(principal.owner_id, body.project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        if body.agent_instance_id is not None:
+            if instances is None:
+                raise HTTPException(status_code=503, detail="Agent instance storage is not ready")
+            instance = await instances.get_for_owner(principal.owner_id, body.agent_instance_id)
+            if instance is None or instance.archived_at is not None:
+                raise HTTPException(status_code=404, detail="Resource not found")
+
+    def raise_task_input_error(error: TaskInputError) -> None:
+        if error.reason == "cycle":
+            raise HTTPException(status_code=409, detail="Task dependency would create a cycle") from error
+        raise HTTPException(status_code=404, detail="Resource not found") from error
+
+    @application.post(
+        "/api/v1/tasks",
+        status_code=201,
+        response_model=TaskResponse,
+    )
+    async def create_task(
+        body: TaskWrite,
+        request: Request,
+        principal: OwnerPrincipal = Depends(require_owner),
+        projects: ProjectRepository = Depends(require_project_repository),
+        instances: AgentInstanceRepository | None = Depends(optional_agent_instance_repository),
+        repository: TaskRepository = Depends(require_task_repository),
+    ) -> TaskResponse:
+        require_origin(request.headers.get("origin"))
+        await validate_task_references(principal, body, projects, instances)
+        try:
+            task = await repository.create(principal.owner_id, _task_spec(body))
+        except TaskInputError as error:
+            raise_task_input_error(error)
+        return _task_response(task)
+
+    @application.get("/api/v1/tasks", response_model=list[TaskResponse])
+    async def list_tasks(
+        project_id: UUID | None = None,
+        limit: int = Query(default=100, ge=1, le=200),
+        offset: int = Query(default=0, ge=0, le=1_000_000),
+        principal: OwnerPrincipal = Depends(require_owner),
+        repository: TaskRepository = Depends(require_task_repository),
+    ) -> list[TaskResponse]:
+        tasks = await repository.list_for_owner(
+            principal.owner_id, project_id=project_id, limit=limit, offset=offset
+        )
+        return [_task_response(task) for task in tasks]
+
+    @application.get("/api/v1/tasks/{task_id}", response_model=TaskResponse)
+    async def get_task(
+        task_id: UUID,
+        principal: OwnerPrincipal = Depends(require_owner),
+        repository: TaskRepository = Depends(require_task_repository),
+    ) -> TaskResponse:
+        task = await repository.get_for_owner(principal.owner_id, task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        return _task_response(task)
+
+    @application.put("/api/v1/tasks/{task_id}", response_model=TaskResponse)
+    async def update_task(
+        task_id: UUID,
+        body: TaskWrite,
+        request: Request,
+        principal: OwnerPrincipal = Depends(require_owner),
+        projects: ProjectRepository = Depends(require_project_repository),
+        instances: AgentInstanceRepository | None = Depends(optional_agent_instance_repository),
+        repository: TaskRepository = Depends(require_task_repository),
+    ) -> TaskResponse:
+        require_origin(request.headers.get("origin"))
+        await validate_task_references(principal, body, projects, instances)
+        try:
+            task = await repository.update_for_owner(principal.owner_id, task_id, _task_spec(body))
+        except TaskInputError as error:
+            raise_task_input_error(error)
+        if task is None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        return _task_response(task)
+
+    @application.get(
+        "/api/v1/tasks/{task_id}/revisions",
+        response_model=list[TaskResponse],
+    )
+    async def list_task_revisions(
+        task_id: UUID,
+        limit: int = Query(default=100, ge=1, le=200),
+        offset: int = Query(default=0, ge=0, le=1_000_000),
+        principal: OwnerPrincipal = Depends(require_owner),
+        repository: TaskRepository = Depends(require_task_repository),
+    ) -> list[TaskResponse]:
+        revisions = await repository.list_revisions_for_owner(
+            principal.owner_id, task_id, limit=limit, offset=offset
+        )
+        if revisions is None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        return [_task_response(revision) for revision in revisions]
+
+    @application.post(
+        "/api/v1/agent-instances",
+        status_code=201,
+        response_model=AgentInstanceResponse,
+    )
+    async def create_agent_instance(
+        body: AgentInstanceCreate,
+        request: Request,
+        principal: OwnerPrincipal = Depends(require_owner),
+        project_repository: ProjectRepository = Depends(require_project_repository),
+        definition_repository: AgentRegistryRepository = Depends(require_agent_registry_repository),
+        repository: AgentInstanceRepository = Depends(require_agent_instance_repository),
+    ) -> AgentInstanceResponse:
+        require_origin(request.headers.get("origin"))
+        definition = await definition_repository.get_for_owner(
+            principal.owner_id, body.definition_id
+        )
+        if definition is None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        if definition.archived_at is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="Archived definitions cannot be assigned to new instances",
+            )
+        if body.project_id is not None:
+            project = await project_repository.get_for_owner(
+                principal.owner_id, body.project_id
+            )
+            if project is None:
+                raise HTTPException(status_code=404, detail="Resource not found")
+        try:
+            instance = await repository.create(
+                principal.owner_id,
+                body.display_name,
+                body.definition_id,
+                body.project_id,
+            )
+        except AgentInstanceInputError as error:
+            raise HTTPException(status_code=404, detail="Resource not found") from error
+        return _agent_instance_response(instance)
+
+    @application.get(
+        "/api/v1/agent-instances",
+        response_model=list[AgentInstanceResponse],
+    )
+    async def list_agent_instances(
+        include_archived: bool = False,
+        limit: int = Query(default=100, ge=1, le=200),
+        offset: int = Query(default=0, ge=0, le=1_000_000),
+        project_id: UUID | None = None,
+        principal: OwnerPrincipal = Depends(require_owner),
+        repository: AgentInstanceRepository = Depends(require_agent_instance_repository),
+    ) -> list[AgentInstanceResponse]:
+        instances = await repository.list_for_owner(
+            principal.owner_id,
+            include_archived=include_archived,
+            limit=limit,
+            offset=offset,
+            project_id=project_id,
+        )
+        return [_agent_instance_response(instance) for instance in instances]
+
+    @application.get(
+        "/api/v1/agent-instances/{instance_id}",
+        response_model=AgentInstanceResponse,
+    )
+    async def get_agent_instance(
+        instance_id: UUID,
+        principal: OwnerPrincipal = Depends(require_owner),
+        repository: AgentInstanceRepository = Depends(require_agent_instance_repository),
+    ) -> AgentInstanceResponse:
+        instance = await repository.get_for_owner(principal.owner_id, instance_id)
+        if instance is None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        return _agent_instance_response(instance)
+
+    @application.put(
+        "/api/v1/agent-instances/{instance_id}",
+        response_model=AgentInstanceResponse,
+    )
+    async def update_agent_instance(
+        instance_id: UUID,
+        body: AgentInstanceUpdate,
+        request: Request,
+        principal: OwnerPrincipal = Depends(require_owner),
+        project_repository: ProjectRepository = Depends(require_project_repository),
+        definition_repository: AgentRegistryRepository = Depends(require_agent_registry_repository),
+        repository: AgentInstanceRepository = Depends(require_agent_instance_repository),
+    ) -> AgentInstanceResponse:
+        require_origin(request.headers.get("origin"))
+        if not body.model_fields_set:
+            raise HTTPException(status_code=422, detail="At least one instance field is required")
+        if any(
+            getattr(body, field) is None
+            for field in body.model_fields_set
+            if field != "project_id"
+        ):
+            raise HTTPException(status_code=422, detail="Instance fields cannot be null")
+        current = await repository.get_for_owner(principal.owner_id, instance_id)
+        if current is None or current.archived_at is not None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        if (
+            "definition_id" in body.model_fields_set
+            and body.definition_id != current.definition_id
+        ):
+            definition = await definition_repository.get_for_owner(
+                principal.owner_id, body.definition_id  # type: ignore[arg-type]
+            )
+            if definition is None:
+                raise HTTPException(status_code=404, detail="Resource not found")
+            if definition.archived_at is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Archived definitions cannot be assigned to instances",
+                )
+        if body.project_id is not None:
+            project = await project_repository.get_for_owner(
+                principal.owner_id, body.project_id
+            )
+            if project is None:
+                raise HTTPException(status_code=404, detail="Resource not found")
+        try:
+            instance = await repository.update_for_owner(
+                principal.owner_id,
+                instance_id,
+                body.model_dump(exclude_unset=True),
+            )
+        except AgentInstanceInputError as error:
+            raise HTTPException(status_code=404, detail="Resource not found") from error
+        if instance is None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        return _agent_instance_response(instance)
+
+    @application.post(
+        "/api/v1/agent-instances/{instance_id}/archive",
+        response_model=AgentInstanceResponse,
+    )
+    async def archive_agent_instance(
+        instance_id: UUID,
+        request: Request,
+        principal: OwnerPrincipal = Depends(require_owner),
+        repository: AgentInstanceRepository = Depends(require_agent_instance_repository),
+    ) -> AgentInstanceResponse:
+        require_origin(request.headers.get("origin"))
+        instance = await repository.archive_for_owner(principal.owner_id, instance_id)
+        if instance is None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        return _agent_instance_response(instance)
+
     @application.post(
         "/api/v1/agent-definitions/import",
         status_code=201,
@@ -521,7 +1107,8 @@ def create_app(
     ) -> AgentDefinitionResponse:
         require_origin(request.headers.get("origin"))
         try:
-            name, description, unmapped = parse_agent_markdown(
+            name, description, unmapped = await run_in_threadpool(
+                parse_agent_markdown,
                 body.source_markdown,
                 name=body.name,
                 description=body.description,
@@ -615,7 +1202,8 @@ def create_app(
         changes: dict[str, object] = {}
         if "source_markdown" in body.model_fields_set:
             try:
-                name, description, unmapped = parse_agent_markdown(
+                name, description, unmapped = await run_in_threadpool(
+                    parse_agent_markdown,
                     body.source_markdown or "",
                     name=body.name,
                     description=body.description,
@@ -666,6 +1254,153 @@ def create_app(
         if definition is None:
             raise HTTPException(status_code=404, detail="Resource not found")
         return _agent_definition_response(definition)
+
+    @application.put(
+        "/api/v1/agent-definitions/{definition_id}/skills",
+        response_model=AgentDefinitionResponse,
+    )
+    async def set_agent_definition_skills(
+        definition_id: UUID,
+        body: DefinitionSkillsRequest,
+        request: Request,
+        principal: OwnerPrincipal = Depends(require_owner),
+        repository: AgentRegistryRepository = Depends(require_agent_registry_repository),
+    ) -> AgentDefinitionResponse:
+        require_origin(request.headers.get("origin"))
+        try:
+            definition = await repository.set_skills_for_owner(
+                principal.owner_id,
+                definition_id,
+                [SkillPin(item.skill_id, item.version) for item in body.skills],
+            )
+        except AgentDefinitionInputError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        if definition is None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        return _agent_definition_response(definition)
+
+    @application.post(
+        "/api/v1/skills/import",
+        status_code=201,
+        response_model=SkillResponse,
+    )
+    async def import_skill(
+        body: SkillWriteRequest,
+        request: Request,
+        principal: OwnerPrincipal = Depends(require_owner),
+        repository: SkillRepository = Depends(require_skill_repository),
+    ) -> SkillResponse:
+        require_origin(request.headers.get("origin"))
+        try:
+            content = await run_in_threadpool(
+                normalize_skill_content,
+                body.name,
+                body.description,
+                body.instructions,
+                body.dependencies,
+                [resource.model_dump() for resource in body.resources],
+            )
+            skill = await repository.create(principal.owner_id, content)
+        except SkillInputError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except asyncpg.UniqueViolationError as error:
+            raise HTTPException(status_code=409, detail="A skill with this name already exists") from error
+        return _skill_response(skill)
+
+    @application.get(
+        "/api/v1/skills",
+        response_model=list[SkillSummaryResponse],
+    )
+    async def list_skills(
+        include_archived: bool = False,
+        limit: int = Query(default=100, ge=1, le=200),
+        offset: int = Query(default=0, ge=0, le=1_000_000),
+        principal: OwnerPrincipal = Depends(require_owner),
+        repository: SkillRepository = Depends(require_skill_repository),
+    ) -> list[SkillSummaryResponse]:
+        skills = await repository.list_for_owner(
+            principal.owner_id,
+            include_archived=include_archived,
+            limit=limit,
+            offset=offset,
+        )
+        return [_skill_summary(skill) for skill in skills]
+
+    @application.get("/api/v1/skills/{skill_id}/export")
+    async def export_skill(
+        skill_id: UUID,
+        version: int | None = Query(default=None, ge=1),
+        principal: OwnerPrincipal = Depends(require_owner),
+        repository: SkillRepository = Depends(require_skill_repository),
+    ) -> JSONResponse:
+        skill = await repository.get_for_owner(principal.owner_id, skill_id, version=version)
+        if skill is None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        return JSONResponse(
+            content=_skill_response(skill).model_dump(mode="json"),
+            headers={"Content-Disposition": 'attachment; filename="skill.json"'},
+        )
+
+    @application.get(
+        "/api/v1/skills/{skill_id}",
+        response_model=SkillResponse,
+    )
+    async def get_skill(
+        skill_id: UUID,
+        version: int | None = Query(default=None, ge=1),
+        principal: OwnerPrincipal = Depends(require_owner),
+        repository: SkillRepository = Depends(require_skill_repository),
+    ) -> SkillResponse:
+        skill = await repository.get_for_owner(principal.owner_id, skill_id, version=version)
+        if skill is None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        return _skill_response(skill)
+
+    @application.put(
+        "/api/v1/skills/{skill_id}",
+        response_model=SkillResponse,
+    )
+    async def update_skill(
+        skill_id: UUID,
+        body: SkillWriteRequest,
+        request: Request,
+        principal: OwnerPrincipal = Depends(require_owner),
+        repository: SkillRepository = Depends(require_skill_repository),
+    ) -> SkillResponse:
+        require_origin(request.headers.get("origin"))
+        try:
+            content = await run_in_threadpool(
+                normalize_skill_content,
+                body.name,
+                body.description,
+                body.instructions,
+                body.dependencies,
+                [resource.model_dump() for resource in body.resources],
+            )
+            skill = await repository.update_for_owner(principal.owner_id, skill_id, content)
+        except SkillInputError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except asyncpg.UniqueViolationError as error:
+            raise HTTPException(status_code=409, detail="A skill with this name already exists") from error
+        if skill is None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        return _skill_response(skill)
+
+    @application.post(
+        "/api/v1/skills/{skill_id}/archive",
+        response_model=SkillResponse,
+    )
+    async def archive_skill(
+        skill_id: UUID,
+        request: Request,
+        principal: OwnerPrincipal = Depends(require_owner),
+        repository: SkillRepository = Depends(require_skill_repository),
+    ) -> SkillResponse:
+        require_origin(request.headers.get("origin"))
+        skill = await repository.archive_for_owner(principal.owner_id, skill_id)
+        if skill is None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        return _skill_response(skill)
 
     @application.post("/api/v1/auth/login")
     async def login(body: LoginRequest, request: Request, response: Response) -> dict[str, str]:

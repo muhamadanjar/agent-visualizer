@@ -111,6 +111,9 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
   }
   if (!owner) return <main className="workspace-gate" role="status">Mengarahkan ke halaman masuk…</main>;
   const isProjectPath = pathname === "/projects" || pathname.startsWith("/projects/");
+  const isTaskPath = pathname === "/tasks" || pathname.startsWith("/tasks/");
+  const isApiDataPath = isProjectPath || isTaskPath;
+  const dataLabel = isProjectPath ? "Projects · API data" : isTaskPath ? "Tasks · API data" : "Sample data · UI preview";
 
   return (
     <div className="workspace-frame">
@@ -133,7 +136,7 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
           })}
         </nav>
         <div className="sidebar-bottom">
-          <div className="sample-legend"><span className="sample-dot" />{isProjectPath ? "Projects · API data" : "Sample data · UI preview"}</div>
+          <div className="sample-legend"><span className={isApiDataPath ? "context-indicator" : "sample-dot"} />{dataLabel}</div>
           <div className="owner-card">
             <span className="owner-avatar" aria-hidden="true">{owner.username.slice(0, 1).toUpperCase()}</span>
             <span className="owner-name"><strong>{owner.username}</strong><small>Owner</small></span>
@@ -149,7 +152,7 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
         <header className="workspace-topbar">
           <div className="mobile-brand"><span className="brand-mark" aria-hidden="true">AO</span><strong>Agent Office</strong></div>
           <div className="topbar-context"><span className="context-indicator" />Private workspace</div>
-          <div className="topbar-right"><span className="sample-badge">{isProjectPath ? "API project data" : "Sample data"}</span><span className="topbar-owner">{owner.username}</span></div>
+          <div className="topbar-right"><span className="sample-badge">{isApiDataPath ? "API-backed records" : "Sample data"}</span><span className="topbar-owner">{owner.username}</span></div>
         </header>
         <nav className="mobile-nav" aria-label="Workspace navigation">
           {navigation.filter((item) => item.label !== "Settings").map((item) => {

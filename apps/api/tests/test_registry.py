@@ -82,9 +82,11 @@ def test_imported_definition_keeps_source_and_immutable_versions() -> None:
         assert original["version"] == 1
         assert original["source_markdown"] == source
         assert original["unmapped_metadata"] == {"custom": {"domain": "office"}}
+        assert "owner_id" not in original
         summaries = client.get("/api/v1/agent-definitions").json()
         assert len(summaries) == 1
         assert "source_markdown" not in summaries[0]
+        assert "owner_id" not in summaries[0]
 
         definition_id = original["id"]
         revised = client.put(
@@ -162,6 +164,41 @@ def test_front_matter_uses_safe_yaml_and_rejects_cross_owner_access(tmp_path: Pa
         )
     ) as client:
         assert login(client).status_code == 200
+        valid_source = "---\nname: Stable definition\n---\nBody\n"
+        baseline = client.post(
+            "/api/v1/agent-definitions/import",
+            json={"source_markdown": valid_source},
+            headers={"origin": ORIGIN},
+        )
+        assert baseline.status_code == 201
+        definition_id = baseline.json()["id"]
+        malformed_scalars = (
+            "---\nname: Invalid date\nwhen: 2026-13-01\n---\nBody\n",
+            "---\nname: Invalid timestamp\nwhen: !!timestamp invalid\n---\nBody\n",
+            "---\nname: Invalid boolean\nextra: !!bool invalid\n---\nBody\n",
+            '---\nname: Invalid integer\nextra: !!int ""\n---\nBody\n',
+            '---\nname: Invalid float\nextra: !!float ""\n---\nBody\n',
+            "---\nname: Overflow\nextra: !!float \"" + "1:" * 200 + "1\"\n---\nBody\n",
+        )
+        for source in malformed_scalars:
+            imported = client.post(
+                "/api/v1/agent-definitions/import",
+                json={"source_markdown": source},
+                headers={"origin": ORIGIN},
+            )
+            updated = client.put(
+                f"/api/v1/agent-definitions/{definition_id}",
+                json={"source_markdown": source},
+                headers={"origin": ORIGIN},
+            )
+            assert imported.status_code == 422
+            assert updated.status_code == 422
+        unchanged = client.get(f"/api/v1/agent-definitions/{definition_id}?version=1")
+        stored_versions = registry.versions[UUID(definition_id)]
+        assert unchanged.json()["source_markdown"] == valid_source
+        assert len(stored_versions) == 1
+        assert stored_versions[0].version == 1
+        assert stored_versions[0].source_markdown == valid_source
         foreign_id = uuid4()
         registry.versions[foreign_id] = [
             AgentDefinition(
@@ -187,12 +224,29 @@ def test_front_matter_uses_safe_yaml_and_rejects_cross_owner_access(tmp_path: Pa
         )
         assert hostile.status_code == 422
         assert not marker.exists()
-        aliases = "\n".join(f"alias_{index}: *source" for index in range(51))
-        too_many_aliases = client.post(
+        alias = client.post(
             "/api/v1/agent-definitions/import",
             json={
-                "source_markdown": f"---\nname: Aliases\nsource: &source [safe]\n{aliases}\n---\nBody\n"
+                "source_markdown": "---\nname: Aliases\nsource: &source [safe]\ncopy: *source\n---\nBody\n"
             },
             headers={"origin": ORIGIN},
         )
-        assert too_many_aliases.status_code == 422
+        assert alias.status_code == 422
+        nested_value = "[" * 65 + "0" + "]" * 65
+        too_deep = client.post(
+            "/api/v1/agent-definitions/import",
+            json={
+                "source_markdown": f"---\nname: Nested\nmetadata: {nested_value}\n---\nBody\n"
+            },
+            headers={"origin": ORIGIN},
+        )
+        assert too_deep.status_code == 422
+        wide_front_matter = "\n".join(f"key_{index}: value" for index in range(10_000))
+        too_many_nodes = client.post(
+            "/api/v1/agent-definitions/import",
+            json={
+                "source_markdown": f"---\nname: Wide\n{wide_front_matter}\n---\nBody\n"
+            },
+            headers={"origin": ORIGIN},
+        )
+        assert too_many_nodes.status_code == 422
