@@ -10,7 +10,7 @@
 
 This roadmap translates the P0 requirements and delivery stages in the PRD into implementation phases. It is not an implementation claim. A phase is **Not started** until work begins, **In progress** while its deliverables are being produced, **Blocked** when an explicit dependency prevents progress, and **Complete** only when its exit criteria have evidence recorded in `progress.md`.
 
-No calendar estimates are assigned. Phase 1/M0 remains in progress; Phase 2 is complete with its exit-criteria evidence recorded in `progress.md`. Phase 3 now persists owner-scoped projects, versioned definitions, text Skills with pinned references, and agent instances with optional project context through API-backed workflows. Task/run/event persistence, provider configuration/capability evidence, skill compatibility/preflight, run snapshots, and remaining Phase 3 exit criteria remain open. UI previews in later areas are not operational evidence. The isolated M0 runtime and 3D spikes remain feasibility evidence, not operational application behavior.
+No calendar estimates are assigned. Phase 1/M0 remains in progress; Phase 2 is complete with its exit-criteria evidence recorded in `progress.md`. Phase 3 now persists owner-scoped projects, versioned definitions, text Skills with pinned references, agent instances, Task revisions, and bounded canonical Run/Attempt creation records with frozen snapshots of available inputs. Durable events, provider configuration/capability evidence, skill compatibility/preflight, runtime execution, and remaining Phase 3 exit criteria remain open. UI previews in later areas are not operational evidence. The isolated M0 runtime and 3D spikes remain feasibility evidence, not operational application behavior.
 
 ## Confirmed planning baseline
 
@@ -92,7 +92,7 @@ The following choices were confirmed in the planning conversation:
 
 ## Phase 3 — Canonical domain, configuration, and persistence
 
-**Status: In progress — projects, versioned definitions, text Skills and pinned references, owner-scoped agent instances, and a canonical persisted Backlog Task slice are implemented.** Task create/list/detail/update/revision-history APIs and board/detail/edit views are verified; Tasks use immutable revisions and same-owner dependencies. Run/Attempt records, dispatch, runtime state, event persistence, provider configuration/capability evidence, skill compatibility/preflight, run snapshots, and remaining Phase 3 exit criteria remain open.
+**Status: In progress — projects, versioned definitions, text Skills and pinned references, owner-scoped agent instances, persisted Backlog Tasks, and bounded Run/Attempt persistence are implemented.** Owner-scoped Run creation/list/detail, request idempotency, attempt numbering, and immutable snapshots of the Task revision, Agent Instance, exact Definition Version, and pinned Skill Versions have PostgreSQL/API evidence. Runs remain `created`; there is no dispatch or execution. Durable events, provider configuration/capability evidence, skill compatibility/preflight, runtime state, and remaining Phase 3 exit criteria remain open.
 
 ### Work
 - Implement versioned agent definitions and skills, links, import/export, archive, and configuration snapshots.
@@ -106,13 +106,13 @@ The following choices were confirmed in the planning conversation:
 
 ### Exit criteria
 - PRD AC-01–05, AC-22, and persistence portions of AC-19 pass with evidence.
-- Definition/skill edits and changed pin sets append immutable versions. The task-persistence portion of AC-19 is verified; run retention remains open until canonical Runs / Attempts preserve their effective configuration snapshots.
+- Definition/skill edits and changed pin sets append immutable versions. Task persistence and Run creation-snapshot persistence portions of AC-19 have PostgreSQL evidence; run retention/restart and acknowledged event persistence/reconciliation remain open.
 - Archived definitions remain historically inspectable and do not start new runs.
 - PRD FR-19 configuration and persistence portions pass; run snapshots identify the chosen endpoint/model/version and contain no secret values. Provider execution and egress acceptance remain in Phase 6.
 
 ## Phase 4 — Durable event pipeline and work views
 
-**Status: In progress — Task Board now displays API-backed persisted Backlog tasks; Run Detail and Inbox remain sample-data UI views. Durable event ingestion, projections, acknowledgements, WebSocket freshness, reconciliation, and event-driven Run views remain unimplemented and depend on Phase 3 contracts.**
+**Status: In progress — user-authorized UI-first web work covers persisted Task and Run / Attempt creation records; the operational event pipeline remains unimplemented. The six-stage Task Board displays only API-backed Backlog tasks, the Runs index lazily loads attempts per Task, and Run Detail reads the immutable creation snapshot. Sample Run timelines and the typed Inbox remain preview-only. Durable ingestion, acknowledgements, projections, WebSocket freshness, and reconciliation remain open and depend on Phase 3 contracts.**
 
 ### Work
 - Implement event ingestion, source/scope validation, deduplication, durable acknowledgement, cursor/snapshot handling, and event projections.
@@ -128,7 +128,7 @@ The following choices were confirmed in the planning conversation:
 
 ## Phase 5 — Explorable 3D office
 
-**Status: In progress — a presentation-only low-poly office, local owner avatar, sample-agent avatars, movement, camera, minimap, object focus, accessibility path, and WebGL fallback are implemented. Runtime-derived state, versioned layouts, connected events, and the full AC-23–31 verification remain open; this is not the operational runtime office.**
+**Status: In progress — the presentation-only low-poly office now includes local sample layout versions, browser-local avatar-position restoration with safe-spawn fallback, route recalculation after layout changes, and an accessible retryable WebGL failure view. Server-backed scene versions, runtime-derived state, connected events, and full AC-23–31 verification remain open; this is not the operational runtime office.**
 
 ### Work
 - Implement versioned template scene, player avatar, walkable grid, colliders, camera controls, and safe spawn points.
@@ -213,7 +213,7 @@ Candidate work: additional Runtime Adapters (including Codex app-server or ACP-c
 
 ## User-directed UI-first sequence
 
-On 2026-10-23, the user authorized prioritizing the application UI while Phase 1 remains open. Phase 2 was completed first; the user then directed work to continue with Phase 3. The earlier UI-first sequence remains applicable to P0 preview work in Phases 3–8, but the current Phase 3 work includes operational persistence where the roadmap requires it. Presentation-only work does not close operational exit criteria.
+On 2026-10-23, the user authorized prioritizing the application UI while Phase 1 remains open. Phase 2 was completed first; the user then directed work to continue with Phase 3. On 2026-10-25 the user explicitly authorized completing the web UI while Phase 3 remains open; this is a UI-only sequencing override, not a waiver of Phase 3, Phase 1, or runtime safety gates. The earlier UI-first sequence remains applicable to P0 preview work in Phases 3–8, but the current Phase 3 work includes operational persistence where the roadmap requires it. Presentation-only work does not close operational exit criteria.
 
 The agreed UI contract:
 - After login, the 3D office is the desktop home; Agent List, Task Board, Run Detail, Inbox, and Settings stay one click away.
@@ -224,4 +224,4 @@ The agreed UI contract:
 
 Phase 2 is complete. Phase 1 remains in progress and its runtime safety gates are not waived. Phase 3 is in progress; Phases 4–8 operational acceptance criteria remain open.
 
-UI-only areas still use deterministic local fixtures labeled “Sample” and keep unsupported actions disabled. Project and agent-definition views are now API-backed; sample run/status data does not become canonical work state.
+UI-only areas still use deterministic local fixtures labeled “Sample” and keep unsupported actions disabled. Project, definition, Skill, Agent Instance, Task, and bounded Run / Attempt creation views use owner-scoped APIs; Run records remain `created`, and sample status/timeline data does not become canonical runtime state.

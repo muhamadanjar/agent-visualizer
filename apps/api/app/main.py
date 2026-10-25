@@ -53,6 +53,7 @@ from app.tasks import (
     TaskRepository,
     TaskSpec,
 )
+from app.runs import PostgresRunRepository, Run, RunInputError, RunRepository
 from app.registry import (
     AgentDefinition,
     AgentDefinitionInputError,
@@ -325,6 +326,36 @@ class TaskResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     revision_created_at: datetime
+
+
+class RunCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: UUID
+
+
+class RunResponse(BaseModel):
+    id: UUID
+    task_id: UUID
+    task_revision: int
+    attempt_number: int
+    request_id: UUID
+    status: str
+    configuration_snapshot: dict[str, object]
+    created_at: datetime
+
+
+def _run_response(run: Run) -> RunResponse:
+    return RunResponse(
+        id=run.id,
+        task_id=run.task_id,
+        task_revision=run.task_revision,
+        attempt_number=run.attempt_number,
+        request_id=run.request_id,
+        status=run.status,
+        configuration_snapshot=run.configuration_snapshot,
+        created_at=run.created_at,
+    )
 
 
 def _task_spec(body: TaskWrite) -> TaskSpec:
@@ -643,6 +674,7 @@ def create_app(
     skill_repository: SkillRepository | None = None,
     agent_instance_repository: AgentInstanceRepository | None = None,
     task_repository: TaskRepository | None = None,
+    run_repository: RunRepository | None = None,
 ) -> FastAPI:
     configured = settings or load_settings()
     _configure_logging(configured.log_level)
@@ -662,12 +694,14 @@ def create_app(
             or skill_repository is not None
             or agent_instance_repository is not None
             or task_repository is not None
+            or run_repository is not None
         ):
             application.state.project_repository = project_repository
             application.state.agent_registry_repository = agent_registry_repository
             application.state.skill_repository = skill_repository
             application.state.agent_instance_repository = agent_instance_repository
             application.state.task_repository = task_repository
+            application.state.run_repository = run_repository
             yield
             return
         dsn = configured.database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
@@ -677,6 +711,7 @@ def create_app(
         application.state.skill_repository = PostgresSkillRepository(pool)
         application.state.agent_instance_repository = PostgresAgentInstanceRepository(pool)
         application.state.task_repository = PostgresTaskRepository(pool)
+        application.state.run_repository = PostgresRunRepository(pool)
         try:
             yield
         finally:
@@ -719,6 +754,12 @@ def create_app(
         repository = getattr(request.app.state, "task_repository", None)
         if repository is None:
             raise HTTPException(status_code=503, detail="Task storage is not ready")
+        return repository
+
+    def require_run_repository(request: Request) -> RunRepository:
+        repository = getattr(request.app.state, "run_repository", None)
+        if repository is None:
+            raise HTTPException(status_code=503, detail="Run storage is not ready")
         return repository
 
     def optional_agent_instance_repository(request: Request) -> AgentInstanceRepository | None:
@@ -944,6 +985,74 @@ def create_app(
         if revisions is None:
             raise HTTPException(status_code=404, detail="Resource not found")
         return [_task_response(revision) for revision in revisions]
+
+    @application.post(
+        "/api/v1/tasks/{task_id}/runs",
+        status_code=201,
+        response_model=RunResponse,
+    )
+    async def create_run(
+        task_id: UUID,
+        body: RunCreate,
+        request: Request,
+        response: Response,
+        principal: OwnerPrincipal = Depends(require_owner),
+        repository: RunRepository = Depends(require_run_repository),
+    ) -> RunResponse:
+        require_origin(request.headers.get("origin"))
+        try:
+            run, created = await repository.create_for_task(
+                principal.owner_id, task_id, body.request_id
+            )
+        except RunInputError as error:
+            if error.reason == "task":
+                raise HTTPException(status_code=404, detail="Resource not found") from error
+            if error.reason == "assignment":
+                raise HTTPException(
+                    status_code=409,
+                    detail="Task needs an active assigned agent instance before a run can be recorded",
+                ) from error
+            if error.reason == "skill":
+                raise HTTPException(
+                    status_code=409,
+                    detail="A pinned skill is unavailable for a new run",
+                ) from error
+            raise HTTPException(
+                status_code=409,
+                detail="Request ID was already used for a different task",
+            ) from error
+        if not created:
+            response.status_code = 200
+        return _run_response(run)
+
+    @application.get(
+        "/api/v1/tasks/{task_id}/runs",
+        response_model=list[RunResponse],
+    )
+    async def list_task_runs(
+        task_id: UUID,
+        limit: int = Query(default=100, ge=1, le=200),
+        offset: int = Query(default=0, ge=0, le=1_000_000),
+        principal: OwnerPrincipal = Depends(require_owner),
+        repository: RunRepository = Depends(require_run_repository),
+    ) -> list[RunResponse]:
+        runs = await repository.list_for_task(
+            principal.owner_id, task_id, limit=limit, offset=offset
+        )
+        if runs is None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        return [_run_response(run) for run in runs]
+
+    @application.get("/api/v1/runs/{run_id}", response_model=RunResponse)
+    async def get_run(
+        run_id: UUID,
+        principal: OwnerPrincipal = Depends(require_owner),
+        repository: RunRepository = Depends(require_run_repository),
+    ) -> RunResponse:
+        run = await repository.get_for_owner(principal.owner_id, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        return _run_response(run)
 
     @application.post(
         "/api/v1/agent-instances",

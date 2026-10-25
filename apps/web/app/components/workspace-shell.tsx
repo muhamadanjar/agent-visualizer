@@ -7,14 +7,13 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 type Owner = { username: string };
 type SessionState = "checking" | "ready" | "error";
 const navigation = [
-
   { href: "/office", label: "Office", hint: "O" },
   { href: "/projects", label: "Projects", hint: "P" },
   { href: "/agents", label: "Agents", hint: "A" },
   { href: "/agents/definitions", label: "Definitions", hint: "D" },
   { href: "/skills", label: "Skills", hint: "K" },
   { href: "/tasks", label: "Tasks", hint: "T" },
-  { href: "/runs/run-sample-research", label: "Run detail", hint: "R" },
+  { href: "/runs", label: "Runs", hint: "R" },
   { href: "/inbox", label: "Inbox", hint: "I" },
   { href: "/delegations", label: "Delegations", hint: "G" },
   { href: "/connections", label: "Connections", hint: "C" },
@@ -24,7 +23,7 @@ const navigation = [
   { href: "/settings", label: "Settings", hint: "S" },
 ];
 function isNavigationActive(pathname: string, href: string) {
-  if (href === "/runs/run-sample-research") return pathname.startsWith("/runs/");
+  if (href === "/runs") return pathname === href || pathname.startsWith(`${href}/`);
   if (href === "/agents") return pathname === href || (pathname.startsWith("/agents/") && !pathname.startsWith("/agents/definitions"));
   return pathname === href || pathname.startsWith(`${href}/`);
 }
@@ -111,9 +110,13 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
   }
   if (!owner) return <main className="workspace-gate" role="status">Mengarahkan ke halaman masuk…</main>;
   const isProjectPath = pathname === "/projects" || pathname.startsWith("/projects/");
+  const isAgentPath = pathname === "/agents" || pathname.startsWith("/agents/");
+  const isSkillPath = pathname === "/skills" || pathname.startsWith("/skills/");
   const isTaskPath = pathname === "/tasks" || pathname.startsWith("/tasks/");
-  const isApiDataPath = isProjectPath || isTaskPath;
-  const dataLabel = isProjectPath ? "Projects · API data" : isTaskPath ? "Tasks · API data" : "Sample data · UI preview";
+  const isSampleRunPath = pathname.startsWith("/runs/run-sample-");
+  const isRunPath = (pathname === "/runs" || pathname.startsWith("/runs/")) && !isSampleRunPath;
+  const isApiDataPath = isProjectPath || isAgentPath || isSkillPath || isTaskPath || isRunPath;
+  const dataLabel = isApiDataPath ? "API-backed records" : "Sample preview · no live work";
 
   return (
     <div className="workspace-frame">
@@ -152,15 +155,18 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
         <header className="workspace-topbar">
           <div className="mobile-brand"><span className="brand-mark" aria-hidden="true">AO</span><strong>Agent Office</strong></div>
           <div className="topbar-context"><span className="context-indicator" />Private workspace</div>
-          <div className="topbar-right"><span className="sample-badge">{isApiDataPath ? "API-backed records" : "Sample data"}</span><span className="topbar-owner">{owner.username}</span></div>
+          <div className="topbar-right"><span className={`sample-badge${isApiDataPath ? " is-api" : " is-sample"}`}>{isApiDataPath ? "API-backed records" : "Sample preview"}</span><span className="topbar-owner">{owner.username}</span><button className="quiet-button topbar-logout" type="button" onClick={() => void handleLogout()} disabled={loggingOut} aria-label={`Keluar dari akun ${owner.username}`}>{loggingOut ? "…" : "Keluar"}</button></div>
         </header>
-        <nav className="mobile-nav" aria-label="Workspace navigation">
-          {navigation.filter((item) => item.label !== "Settings").map((item) => {
-            const active = isNavigationActive(pathname, item.href);
-            return <Link key={item.href} className={active ? "mobile-nav-link is-active" : "mobile-nav-link"} href={item.href} aria-current={active ? "page" : undefined}>{item.label}</Link>;
-          })}
-          <Link className="mobile-nav-link" href="/settings">Settings</Link>
-        </nav>
+        {logoutError ? <p className="inline-error topbar-logout-error" role="alert">{logoutError}</p> : null}
+        <details className="mobile-navigation" onClick={(event) => { if ((event.target as HTMLElement).closest("a")) event.currentTarget.open = false; }}>
+          <summary><span>Browse workspace</span><span aria-hidden="true">⌄</span></summary>
+          <nav className="mobile-nav" aria-label="Workspace navigation">
+            {navigation.map((item) => {
+              const active = isNavigationActive(pathname, item.href);
+              return <Link key={item.href} className={active ? "mobile-nav-link is-active" : "mobile-nav-link"} href={item.href} aria-current={active ? "page" : undefined}>{item.label}</Link>;
+            })}
+          </nav>
+        </details>
         <main className="workspace-content" id="workspace-content" tabIndex={-1}>{children}</main>
       </div>
     </div>

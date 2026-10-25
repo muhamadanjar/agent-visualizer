@@ -6,6 +6,7 @@ import { requestTaskData, requestTasks, type Task } from "../lib/tasks";
 import { StatusPill } from "./workspace-components";
 
 const PAGE_SIZE = 100;
+const taskStages = ["Backlog", "Ready", "In progress", "Blocked/Waiting", "In review", "Accepted"] as const;
 
 export function TaskBoard() {
   const [tasks, setTasks] = useState<Task[] | null>(null);
@@ -69,8 +70,8 @@ export function TaskBoard() {
   return (
     <section className="content-section" aria-label="Persisted task board">
       <div className="section-heading">
-        <h2>Backlog</h2>
-        <StatusPill>Task stage</StatusPill>
+        <h2>Task stages</h2>
+        <StatusPill>Persisted stage</StatusPill>
       </div>
       <div className="list-toolbar board-toolbar">
         <label className="search-field">
@@ -95,36 +96,44 @@ export function TaskBoard() {
       </div>
       {error ? <p className="inline-error" role="alert">{error}</p> : null}
       {tasks === null && !error ? <p className="muted" role="status">Loading tasks…</p> : null}
-      {tasks?.length === 0 ? (
-        <div className="empty-state">
-          <strong>No tasks yet</strong>
-          <span>Create a task to add real persisted work to the Backlog.</span>
-          <Link className="text-link" href="/tasks/new">Create task</Link>
-        </div>
-      ) : null}
-      {tasks && tasks.length > 0 && filteredTasks.length === 0 ? (
-        <p className="muted">No tasks match the current filters.</p>
-      ) : null}
-      {filteredTasks.length > 0 ? (
-        <div className="board-scroll">
-          <div className="task-board">
-            <section className="task-column" aria-label={`Backlog, ${filteredTasks.length} tasks`}>
-              <header className="task-column-heading"><h3>Backlog</h3><span>{filteredTasks.length}</span></header>
-              {filteredTasks.map((task) => (
-                <article className="task-card" key={task.id}>
-                  <div className="task-card-top"><StatusPill>Revision {task.revision}</StatusPill><span className="task-project">{task.project_name}</span></div>
-                  <h3><Link className="task-title-link" href={`/tasks/${task.id}`}>{task.title}</Link></h3>
-                  <p className="task-owner">{task.agent_instance_name ?? "Unassigned · assignment is explicit"}</p>
-                  <p className="task-updated">Updated {new Date(task.updated_at).toLocaleString()}</p>
-                  <div className="task-card-actions"><Link className="text-link" href={`/tasks/${task.id}`}>Open task</Link></div>
-                </article>
-              ))}
-            </section>
+      {tasks !== null && !error ? (
+        <>
+          {tasks.length > 0 && filteredTasks.length === 0 ? <p className="muted" role="status">No tasks match the current filters.</p> : null}
+          <div className="board-scroll" role="region" aria-label="Task stages, scroll horizontally to inspect all six columns" tabIndex={0}>
+            <div className="task-board">
+              {taskStages.map((stage) => {
+                const stageTasks = stage === "Backlog" ? filteredTasks : [];
+                const emptyMessage = stage === "Backlog"
+                  ? tasks.length === 0 ? "No tasks yet" : filteredTasks.length === 0 ? "No matching tasks" : null
+                  : "Workflow transitions are not implemented";
+                return (
+                  <section className="task-column" key={stage} aria-label={`${stage}, ${stageTasks.length} tasks`}>
+                    <header className="task-column-heading"><h3>{stage}</h3><span>{stageTasks.length}</span></header>
+                    {stageTasks.map((task) => (
+                      <article className="task-card" key={task.id}>
+                        <div className="task-card-top"><StatusPill>Revision {task.revision}</StatusPill><span className="task-project">{task.project_name}</span></div>
+                        <h3><Link className="task-title-link" href={`/tasks/${task.id}`}>{task.title}</Link></h3>
+                        <p className="task-owner">{task.agent_instance_name ?? "Unassigned · assignment is explicit"}</p>
+                        <p className="task-updated">Updated {new Date(task.updated_at).toLocaleString()}</p>
+                        <div className="task-card-actions"><Link className="text-link" href={`/tasks/${task.id}`}>Open task</Link></div>
+                      </article>
+                    ))}
+                    {!stageTasks.length ? (
+                      <div className="task-column-empty">
+                        <strong>{emptyMessage ?? "No tasks in this stage"}</strong>
+                        <span>{stage === "Backlog" && tasks.length === 0 ? "Persisted task specifications appear here." : stage === "Backlog" ? "Change the search or filters to view saved tasks." : "Tasks currently remain in Backlog; no stage transitions or work execution are available."}</span>
+                        {stage === "Backlog" && tasks.length === 0 ? <Link className="text-link" href="/tasks/new">Create task</Link> : null}
+                      </div>
+                    ) : null}
+                  </section>
+                );
+              })}
+            </div>
           </div>
-        </div>
+        </>
       ) : null}
       {hasMore ? <button className="button button-secondary" type="button" onClick={() => void loadMore()} disabled={loadingMore}>{loadingMore ? "Loading…" : "Load more tasks"}</button> : null}
-      <p className="field-note">Only persisted Backlog tasks are shown. Run/Attempt records and workflow transitions are not implemented in this slice.</p>
+      <p className="field-note">The six stages are shown for orientation. On narrow screens, scroll horizontally to inspect all six. Persisted tasks currently remain in Backlog; Runs are inspectable from task detail, but stage changes and runtime execution are unavailable.</p>
     </section>
   );
 }

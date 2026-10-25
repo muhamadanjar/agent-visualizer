@@ -95,10 +95,11 @@ exist:
 
 - `APP_DB_USER`/`APP_DB_PASSWORD` provision a separate non-admin API role. The
   API receives only `DATABASE_URL`; the migration service applies the project,
-  versioned definition, versioned skill, and agent-instance schemas, revokes inherited/admin
-  privileges, then grants project `SELECT`/`INSERT`, stable definition and skill
-  `SELECT`/`INSERT`/`UPDATE`, agent-instance `SELECT`/`INSERT`/`UPDATE`, and immutable
-  definition-version, skill-version, and pinned-link `SELECT`/`INSERT`.
+  versioned definition, versioned skill, agent-instance, Task, and Run schemas,
+  revokes inherited/admin privileges, then grants project `SELECT`/`INSERT`,
+  stable definition and skill `SELECT`/`INSERT`/`UPDATE`, agent-instance and Task
+  `SELECT`/`INSERT`/`UPDATE`, and immutable definition-version, skill-version,
+  pinned-link, and Run `SELECT`/`INSERT`.
   The API role has no immutable-row update/delete, schema-create, superuser, or
   database-admin rights.
 - `MIGRATION_DATABASE_URL` is the one-shot migration administrator connection.
@@ -114,6 +115,17 @@ exist:
 
 `.env`, `.env.*`, and `backups/` are git-ignored; `.env.example` contains only
 placeholders. The API fails closed on missing or weak production secrets.
+
+When running the API directly for development, install `apps/api/requirements.txt`.
+For example, from `apps/api/`:
+
+```bash
+rtk uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+The API loads the repository-root `.env` automatically; variables already
+exported in the process take precedence. This does not change Compose startup,
+which continues to inject its configured environment.
 
 To rotate the owner password, build the API image and feed the new password to
 the Argon2id helper through stdin. The helper prints only the encoded hash;
@@ -225,10 +237,13 @@ demonstration and its scratch-database evidence are recorded in
 
 - Phase 1/M0 remains in progress; its gates are neither complete nor waived.
 - Phase 3 is in progress. The API persists minimal owner-scoped projects,
-  versioned agent definitions and text Skills with pinned versions, plus
-  owner-scoped Agent Instances with optional Project context. Tasks/runs/events,
-  provider/runtime configuration, compatibility/preflight, run snapshots, and
-  other canonical domain records remain unimplemented.
+  versioned agent definitions and text Skills with pinned versions,
+  owner-scoped Agent Instances with optional Project context, Tasks with
+  immutable revisions, and immutable Run/Attempt creation records with frozen
+  snapshots of available inputs. Run rows remain `created`; there is no
+  dispatcher, runtime execution, or task-completion path. Events, provider/
+  runtime configuration, compatibility/preflight, and other canonical domain
+  records remain open.
 - Dispatcher/runner boundaries are documented under `apps/dispatcher/` and
   `apps/runner/`, but there is no production dispatch, runtime, provider, or
   work-execution implementation; those remain later-phase work.

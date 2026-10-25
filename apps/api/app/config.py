@@ -1,11 +1,20 @@
 """Strict environment-backed settings for the private single-owner pilot."""
 
-from __future__ import annotations
-
 import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlsplit
+
+from dotenv import dotenv_values
+
+def _dotenv_path(module_path: Path) -> Path:
+    parents = module_path.resolve().parents
+    project_root = parents[3] if len(parents) > 3 else parents[1]
+    return project_root / ".env"
+
+
+ENV_FILE = _dotenv_path(Path(__file__))
 
 OWNER_USERNAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 LOG_LEVELS = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}
@@ -181,4 +190,13 @@ class Settings:
 
 
 def load_settings(environ: dict[str, str] | None = None) -> Settings:
-    return Settings.from_env(environ)
+    if environ is None:
+        env = {
+            key: value
+            for key, value in dotenv_values(ENV_FILE).items()
+            if value is not None
+        }
+        env.update(os.environ)
+    else:
+        env = environ
+    return Settings.from_env(env)

@@ -3,3 +3,4 @@ graphify-out
 .env.*
 !.env.example
 backups/
+__pycache__**

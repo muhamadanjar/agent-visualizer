@@ -5,9 +5,10 @@ import { PageHeader, SampleNotice, StatusPill } from "../../../components/worksp
 import { getSampleAgent, getSampleRun, getSampleTask } from "../../../lib/sample-data";
 import { RunEvidence } from "../../../components/run-evidence";
 import { sampleDefinitions } from "../../../lib/ui-preview-data";
-
+import { RunDetailView } from "../../../components/run-list";
 export default async function RunDetailPage({ params }: { params: Promise<{ runId: string }> }) {
   const { runId } = await params;
+  if (!runId.startsWith("run-sample-")) return <RunDetailView runId={runId} />;
   const run = getSampleRun(runId);
   if (!run) notFound();
   const task = getSampleTask(run.taskId);

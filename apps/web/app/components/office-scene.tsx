@@ -10,6 +10,18 @@ import type { RefObject } from "react";
 import { Vector3 } from "three";
 import type { Group } from "three";
 import { sampleAgents, type SampleAgent } from "../lib/sample-data";
+import {
+  OFFICE_GRID_COUNT,
+  OFFICE_GRID_MIN,
+  OFFICE_CELL_SIZE,
+  OFFICE_LAYOUTS,
+  isOfficePositionWalkable,
+  worldToOfficeCell,
+  isOfficeWorldPositionWalkable,
+  type OfficeFurniture,
+  type OfficeLayoutId,
+  type OfficePosition,
+} from "./office-layout";
 
 type CameraMode = "follow" | "overview";
 type OfficeSceneProps = {
@@ -17,20 +29,20 @@ type OfficeSceneProps = {
   zoom: number;
   focusTarget: [number, number, number];
   reducedMotion: boolean;
+  layoutId: OfficeLayoutId;
+  spawnPosition: OfficePosition;
+  activeDestination: OfficePosition | null;
   visibleAgentIds: string[];
   onSelectAgent: (agent: SampleAgent) => void;
   onSelectObject: (title: string, detail: string) => void;
   onPlayerPosition: (x: number, z: number) => void;
   onMovementMessage: (message: string) => void;
+  onDestinationChange: (position: OfficePosition | null) => void;
 };
 type Cell = { x: number; z: number };
 type MoveTo = (x: number, z: number) => void;
 
-const GRID_MIN = -7.5;
-const GRID_COUNT = 16;
-const CELL_SIZE = 1;
 const MOVE_SPEED = 3.15;
-const CHARACTER_RADIUS = 0.32;
 const NEIGHBORS = [
   { x: 1, z: 0, cost: 1 }, { x: -1, z: 0, cost: 1 },
   { x: 0, z: 1, cost: 1 }, { x: 0, z: -1, cost: 1 },
@@ -38,34 +50,20 @@ const NEIGHBORS = [
   { x: -1, z: 1, cost: Math.SQRT2 }, { x: -1, z: -1, cost: Math.SQRT2 },
 ] as const;
 
-const FURNITURE = [
-  { id: "research-desk", title: "Research desk", x: -6.4, z: -2.8, halfX: 0.85, halfZ: 0.5, height: 0.82, color: "#9c7654", detail: "A local desk prop in the sample research room." },
-  { id: "build-desk", title: "Build desk", x: 6.2, z: -2.7, halfX: 0.85, halfZ: 0.5, height: 0.82, color: "#987052", detail: "A local desk prop in the sample build room." },
-  { id: "review-desk", title: "Review desk", x: 6.0, z: 2.8, halfX: 0.78, halfZ: 0.48, height: 0.82, color: "#9b7757", detail: "A local desk prop in the sample review room." },
-  { id: "meeting-table", title: "Meeting table", x: 0, z: 0, halfX: 1.18, halfZ: 0.72, height: 0.72, color: "#66817a", detail: "A local meeting table. No real task or team is attached." },
-  { id: "lounge-table", title: "Lounge table", x: 0, z: 5.0, halfX: 0.8, halfZ: 0.48, height: 0.52, color: "#a47a52", detail: "A local furniture prop in the sample lounge." },
-] as const;
-
 function cellKey(cell: Cell): string { return `${cell.x},${cell.z}`; }
-function worldToCell(x: number, z: number): Cell | null {
-  const column = Math.round((x - GRID_MIN) / CELL_SIZE);
-  const row = Math.round((z - GRID_MIN) / CELL_SIZE);
-  if (column < 0 || column >= GRID_COUNT || row < 0 || row >= GRID_COUNT) return null;
-  return { x: column, z: row };
-}
-function cellToWorld(cell: Cell): Vector3 { return new Vector3(GRID_MIN + cell.x * CELL_SIZE, 0, GRID_MIN + cell.z * CELL_SIZE); }
-function isBlocked(cell: Cell): boolean {
-  const x = GRID_MIN + cell.x * CELL_SIZE;
-  const z = GRID_MIN + cell.z * CELL_SIZE;
-  return FURNITURE.some((item) => Math.abs(x - item.x) <= item.halfX + CHARACTER_RADIUS && Math.abs(z - item.z) <= item.halfZ + CHARACTER_RADIUS);
+function cellToWorld(cell: Cell): Vector3 { return new Vector3(OFFICE_GRID_MIN + cell.x * OFFICE_CELL_SIZE, 0, OFFICE_GRID_MIN + cell.z * OFFICE_CELL_SIZE); }
+function isBlocked(cell: Cell, layoutId: OfficeLayoutId): boolean {
+  const x = OFFICE_GRID_MIN + cell.x * OFFICE_CELL_SIZE;
+  const z = OFFICE_GRID_MIN + cell.z * OFFICE_CELL_SIZE;
+  return !isOfficeWorldPositionWalkable(x, z, layoutId);
 }
 function heuristic(a: Cell, b: Cell): number {
   const dx = Math.abs(a.x - b.x);
   const dz = Math.abs(a.z - b.z);
   return Math.max(dx, dz) + (Math.SQRT2 - 1) * Math.min(dx, dz);
 }
-function findPath(start: Cell, goal: Cell): Cell[] | null {
-  if (isBlocked(start) || isBlocked(goal)) return null;
+function findPath(start: Cell, goal: Cell, layoutId: OfficeLayoutId): Cell[] | null {
+  if (isBlocked(start, layoutId) || isBlocked(goal, layoutId)) return null;
   const open = [start];
   const cameFrom = new Map<string, Cell>();
   const costs = new Map<string, number>([[cellKey(start), 0]]);
@@ -91,8 +89,8 @@ function findPath(start: Cell, goal: Cell): Cell[] | null {
     for (const direction of NEIGHBORS) {
       const next = { x: current.x + direction.x, z: current.z + direction.z };
       const nextKey = cellKey(next);
-      if (next.x < 0 || next.x >= GRID_COUNT || next.z < 0 || next.z >= GRID_COUNT || isBlocked(next) || closed.has(nextKey)) continue;
-      if (direction.x !== 0 && direction.z !== 0 && (isBlocked({ x: current.x + direction.x, z: current.z }) || isBlocked({ x: current.x, z: current.z + direction.z }))) continue;
+      if (next.x < 0 || next.x >= OFFICE_GRID_COUNT || next.z < 0 || next.z >= OFFICE_GRID_COUNT || isBlocked(next, layoutId) || closed.has(nextKey)) continue;
+      if (direction.x !== 0 && direction.z !== 0 && (isBlocked({ x: current.x + direction.x, z: current.z }, layoutId) || isBlocked({ x: current.x, z: current.z + direction.z }, layoutId))) continue;
       const tentative = (costs.get(currentKey) ?? Infinity) + direction.cost;
       if (tentative >= (costs.get(nextKey) ?? Infinity)) continue;
       cameFrom.set(nextKey, current);
@@ -104,7 +102,8 @@ function findPath(start: Cell, goal: Cell): Cell[] | null {
   return null;
 }
 
-function ClickableFurniture({ item, onSelect }: { item: (typeof FURNITURE)[number]; onSelect: (title: string, detail: string) => void }) {
+
+function ClickableFurniture({ item, onSelect }: { item: OfficeFurniture; onSelect: (title: string, detail: string) => void }) {
   return (
     <RigidBody type="fixed" colliders={false} position={[item.x, 0, item.z]}>
       <CuboidCollider args={[item.halfX, item.height / 2, item.halfZ]} position={[0, item.height / 2, 0]} />
@@ -171,9 +170,17 @@ function AgentAvatar({ agent, onSelect }: { agent: SampleAgent; onSelect: (agent
   );
 }
 
-function LocalAvatar({ bodyRef, onSelect, reducedMotion }: { bodyRef: RefObject<RapierRigidBody | null>; onSelect: () => void; reducedMotion: boolean }) {
+function LocalAvatar({ bodyRef, onSelect, reducedMotion, spawnPosition }: {
+  bodyRef: RefObject<RapierRigidBody | null>;
+  onSelect: () => void;
+  reducedMotion: boolean;
+  spawnPosition: OfficePosition;
+}) {
   const avatarRef = useRef<Group>(null);
   const bobRef = useRef(0);
+  useEffect(() => {
+    bodyRef.current?.setTranslation({ x: spawnPosition[0], y: 0.72, z: spawnPosition[1] }, true);
+  }, [bodyRef, spawnPosition]);
   useFrame((_, delta) => {
     const body = bodyRef.current;
     const avatar = avatarRef.current;
@@ -184,7 +191,7 @@ function LocalAvatar({ bodyRef, onSelect, reducedMotion }: { bodyRef: RefObject<
     avatar.position.y = -0.72 + (!reducedMotion && moving ? Math.sin(bobRef.current) * 0.025 : 0);
   });
   return (
-    <RigidBody ref={bodyRef} type="kinematicPosition" colliders={false} position={[-2, 0.72, 4]} enabledRotations={[false, false, false]} enabledTranslations={[true, false, true]}>
+    <RigidBody ref={bodyRef} type="kinematicPosition" colliders={false} position={[spawnPosition[0], 0.72, spawnPosition[1]]} enabledRotations={[false, false, false]} enabledTranslations={[true, false, true]}>
       <CapsuleCollider args={[0.35, 0.28]} />
       <group ref={avatarRef} position={[0, -0.72, 0]} onClick={(event) => { event.stopPropagation(); onSelect(); }}>
         <mesh position={[0, 0.52, 0]} castShadow><capsuleGeometry args={[0.29, 0.52, 5, 8]} /><meshLambertMaterial color="#42715d" /></mesh>
@@ -196,13 +203,16 @@ function LocalAvatar({ bodyRef, onSelect, reducedMotion }: { bodyRef: RefObject<
     </RigidBody>
   );
 }
-
-function PlayerController({ bodyRef, moveToRef, onMovementMessage, onPlayerPosition, onSelectObject }: {
+function PlayerController({ bodyRef, moveToRef, onMovementMessage, onPlayerPosition, onSelectObject, layoutId, spawnPosition, activeDestination, onDestinationChange }: {
   bodyRef: RefObject<RapierRigidBody | null>;
   moveToRef: RefObject<MoveTo>;
   onMovementMessage: (message: string) => void;
   onPlayerPosition: (x: number, z: number) => void;
   onSelectObject: (title: string, detail: string) => void;
+  layoutId: OfficeLayoutId;
+  spawnPosition: OfficePosition;
+  activeDestination: OfficePosition | null;
+  onDestinationChange: (position: OfficePosition | null) => void;
 }) {
   const { world } = useRapier();
   const controllerRef = useRef<KinematicCharacterController | null>(null);
@@ -213,14 +223,10 @@ function PlayerController({ bodyRef, moveToRef, onMovementMessage, onPlayerPosit
   const lastPositionReportRef = useRef(0);
   const lastBlockedReportRef = useRef(0);
   const objects = useMemo(() => [
-    { title: "Research desk", x: -6.4, z: -2.8, detail: "A local desk prop in the sample research room." },
-    { title: "Build desk", x: 6.2, z: -2.7, detail: "A local desk prop in the sample build room." },
-    { title: "Review desk", x: 6, z: 2.8, detail: "A local desk prop in the sample review room." },
-    { title: "Meeting table", x: 0, z: 0, detail: "A local meeting table. No real task or team is attached." },
-    { title: "Lounge table", x: 0, z: 5, detail: "A local furniture prop in the sample lounge." },
+    ...OFFICE_LAYOUTS[layoutId].furniture.map((item) => ({ title: item.title, x: item.x, z: item.z, detail: item.detail })),
     { title: "Atlas project board", x: 0, z: -5.98, detail: "A local project-board prop. Opening it shows the sample Task Board only; no work is sent." },
     { title: "Office entrance", x: 0, z: 6.02, detail: "A visual doorway marker; workspace permissions are not determined by room or proximity." },
-  ], []);
+  ], [layoutId]);
 
   useEffect(() => {
     const controller = world.createCharacterController(0.02);
@@ -239,6 +245,7 @@ function PlayerController({ bodyRef, moveToRef, onMovementMessage, onPlayerPosit
         event.preventDefault();
         keysRef.current.add(key);
         routeRef.current = [];
+        onDestinationChange(null);
         onMovementMessage("Keyboard movement active. A click destination is canceled while steering manually.");
       }
       if (key === "e") {
@@ -258,19 +265,36 @@ function PlayerController({ bodyRef, moveToRef, onMovementMessage, onPlayerPosit
     window.addEventListener("keyup", onKeyUp);
     window.addEventListener("blur", onBlur);
     return () => { window.removeEventListener("keydown", onKeyDown); window.removeEventListener("keyup", onKeyUp); window.removeEventListener("blur", onBlur); };
-  }, [bodyRef, objects, onMovementMessage, onSelectObject]);
+  }, [bodyRef, objects, onDestinationChange, onMovementMessage, onSelectObject]);
 
   const moveTo = useCallback((x: number, z: number) => {
     const position = bodyRef.current?.translation();
-    const start = position ? worldToCell(position.x, position.z) : null;
-    const goal = worldToCell(x, z);
-    if (!start || !goal) { routeRef.current = []; onMovementMessage("Invalid destination: outside the walkable floor."); return; }
-    const path = findPath(start, goal);
-    if (!path) { routeRef.current = []; onMovementMessage("Destination is blocked or unreachable. Choose a clear floor tile."); return; }
+    const start = position ? worldToOfficeCell(position.x, position.z) : null;
+    const goal = worldToOfficeCell(x, z);
+    if (!start || !goal || !isOfficePositionWalkable([x, z], layoutId)) {
+      routeRef.current = [];
+      onDestinationChange(null);
+      onMovementMessage("Invalid destination: outside the walkable floor.");
+      return;
+    }
+    const path = findPath(start, goal, layoutId);
+    if (!path) {
+      routeRef.current = [];
+      onDestinationChange(null);
+      onMovementMessage("Destination is blocked or unreachable. Choose a clear floor tile.");
+      return;
+    }
     routeRef.current = path.map(cellToWorld);
+    onDestinationChange(path.length ? [x, z] : null);
     onMovementMessage(path.length ? `Local route set · ${path.length} steps.` : "Your local avatar is already at this point.");
-  }, [bodyRef, onMovementMessage]);
+  }, [bodyRef, layoutId, onDestinationChange, onMovementMessage]);
   moveToRef.current = moveTo;
+
+  useEffect(() => {
+    if (!activeDestination) return;
+    const frame = requestAnimationFrame(() => moveToRef.current(activeDestination[0], activeDestination[1]));
+    return () => cancelAnimationFrame(frame);
+  }, [activeDestination, layoutId, moveToRef, spawnPosition]);
 
   useFrame((_, delta) => {
     const body = bodyRef.current;
@@ -294,7 +318,11 @@ function PlayerController({ bodyRef, moveToRef, onMovementMessage, onPlayerPosit
       }
       if (waypoint) { dx = waypoint.x - position.x; dz = waypoint.z - position.z; }
     }
-    if (followingRoute && routeRef.current.length === 0) { onMovementMessage("Local route complete."); return; }
+    if (followingRoute && routeRef.current.length === 0) {
+      onDestinationChange(null);
+      onMovementMessage("Local route complete.");
+      return;
+    }
     const length = Math.hypot(dx, dz);
     if (!length) return;
     dx /= length;
@@ -307,6 +335,7 @@ function PlayerController({ bodyRef, moveToRef, onMovementMessage, onPlayerPosit
       if (routeRef.current.length && performance.now() - lastBlockedReportRef.current > 800) {
         lastBlockedReportRef.current = performance.now();
         routeRef.current = [];
+        onDestinationChange(null);
         onMovementMessage("Movement stopped at a solid collider. The local avatar cannot pass through furniture or walls.");
       }
       return;
@@ -320,6 +349,7 @@ function PlayerController({ bodyRef, moveToRef, onMovementMessage, onPlayerPosit
 
   return null;
 }
+
 
 function CameraRig({ bodyRef, mode, zoom, focusTarget, reducedMotion }: {
   bodyRef: RefObject<RapierRigidBody | null>;
@@ -397,7 +427,7 @@ function SceneContents({ props }: { props: OfficeSceneProps }) {
       <Physics gravity={[0, -9.81, 0]} colliders={false} timeStep="vary">
         <OfficeStructure />
         <RoomFloors />
-        {FURNITURE.map((item) => <ClickableFurniture key={item.id} item={item} onSelect={props.onSelectObject} />)}
+        {OFFICE_LAYOUTS[props.layoutId].furniture.map((item) => <ClickableFurniture key={item.id} item={item} onSelect={props.onSelectObject} />)}
         <ProjectBoard onSelect={props.onSelectObject} />
         <Doorway onSelect={props.onSelectObject} />
         <Plant position={[-7.2, 0, -5.1]} /><Plant position={[7.1, 0, 4.9]} /><Plant position={[-7.2, 0, 5.0]} />
@@ -412,8 +442,18 @@ function SceneContents({ props }: { props: OfficeSceneProps }) {
           <planeGeometry args={[16.6, 12]} /><meshBasicMaterial transparent opacity={0} depthWrite={false} />
         </mesh>
         {sampleAgents.filter((agent) => props.visibleAgentIds.includes(agent.id)).map((agent) => <AgentAvatar key={agent.id} agent={agent} onSelect={props.onSelectAgent} />)}
-        <LocalAvatar bodyRef={bodyRef} onSelect={onLocalAvatarSelect} reducedMotion={props.reducedMotion} />
-        <PlayerController bodyRef={bodyRef} moveToRef={moveToRef} onMovementMessage={props.onMovementMessage} onPlayerPosition={props.onPlayerPosition} onSelectObject={props.onSelectObject} />
+        <LocalAvatar bodyRef={bodyRef} onSelect={onLocalAvatarSelect} reducedMotion={props.reducedMotion} spawnPosition={props.spawnPosition} />
+        <PlayerController
+          bodyRef={bodyRef}
+          moveToRef={moveToRef}
+          onMovementMessage={props.onMovementMessage}
+          onPlayerPosition={props.onPlayerPosition}
+          onSelectObject={props.onSelectObject}
+          layoutId={props.layoutId}
+          spawnPosition={props.spawnPosition}
+          activeDestination={props.activeDestination}
+          onDestinationChange={props.onDestinationChange}
+        />
       </Physics>
       <CameraRig bodyRef={bodyRef} mode={props.cameraMode} zoom={props.zoom} focusTarget={props.focusTarget} reducedMotion={props.reducedMotion} />
       <OrbitControls enabled={props.cameraMode === "overview"} enablePan enableRotate enableZoom minDistance={8} maxDistance={25} maxPolarAngle={Math.PI / 2.15} target={props.focusTarget} />

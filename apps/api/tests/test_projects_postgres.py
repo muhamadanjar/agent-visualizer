@@ -12,11 +12,14 @@ import pytest
 import httpx
 from app.main import create_app
 from test_api import ORIGIN, TEST_PASSWORD, database_ready, settings
-from app.migrate import apply_migrations, ensure_application_role
+from app.domain import SkillPin
 from app.instances import AgentInstanceInputError, PostgresAgentInstanceRepository
-from app.tasks import PostgresTaskRepository, TaskInputError, TaskSpec
+from app.migrate import apply_migrations, ensure_application_role
 from app.projects import PostgresProjectRepository
 from app.registry import PostgresAgentRegistryRepository
+from app.runs import PostgresRunRepository, RunInputError
+from app.skills import PostgresSkillRepository, SkillContent, TextResource
+from app.tasks import PostgresTaskRepository, TaskInputError, TaskSpec
 
 
 def test_postgres_migrations_and_project_owner_scope() -> None:
@@ -37,6 +40,8 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
         restricted_owner_id = f"test-restricted-{uuid4()}"
         api_project_id: UUID | None = None
         api_task_id: UUID | None = None
+        api_definition_id: UUID | None = None
+        api_instance_id: UUID | None = None
         api_project_name = f"Task API restricted role {uuid4().hex}"
         restricted_pool: asyncpg.Pool | None = None
         try:
@@ -180,6 +185,7 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                 ("tasks", ("SELECT", "INSERT", "UPDATE")),
                 ("task_revisions", ("SELECT", "INSERT")),
                 ("task_revision_dependencies", ("SELECT", "INSERT")),
+                ("runs", ("SELECT", "INSERT")),
             ):
                 for privilege in privileges:
                     assert await connection.fetchval(
@@ -215,6 +221,23 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
             restricted_definition = await restricted_definitions.create(
                 restricted_owner_id, "Restricted", "", "# Restricted", {}
             )
+            restricted_skills = PostgresSkillRepository(restricted_pool)
+            restricted_skill = await restricted_skills.create(
+                restricted_owner_id,
+                SkillContent(
+                    name="Snapshot skill",
+                    description="Pinned capability.",
+                    instructions="Use the captured skill version.",
+                    dependencies=("tool:read",),
+                    resources=(TextResource("notes/skill.md", "captured content"),),
+                ),
+            )
+            linked_definition = await restricted_definitions.set_skills_for_owner(
+                restricted_owner_id,
+                restricted_definition.id,
+                [SkillPin(restricted_skill.id, restricted_skill.version)],
+            )
+            assert linked_definition is not None and linked_definition.version == 2
             restricted_instance = await restricted_instances.create(
                 restricted_owner_id,
                 "Restricted instance",
@@ -280,6 +303,91 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                 (1, "Persist first backlog task"),
                 (2, "Persist first task revision"),
             ]
+            run_repository = PostgresRunRepository(restricted_pool)
+            run_request_id = uuid4()
+            first_run, created = await run_repository.create_for_task(
+                restricted_owner_id, first_task.id, run_request_id
+            )
+            assert created is True
+            assert first_run.attempt_number == 1
+            assert first_run.status == "created"
+            assert first_run.configuration_snapshot["task"]["revision"] == 2
+            assert first_run.configuration_snapshot["task"]["title"] == "Persist first task revision"
+            assert first_run.configuration_snapshot["agent_definition"]["version"] == 2
+            assert first_run.configuration_snapshot["skills"][0]["version"] == 1
+            assert (
+                first_run.configuration_snapshot["skills"][0]["instructions"]
+                == "Use the captured skill version."
+            )
+            assert first_run.configuration_snapshot["provider"] is None
+            assert first_run.configuration_snapshot["runtime"] is None
+            replayed_run, created = await run_repository.create_for_task(
+                restricted_owner_id, first_task.id, run_request_id
+            )
+            assert created is False
+            assert replayed_run.id == first_run.id
+            assert replayed_run.configuration_snapshot == first_run.configuration_snapshot
+            try:
+                await run_repository.create_for_task(
+                    restricted_owner_id, second_task.id, run_request_id
+                )
+            except RunInputError as error:
+                assert error.reason == "idempotency_conflict"
+            else:
+                raise AssertionError("an idempotency key was accepted for another task")
+
+            next_task = await task_repository.update_for_owner(
+                restricted_owner_id,
+                first_task.id,
+                replace(first_spec, title="Run after task edit"),
+            )
+            assert next_task is not None and next_task.revision == 3
+            updated_skill = await restricted_skills.update_for_owner(
+                restricted_owner_id,
+                restricted_skill.id,
+                SkillContent(
+                    name="Snapshot skill",
+                    description="Updated capability.",
+                    instructions="Use the new skill version.",
+                    dependencies=("tool:read", "tool:search"),
+                    resources=(TextResource("notes/skill.md", "new content"),),
+                ),
+            )
+            assert updated_skill is not None and updated_skill.version == 2
+            next_definition = await restricted_definitions.update_for_owner(
+                restricted_owner_id,
+                restricted_definition.id,
+                {"name": "Restricted v2"},
+            )
+            assert next_definition is not None and next_definition.version == 3
+            pinned_definition = await restricted_definitions.set_skills_for_owner(
+                restricted_owner_id,
+                restricted_definition.id,
+                [SkillPin(restricted_skill.id, updated_skill.version)],
+            )
+            assert pinned_definition is not None and pinned_definition.version == 4
+            second_run, created = await run_repository.create_for_task(
+                restricted_owner_id, first_task.id, uuid4()
+            )
+            assert created is True
+            assert second_run.attempt_number == 2
+            assert second_run.configuration_snapshot["task"]["revision"] == 3
+            assert second_run.configuration_snapshot["agent_definition"]["version"] == 4
+            assert second_run.configuration_snapshot["skills"][0]["version"] == 2
+            assert (
+                second_run.configuration_snapshot["skills"][0]["instructions"]
+                == "Use the new skill version."
+            )
+            assert second_run.configuration_snapshot["agent_definition"]["name"] == "Restricted v2"
+            assert first_run.configuration_snapshot["task"]["revision"] == 2
+            assert first_run.configuration_snapshot["agent_definition"]["version"] == 2
+            assert first_run.configuration_snapshot["skills"][0]["version"] == 1
+            assert (
+                first_run.configuration_snapshot["skills"][0]["instructions"]
+                == "Use the captured skill version."
+            )
+            assert await run_repository.get_for_owner("another-owner", first_run.id) is None
+
             assignment_attempt: asyncio.Task[object] | None = None
             archive_lock_observed = False
             async with restricted_pool.acquire() as archive_connection:
@@ -329,7 +437,10 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                 settings(),
                 database_check=database_ready,
                 project_repository=restricted_projects,
+                agent_registry_repository=restricted_definitions,
+                agent_instance_repository=restricted_instances,
                 task_repository=task_repository,
+                run_repository=run_repository,
             )
             async with api_app.router.lifespan_context(api_app):
                 async with httpx.AsyncClient(
@@ -349,9 +460,17 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                     )
                     assert project_response.status_code == 201
                     api_project_id = UUID(project_response.json()["id"])
+                    api_definition = await restricted_definitions.create(
+                        "owner", f"Public API Agent {uuid4().hex}", "", "# API Agent", {}
+                    )
+                    api_definition_id = api_definition.id
+                    api_instance = await restricted_instances.create(
+                        "owner", "Public API Instance", api_definition.id, api_project_id
+                    )
+                    api_instance_id = api_instance.id
                     payload = {
                         "project_id": str(api_project_id),
-                        "agent_instance_id": None,
+                        "agent_instance_id": str(api_instance.id),
                         "title": "Public API task",
                         "goal": "Persist through the authenticated public API.",
                         "input_text": "",
@@ -369,7 +488,7 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                     assert api_task["stage"] == "Backlog"
                     assert api_task["revision"] == 1
                     assert api_task["project_name"] == api_project_name
-                    assert api_task["agent_instance_id"] is None
+                    assert api_task["agent_instance_id"] == str(api_instance.id)
                     assert "owner_id" not in api_task
                     api_task_id = UUID(api_task["id"])
                     assert [
@@ -394,6 +513,39 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                         "Public API task",
                         "Public API task revision",
                     ]
+                    run_request_id = uuid4()
+                    run_response = await client.post(
+                        f"/api/v1/tasks/{api_task_id}/runs",
+                        json={"request_id": str(run_request_id)},
+                        headers={"origin": ORIGIN},
+                    )
+                    assert run_response.status_code == 201
+                    api_run = run_response.json()
+                    assert api_run["status"] == "created"
+                    assert api_run["attempt_number"] == 1
+                    assert api_run["configuration_snapshot"]["task"]["revision"] == 2
+                    assert api_run["configuration_snapshot"]["agent_definition"]["version"] == 1
+                    assert api_run["configuration_snapshot"]["provider"] is None
+                    assert "owner_id" not in api_run
+                    replay_response = await client.post(
+                        f"/api/v1/tasks/{api_task_id}/runs",
+                        json={"request_id": str(run_request_id)},
+                        headers={"origin": ORIGIN},
+                    )
+                    assert replay_response.status_code == 200
+                    assert replay_response.json()["id"] == api_run["id"]
+                    assert (
+                        await client.get(f"/api/v1/runs/{api_run['id']}")
+                    ).json() == api_run
+                    assert [
+                        item["id"]
+                        for item in (
+                            await client.get(f"/api/v1/tasks/{api_task_id}/runs")
+                        ).json()
+                    ] == [api_run["id"]]
+                    assert (
+                        await client.get(f"/api/v1/runs/{first_run.id}")
+                    ).status_code == 404
             archived_instance = await restricted_instances.archive_for_owner(
                 restricted_owner_id, restricted_instance.id
             )
@@ -406,6 +558,10 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                     if api_project_id is not None:
                         if api_task_id is not None:
                             await connection.execute(
+                                "DELETE FROM runs WHERE owner_id = 'owner' AND task_id = $1",
+                                api_task_id,
+                            )
+                            await connection.execute(
                                 "DELETE FROM task_revision_dependencies WHERE owner_id = 'owner' AND task_id = $1",
                                 api_task_id,
                             )
@@ -417,12 +573,30 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                                 "DELETE FROM tasks WHERE owner_id = 'owner' AND id = $1",
                                 api_task_id,
                             )
+                        if api_instance_id is not None:
+                            await connection.execute(
+                                "DELETE FROM agent_instances WHERE owner_id = 'owner' AND id = $1",
+                                api_instance_id,
+                            )
+                        if api_definition_id is not None:
+                            await connection.execute(
+                                "DELETE FROM agent_definition_versions WHERE owner_id = 'owner' AND definition_id = $1",
+                                api_definition_id,
+                            )
+                            await connection.execute(
+                                "DELETE FROM agent_definitions WHERE owner_id = 'owner' AND id = $1",
+                                api_definition_id,
+                            )
                         await connection.execute(
                             "DELETE FROM projects WHERE owner_id = 'owner' AND id = $1",
                             api_project_id,
                         )
                     await connection.execute(
-                        "SET CONSTRAINTS agent_definitions_current_version_fk DEFERRED"
+                        "DELETE FROM runs WHERE owner_id = $1",
+                        restricted_owner_id,
+                    )
+                    await connection.execute(
+                        "SET CONSTRAINTS agent_definitions_current_version_fk, skills_current_version_fk DEFERRED"
                     )
                     await connection.execute(
                         "DELETE FROM task_revision_dependencies WHERE owner_id = $1",
@@ -438,6 +612,18 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                     )
                     await connection.execute(
                         "DELETE FROM agent_instances WHERE owner_id = $1",
+                        restricted_owner_id,
+                    )
+                    await connection.execute(
+                        "DELETE FROM agent_definition_version_skills WHERE owner_id = $1",
+                        restricted_owner_id,
+                    )
+                    await connection.execute(
+                        "DELETE FROM skill_versions WHERE owner_id = $1",
+                        restricted_owner_id,
+                    )
+                    await connection.execute(
+                        "DELETE FROM skills WHERE owner_id = $1",
                         restricted_owner_id,
                     )
                     await connection.execute(

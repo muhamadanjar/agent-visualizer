@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { requestTask, requestTaskRevisions, type Task } from "../lib/tasks";
+import { TaskRunHistory } from "./run-list";
 import { PageHeader, StatusPill } from "./workspace-components";
 
 function RevisionContents({ task }: { task: Task }) {
@@ -159,9 +160,10 @@ export function TaskDetailView({ taskId }: { taskId: string }) {
             </dl>
           </section>
           <section className="content-section">
-            <h2>Execution</h2>
-            <p>Run / Attempt records, queueing, and execution are not implemented for this task flow.</p>
-            <p>Task stage is not changed by a runtime outcome.</p>
+            <h2>Run / Attempt history</h2>
+            <p>Run / Attempt creation records are append-only snapshots. No dispatcher, runtime execution, event stream, or Task-stage transition is connected.</p>
+            <TaskRunHistory key={task.id} taskId={task.id} />
+            <Link className="text-link" href="/runs">Open Runs index</Link>
           </section>
         </aside>
       </div>

@@ -144,7 +144,7 @@ async def ensure_application_role(
                     'projects', 'agent_definitions', 'agent_definition_versions',
                     'skills', 'skill_versions', 'agent_definition_version_skills',
                     'agent_instances', 'tasks', 'task_revisions',
-                    'task_revision_dependencies'
+                    'task_revision_dependencies', 'runs'
                 ]::text[])
                   AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
                   AND relowner = (SELECT oid FROM pg_roles WHERE rolname = $1)
@@ -225,6 +225,10 @@ async def ensure_application_role(
             "SELECT format('GRANT SELECT, INSERT ON TABLE task_revision_dependencies TO %I', $1::text)",
             role_name,
         )
+        grant_runs = await connection.fetchval(
+            "SELECT format('GRANT SELECT, INSERT ON TABLE runs TO %I', $1::text)",
+            role_name,
+        )
         for statement in (
             revoke_public_create,
             revoke_app_schema,
@@ -243,6 +247,7 @@ async def ensure_application_role(
             grant_tasks,
             grant_task_revisions,
             grant_task_dependencies,
+            grant_runs,
         ):
             await connection.execute(statement)
     finally:

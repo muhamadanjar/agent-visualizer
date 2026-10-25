@@ -22,23 +22,20 @@ export function ConnectionsView() {
         <section className="content-section settings-card">
           <div className="settings-card-heading"><div><p className="eyebrow">Inference</p><h2>Model provider</h2></div><StatusPill tone="amber">No adapter registered</StatusPill></div>
           <p>Choose a registered Provider Adapter first. Native provider APIs and compatible endpoints are optional adapter capabilities; a URL or provider name alone does not establish support.</p>
-          <label className="preview-field">Provider Adapter<select defaultValue=""><option value="" disabled>No available adapter</option></select></label>
-          <label className="preview-field">Protocol<select defaultValue=""><option value="" disabled>Adapter protocol not available</option><option>Native API · unverified</option><option>OpenAI-compatible · unverified</option></select></label>
-          <label className="preview-field">Provider or service ID<input type="text" placeholder="e.g. local router or provider ID" /></label>
-          <label className="preview-field">Model or route ID<input type="text" placeholder="Exact adapter-supported ID" /></label>
-          <label className="preview-field">Optional endpoint<input type="url" placeholder="Only if the selected adapter requires it" /></label>
-          <label className="preview-field">Credential reference<input type="text" placeholder="Secret-store reference only; never paste a secret" /></label>
+          <div className="settings-row"><span>Provider Adapter</span><strong>None registered</strong></div>
+          <div className="settings-row"><span>Protocol and provider/model IDs</span><strong>Unavailable until an adapter is registered</strong></div>
+          <div className="settings-row"><span>Endpoint and credential reference</span><strong>Not configured; no browser entry field</strong></div>
           <div className="settings-row"><span>Streaming / tool calls</span><strong>Not verified</strong></div>
           <div className="settings-row"><span>Upstream / cost reporting</span><strong>Not available</strong></div>
-          <p className="field-note">Draft fields stay in this page and are not sent or saved. Do not enter credentials.</p>
+          <p className="field-note">Provider settings are read-only here. Do not paste or enter credentials; there is no provider configuration API.</p>
           <DisabledWorkAction reason="A registered, qualified Provider Adapter and a server-side secret reference are required.">Save provider connection</DisabledWorkAction>
           <DisabledWorkAction reason="Provider endpoint, model, credentials, and capabilities have not been qualified by an adapter.">Test provider connection</DisabledWorkAction>
         </section>
         <section className="content-section settings-card">
           <div className="settings-card-heading"><div><p className="eyebrow">Execution</p><h2>Runtime connection</h2></div><StatusPill tone="amber">Not connected</StatusPill></div>
           <p>The Runtime Adapter starts and observes agent work. It is separate from the model provider endpoint.</p>
-          <label className="preview-field">Runtime Adapter<select defaultValue=""><option value="" disabled>Select candidate</option><option>OMP · candidate only</option><option>Codex app-server · handshake only</option></select></label>
-          <label className="preview-field">Operating mode<select defaultValue=""><option value="" disabled>Select an available mode</option><option>Managed · unavailable</option><option>Observe · unavailable</option></select></label>
+          <div className="settings-row"><span>Runtime Adapter</span><strong>None registered</strong></div>
+          <div className="settings-row"><span>Operating mode</span><strong>Unavailable until a runtime is qualified</strong></div>
           <div className="settings-row"><span>Managed capability</span><strong>Not approved</strong></div>
           <div className="settings-row"><span>Tool-call approval</span><strong>Fail-closed · invocation binding missing</strong></div>
           <div className="settings-row"><span>Credentials / egress</span><strong>Not configured</strong></div>
@@ -130,9 +127,9 @@ export function DelegationsView() {
 
 const readinessItems = [
   { area: "Office exploration and accessible alternatives", evidence: "Presentation route exists; complete AC-23–31 and failure scenarios are not verified.", href: "/office" },
-  { area: "Agent definitions, imports, and skills", evidence: "Read-only samples and local importer preview; persistence and validation are not connected.", href: "/agents/definitions" },
-  { area: "Tasks, assignment, and runtime controls", evidence: "Task board and draft form use samples; preflight, queue, idempotency, and dispatch are absent.", href: "/tasks" },
-  { area: "Run evidence, artifacts, and acceptance", evidence: "Sample timeline only; no runtime event, artifact, or test evidence is connected.", href: "/runs/run-sample-research" },
+  { area: "Agent definitions, imports, and skills", evidence: "Definitions, Skill versions/pins, and Agent Instances use owner-scoped APIs; runtime compatibility and preflight remain unavailable.", href: "/agents/definitions" },
+  { area: "Tasks, assignment, and runtime controls", evidence: "Task revisions and Backlog use the API; stage transitions, preflight, queueing, and dispatch are unavailable.", href: "/tasks" },
+  { area: "Run evidence, artifacts, and acceptance", evidence: "Immutable Run creation snapshots are API-backed; runtime events, artifacts, and acceptance evidence are unavailable.", href: "/runs" },
   { area: "Providers, runtime safety, and approvals", evidence: "No production provider adapter or Managed runtime is qualified; tool approval stays fail-closed.", href: "/connections" },
   { area: "Delegation, isolation, and recovery", evidence: "No verified parentage, isolated workspace, lease, replay, or recovery path.", href: "/delegations" },
   { area: "Private pilot durability and audit", evidence: "This UI does not verify API scope, persisted events, or audit retention.", href: "/audit" },
@@ -148,7 +145,7 @@ export function ReadinessView() {
         <div className="section-heading"><h2>P0 evidence gates</h2><StatusPill tone="amber">Open</StatusPill></div>
         <div className="readiness-list">{readinessItems.map((item) => <article className="readiness-row" key={item.area}><div><h3>{item.area}</h3><p>{item.evidence}</p></div><div className="readiness-actions"><StatusPill tone="amber">Not verified</StatusPill><Link className="text-link" href={item.href}>Inspect UI</Link></div></article>)}</div>
       </section>
-      <section className="content-section"><div className="section-heading"><h2>Release decision</h2><StatusPill tone="amber">Not ready to pilot</StatusPill></div><p className="muted">Phase 1 and Phase 2 remain open. Phase 8 requires evidence from a real task, runtime, artifact, approval/failure path, recovery scenario, and applicable NFR checks; none is established by this UI preview.</p><Link className="text-link" href="/settings">Review workspace configuration</Link></section>
+      <section className="content-section"><div className="section-heading"><h2>Release decision</h2><StatusPill tone="amber">Not ready to pilot</StatusPill></div><p className="muted">Phase 1/M0 remains open, Phase 3 is in progress, and Phase 4 event ingestion/reconciliation is not implemented. Phase 8 requires evidence from a real task, runtime, artifact, approval/failure path, recovery scenario, and applicable NFR checks; none is established by this UI preview.</p><Link className="text-link" href="/settings">Review workspace configuration</Link></section>
     </div>
   );
 }
