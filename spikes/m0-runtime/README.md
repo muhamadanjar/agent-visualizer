@@ -1,6 +1,10 @@
-# M0 runtime probes and adapter prototype
+# Historical M0 coding-agent runtime probes
 
-This directory contains bounded real-runtime probes, synthetic adapter-failure tests, and a no-provider Bubblewrap boundary smoke:
+**Status:** Historical feasibility evidence only; these OMP/Codex probes are not Phase 1 product integration targets. The current Phase 1 direction is a direct OpenAI-compatible Chat Completions provider API probe. This directory does not contain a production Provider Adapter.
+
+This directory contains bounded legacy runtime probes, synthetic adapter-failure tests, and a no-provider Bubblewrap boundary smoke:
+
+- `provider-completions-smoke.ts` is the current Phase 1 direct API probe. `--self-test` sends one Chat Completions request to a loopback-only mock without provider credentials or a coding-agent process; it exercises `NINEROUTER_URL` / `NINEROUTER_KEY` and the selected model against that mock. `--provider` requires `M0_PROVIDER_ALLOW_REAL_REQUEST=I_ACKNOWLEDGE_PROVIDER_COST`. It reads the key from `M0_PROVIDER_API_KEY`, `NINEROUTER_KEY`, or legacy `NINE_ROUTER_API_KEY`; the base URL comes from `M0_PROVIDER_BASE_URL`, `NINEROUTER_URL`, legacy `NINE_ROUTER_BASE_URL`, or defaults to `http://localhost:20128`. The selected default model is `openrouter/cohere/north-mini-code:free`; override it with `M0_PROVIDER_MODEL_ID` or `M0_ROUTER_MODEL_ID`. A root URL is sent to `/v1/chat/completions`; a base ending in `/v1` is also accepted. A `:free` label is not a zero-cost guarantee; real requests may incur provider charges.
 
 - `rpc-task-smoke.ts` is a direct RPC test client. It negotiates protocol v2, submits one prompt that reads the first heading of `PRD.md`, correlates the terminal result by request ID, and prints frame types, tool names, and terminal metadata.
 - `rpc-health-smoke.ts` negotiates v2 and makes one bounded `get_state` request without a model call. It prints only settlement booleans and whether a heartbeat-like field exists.
@@ -19,7 +23,13 @@ This directory contains bounded real-runtime probes, synthetic adapter-failure t
 - `sandbox-omp-provider-task-smoke.ts` attempts one synthetic text-only OMP task using the verified `cl/thinkingmachines/inkling-small:free` route by default, inside Bubblewrap with `--no-tools`; it stages no repository data and mounts no host HOME. For another catalog-listed route, set `M0_ROUTER_MODEL_ID` to an ID ending in `:free`. OMP reaches only a loopback bridge connected to one read-only Unix socket; the host-side bridge forwards one bounded request only to the configured local 9Router endpoint and keeps the router credential outside the sandbox. Each run allows one provider request and may incur account charges; a `free` label is not a zero-cost guarantee. This verifies provider integration only if the task completes with HTTP 200 and attributable OMP lifecycle/result evidence.
 - `codex-app-server-smoke.ts` starts the experimental Codex app-server with a fresh temporary `HOME`/`CODEX_HOME`, sends only JSON-RPC `initialize` and `initialized`, and shuts it down. It submits no thread/turn task, sends no provider task request, uses no existing Codex credentials, and prints only allowlisted status/cleanup metadata. A passing handshake proves protocol startup only, not task execution or provider compatibility.
 
-Run from the repository root:
+Current Phase 1 local-mock check:
+
+```sh
+rtk bun run spikes/m0-runtime/provider-completions-smoke.ts --self-test
+```
+
+The following commands reproduce historical runtime probes only; they are not Phase 1 integration targets:
 
 ```sh
 rtk bun run spikes/m0-runtime/rpc-health-smoke.ts
@@ -31,8 +41,8 @@ rtk bun run spikes/m0-runtime/sandbox-resource-smoke.ts
 rtk bun run spikes/m0-runtime/sandbox-egress-smoke.ts
 rtk bun run spikes/m0-runtime/codex-app-server-smoke.ts
 ```
-The provider-backed smoke accepts `NINE_ROUTER_BASE_URL=http://localhost:20128/v1` (or the same local server root) and `NINE_ROUTER_API_KEY` in the host environment. It is the only probe that submits a provider inference task; do not run it unless a provider request is acceptable. It permits one request, limits output to at most 64 tokens, has a 65-second absolute upstream deadline, and forwards a synthetic prompt with all tools disabled. The Codex initialization probe sends no thread/turn or provider task request, but does not instrument background network activity. Other local probes make no provider call as described. A configured endpoint/model can still reject inference; catalog availability is not evidence of a usable route. The OMP adapter runs in the host supervisor, which launches OMP under Bubblewrap; this smoke does not prove the production runner integration, general-purpose filesystem policy, task resource enforcement, approval scope, cancellation safety, or recovery.
-Explicit opt-in (contacts the real provider and may incur charges):
+
+The OMP provider-task command below is also historical; it is not the Phase 1 provider API target and may incur charges. Do not run it without an approved endpoint, egress policy, and provider-side spend limit. It sends a synthetic no-tools task through OMP, not a direct provider API request:
 
 ```sh
 rtk bun run spikes/m0-runtime/sandbox-omp-provider-task-smoke.ts

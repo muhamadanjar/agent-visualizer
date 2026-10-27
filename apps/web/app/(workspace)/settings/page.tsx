@@ -4,7 +4,7 @@ import { PageHeader, SampleNotice, StatusPill } from "../../components/workspace
 export default function SettingsPage() {
   return (
     <div className="page-stack">
-      <PageHeader eyebrow="Workspace configuration" title="Settings" description="Read-only configuration boundaries. Product preferences and policy save paths are not implemented." />
+      <PageHeader eyebrow="Workspace configuration" title="Settings" description="Provider endpoint selection is configurable. Runtime, policy, and product preferences remain unavailable or read-only." />
       <SampleNotice />
       <div className="settings-grid">
         <section className="content-section settings-card">
@@ -40,9 +40,9 @@ export default function SettingsPage() {
           <Link className="text-link" href="/office">Return to office</Link>
         </section>
         <section className="content-section settings-card">
-          <div className="settings-card-heading"><div><p className="eyebrow">Provider credentials</p><h2>Secret handling</h2></div><StatusPill tone="amber">Not configured</StatusPill></div>
-          <p>Never paste provider secrets into this preview. There is no provider configuration API; future configuration must use server-side secret references.</p>
-          <Link className="text-link" href="/connections">Open connection settings</Link>
+          <div className="settings-card-heading"><div><p className="eyebrow">Provider credentials</p><h2>Secret handling</h2></div><StatusPill tone="amber">Runner not connected</StatusPill></div>
+          <p>Provider endpoint settings store only adapter, model, and route. No key is accepted or returned; Runner-side credential injection and egress controls are not implemented.</p>
+          <Link className="text-link" href="/connections">Open provider settings</Link>
         </section>
       </div>
     </div>

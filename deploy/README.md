@@ -1,21 +1,31 @@
 # Private pilot operations
 
-This directory documents the local deployment boundary. Phase 1/M0 remains in
-progress; Phase 2 foundation is complete, and Phase 3 now has owner-scoped
-project, versioned definition/skill, and Agent Instance persistence.
-Dispatcher and runner execution remain deferred to later phases. Backup/restore
-evidence is recorded in `docs/progress.md`; this does not prove runtime readiness.
+This directory documents the local deployment boundary. Phase 1/M0 is complete
+only for bounded provider/3D feasibility probes; it does not prove managed
+execution. Phase 2 foundation is complete. Phase 3 policy/dispatch and Phase 4
+Runner event paths have implementation and isolated PostgreSQL/component test
+evidence. Phase 6 Runner execution is in progress, not operationally qualified.
+Backup/restore evidence is recorded in `docs/progress.md`; it does not prove a
+live provider task or 3D runtime readiness.
 
 ## Topology and exposure boundary
 
-Docker Compose runs PostgreSQL, the FastAPI API, the Next.js web app, and an
-Nginx reverse proxy on one private Linux host:
+Docker Compose runs PostgreSQL, the FastAPI API, the Next.js web app, an isolated
+Runner, a one-shot migration service, and an Nginx reverse proxy on one private
+Linux host:
 
 - Nginx is the only published service: `127.0.0.1:${APP_PORT:-8080}:80`.
-- Web (`3000`) and API (`8000`) are reachable only on the Compose network.
+- Web (`3000`), API (`8000`), and Runner have no published ports. Web/API are
+  reachable only on the Compose app network; Runner is app-network-only and
+  has no direct database network access.
 - PostgreSQL (`5432`) has no host-published port. The one-shot `migrate`
-  service applies checksummed SQL migrations and provisions the restricted API
-  role before the API starts; it is not a long-running worker.
+  service applies checksummed SQL migrations, applies Alembic revisions, and
+  provisions the restricted API role before API startup; it is not a worker.
+- Runner claims persisted dispatches from the API and mounts `./workspaces`
+  plus `./.runner-state`. It runs non-root, with a read-only root filesystem,
+  dropped Linux capabilities, and no-new-privileges. Its configured provider
+  endpoint still needs OS/container egress enforcement; application URL checks
+  alone are not a network firewall.
 - Nginx sends `/api/` (including `/api/v1/ws`) and `/health/` to the API, and
   everything else to the web app. The WebSocket upgrade headers and the
   browser's `Origin` header are forwarded unchanged.
@@ -30,8 +40,7 @@ Nginx reverse proxy on one private Linux host:
   changing the configuration deliberately.
 - The browser never receives a shell/CLI or database route. Database access is
   only through Compose `exec` for operator scripts.
-
-Do not add port mappings for `db`, `api`, or `web`.
+Do not add port mappings for `db`, `api`, `web`, or `runner`.
 
 ## Prerequisites
 
@@ -49,14 +58,16 @@ Do not add port mappings for `db`, `api`, or `web`.
 
    The script refuses to overwrite an existing `.env`, prompts for the owner
    password twice without echoing it, and hashes it with the API image's
-   `python -m app.password_hash` helper. It generates the PostgreSQL password
-   and session secret with `openssl`, writes `.env` atomically with mode `600`,
-   and prints no secret values. It builds a temporary local API image to run the
-   hash helper; the plaintext password is sent on stdin, never on a command
-   line or in the environment.
+   `python -m app.password_hash` helper. It generates the PostgreSQL password,
+   session secret, and Runner shared token with `openssl`, plus default Runner
+   UID/GID values. It writes `.env` atomically with mode `600` and prints no
+   secret values. It builds a temporary local API image to run the hash helper;
+   the plaintext password is sent on stdin, never on a command line or in the
+   environment.
 
    Optional non-secret overrides: `APP_PORT`, `PUBLIC_ORIGIN`,
-   `OWNER_USERNAME`, `POSTGRES_DB`, `POSTGRES_USER`, and `APP_DB_USER`.
+   `OWNER_USERNAME`, `POSTGRES_DB`, `POSTGRES_USER`, `APP_DB_USER`,
+   `RUNNER_UID`, and `RUNNER_GID`.
    Leave `OWNER_PASSWORD_HASH` unset to enter a password without echo. The
    bootstrap hashes it using Argon2id and does not print the result.
 
@@ -94,14 +105,14 @@ is baked into the application images, and no default production credentials
 exist:
 
 - `APP_DB_USER`/`APP_DB_PASSWORD` provision a separate non-admin API role. The
-  API receives only `DATABASE_URL`; the migration service applies the project,
-  versioned definition, versioned skill, agent-instance, Task, and Run schemas,
-  revokes inherited/admin privileges, then grants project `SELECT`/`INSERT`,
-  stable definition and skill `SELECT`/`INSERT`/`UPDATE`, agent-instance and Task
-  `SELECT`/`INSERT`/`UPDATE`, and immutable definition-version, skill-version,
-  pinned-link, and Run `SELECT`/`INSERT`.
-  The API role has no immutable-row update/delete, schema-create, superuser, or
-  database-admin rights.
+  API receives only `DATABASE_URL`; the migration service applies project,
+  versioned definition/skill, Agent Instance, Task/Run, provider configuration,
+  workspace policy, Runner connection/dispatch, activity/projection, approval,
+  artifact-metadata, and scene-version schemas. Grants are scoped per table:
+  mutable owner records get the required `SELECT`/`INSERT`/`UPDATE`;
+  append-only versions, events, decisions, artifacts, and scene versions get
+  `SELECT`/`INSERT`. The role cannot update/delete immutable evidence or
+  administer the database.
 - `MIGRATION_DATABASE_URL` is the one-shot migration administrator connection.
 - `SESSION_SECRET` is at least 32 random bytes; rotating it invalidates
   sessions.
@@ -111,6 +122,10 @@ exist:
   Origin validation.
 - `OWNER_USERNAME` identifies the single owner. Server-side owner/resource
   scope remains authoritative; the browser cannot assert an owner ID.
+- `RUNNER_SHARED_TOKEN` authenticates internal Runner calls; keep it secret.
+  `NINEROUTER_URL` and `NINEROUTER_KEY` configure the provider endpoint/key for
+  Runner use only. `RUNNER_UID`/`RUNNER_GID` should match host ownership of
+  `workspaces/` and `.runner-state/`.
 - `SESSION_TTL_SECONDS` is capped at 8 hours. Keep it at or below `28800`.
 
 `.env`, `.env.*`, and `backups/` are git-ignored; `.env.example` contains only
@@ -147,6 +162,26 @@ run `rtk docker compose run --rm migrate`, then recreate the API when rotating
 that password. Rotate the PostgreSQL admin password separately in PostgreSQL
 and update `POSTGRES_PASSWORD` plus `MIGRATION_DATABASE_URL`; changing only the
 Compose value does not change an initialized database role.
+
+## Schema evolution
+
+- The checksummed SQL files `apps/api/migrations/0001`–`0008` are the immutable legacy baseline. The one-shot runner applies them before Alembic; do not edit an applied SQL file because its checksum is verified at startup.
+- SQLModel table metadata in `apps/api/app/infrastructure/postgres/models.py` is the default schema definition, and ordinary runtime repository CRUD uses SQLModel/SQLAlchemy async sessions. Generate versioned revisions with Alembic, review the generated operations, then apply them through the migration service.
+- Raw SQL remains available through the session-backed adapter for PostgreSQL-specific runtime paths such as advisory locks, recursive CTEs, and atomic event/projection updates. Prefer `op.execute()` in Alembic revisions for PostgreSQL-specific DDL/data operations; the legacy checksummed SQL runner also remains available. Do not replace explicit per-table grants with broad grants when adding tables.
+
+From the repository root, with the Compose environment configured:
+
+```bash
+rtk docker compose run --rm --entrypoint alembic migrate -c /app/alembic.ini revision --autogenerate -m "describe schema change"
+```
+
+Review the generated revision before applying it:
+
+```bash
+rtk docker compose run --rm migrate
+```
+
+Update `ensure_application_role()` in `apps/api/app/infrastructure/postgres/migrate.py` when a new application table needs access. Its default is no application-role access until an explicit grant is added.
 
 ## Logs and health
 
@@ -233,20 +268,27 @@ The restore script is intentionally non-destructive. The Phase 2 restore
 demonstration and its scratch-database evidence are recorded in
 `docs/progress.md`; repeat it after material schema or backup changes.
 
-## Known Phase 2 and Phase 3 limits
+## Known Phase 3–6 limits
 
-- Phase 1/M0 remains in progress; its gates are neither complete nor waived.
-- Phase 3 is in progress. The API persists minimal owner-scoped projects,
-  versioned agent definitions and text Skills with pinned versions,
-  owner-scoped Agent Instances with optional Project context, Tasks with
-  immutable revisions, and immutable Run/Attempt creation records with frozen
-  snapshots of available inputs. Run rows remain `created`; there is no
-  dispatcher, runtime execution, or task-completion path. Events, provider/
-  runtime configuration, compatibility/preflight, and other canonical domain
-  records remain open.
-- Dispatcher/runner boundaries are documented under `apps/dispatcher/` and
-  `apps/runner/`, but there is no production dispatch, runtime, provider, or
-  work-execution implementation; those remain later-phase work.
+- Phase 3 workspace policy/tool allowlist, Run dispatch, and same-workspace
+  serialization are implemented and passed restricted-role PostgreSQL 17
+  integration on a disposable `*_test` database. API-to-Runner full task
+  execution remains unverified.
+- Phase 4 internal Runner heartbeat/claim/event routes authenticate with the
+  shared token, derive scope from persisted dispatch, and acknowledge durable
+  deduplicated events. Action summaries are fixed labels from the file-tool
+  allowlist. Component tests pass; deployed restart/reconnect reconciliation
+  remains open.
+- Phase 6 Runner supports bounded non-streaming Chat Completions with
+  `list_files`, `read_file`, and `write_file`; a local HTTP-mock tool loop and
+  SQLite outbox restart tests pass. No live configured-provider Run or
+  end-to-end live 3D visualization has been observed.
+- Active Runs sharing one configured workspace path are serialized. The Runner
+  does not create a per-Run clone/worktree, expose a shell, or isolate writes
+  inside that path from an operator editing it concurrently.
+- Provider URL validation disables redirects but is not an OS/container
+  egress firewall. Provider-only egress, cancellation/acknowledgement,
+  final-answer/artifact persistence, and two independent live Runs remain open.
 - Owner sessions are opaque random tokens held in API-process memory. Logout
   revokes the server-side session immediately; API restart invalidates all active
   sessions. A shared session store is required before scaling beyond one API

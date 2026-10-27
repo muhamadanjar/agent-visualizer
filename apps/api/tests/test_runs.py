@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 from fastapi.testclient import TestClient
 
 from app.main import create_app
-from app.runs import Run, RunInputError
+from app.domain.runs import Run, RunInputError
 from test_api import ORIGIN, database_ready, login, settings
 
 
@@ -71,7 +71,7 @@ class MemoryRunRepository:
         return rows[offset : offset + limit]
 
 
-def test_run_api_requires_auth_and_replays_request_without_duplicate_attempt() -> None:
+def test_run_api_requires_auth_and_blocks_without_execution_services() -> None:
     task_id = uuid4()
     request_id = uuid4()
     runs = MemoryRunRepository(task_id)
@@ -85,26 +85,9 @@ def test_run_api_requires_auth_and_replays_request_without_duplicate_attempt() -
 
     with client:
         body = {"request_id": str(request_id)}
-        assert client.post(
-            f"/api/v1/tasks/{task_id}/runs", json=body, headers={"origin": ORIGIN}
-        ).status_code == 401
+        route = f"/api/v1/tasks/{task_id}/runs"
+        assert client.post(route, json=body, headers={"origin": ORIGIN}).status_code == 401
         assert login(client).status_code == 200
 
-        created = client.post(
-            f"/api/v1/tasks/{task_id}/runs", json=body, headers={"origin": ORIGIN}
-        )
-        assert created.status_code == 201
-        run = created.json()
-        assert run["status"] == "created"
-        assert run["attempt_number"] == 1
-        assert run["task_id"] == str(task_id)
-        assert "owner_id" not in run
-
-        replayed = client.post(
-            f"/api/v1/tasks/{task_id}/runs", json=body, headers={"origin": ORIGIN}
-        )
-        assert replayed.status_code == 200
-        assert replayed.json()["id"] == run["id"]
-        assert len(client.get(f"/api/v1/tasks/{task_id}/runs").json()) == 1
-        assert client.get(f"/api/v1/runs/{run['id']}").json() == run
-        assert client.get(f"/api/v1/runs/{uuid4()}").status_code == 404
+        blocked = client.post(route, json=body, headers={"origin": ORIGIN})
+        assert blocked.status_code == 503

@@ -1,44 +1,16 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import json
-from dataclasses import dataclass
-from datetime import datetime
-from typing import Protocol
+from typing import Any
 from uuid import UUID, uuid4
 
-import asyncpg
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-
-@dataclass(frozen=True, slots=True)
-class Run:
-    id: UUID
-    owner_id: str
-    task_id: UUID
-    task_revision: int
-    attempt_number: int
-    request_id: UUID
-    status: str
-    configuration_snapshot: dict[str, object]
-    created_at: datetime
-
-
-class RunInputError(ValueError):
-    def __init__(self, reason: str) -> None:
-        super().__init__(reason)
-        self.reason = reason
-
-
-class RunRepository(Protocol):
-    async def create_for_task(
-        self, owner_id: str, task_id: UUID, request_id: UUID
-    ) -> tuple[Run, bool]: ...
-
-    async def get_for_owner(self, owner_id: str, run_id: UUID) -> Run | None: ...
-
-    async def list_for_task(
-        self, owner_id: str, task_id: UUID, *, limit: int, offset: int
-    ) -> list[Run] | None: ...
-
+from app.domain.runs import Run, RunInputError, RunRepository
+from app.infrastructure.postgres.models import RunTable, TaskTable
+from app.infrastructure.postgres.raw_sql import RawSQLExecutor
 
 _RUN_SELECT = """
 SELECT id, owner_id, task_id, task_revision, attempt_number, request_id,
@@ -51,7 +23,7 @@ def _json_value(value: object) -> object:
     return json.loads(value) if isinstance(value, str) else value
 
 
-def _run(row: asyncpg.Record) -> Run:
+def _run(row: Mapping[str, Any]) -> Run:
     return Run(
         id=row["id"],
         owner_id=row["owner_id"],
@@ -64,16 +36,84 @@ def _run(row: asyncpg.Record) -> Run:
         created_at=row["created_at"],
     )
 
+def _run_model(row: RunTable) -> Run:
+    return Run(
+        id=row.id,
+        owner_id=row.owner_id,
+        task_id=row.task_id,
+        task_revision=row.task_revision,
+        attempt_number=row.attempt_number,
+        request_id=row.request_id,
+        status=row.status,
+        configuration_snapshot=row.configuration_snapshot,
+        created_at=row.created_at,
+    )
+
 
 class PostgresRunRepository:
-    def __init__(self, pool: asyncpg.Pool) -> None:
-        self._pool = pool
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+        self._sessions = sessions
 
+    async def _ensure_dispatch(
+        self,
+        connection: RawSQLExecutor,
+        owner_id: str,
+        run_id: UUID,
+        task_id: UUID,
+        project_id: UUID,
+        instance_id: UUID,
+        policy_revision: int,
+    ) -> None:
+        existing = await connection.fetchrow(
+            "SELECT state FROM run_dispatches WHERE owner_id = $1 AND run_id = $2",
+            owner_id,
+            run_id,
+        )
+        if existing is not None:
+            return
+        policy = await connection.fetchrow(
+            """
+            SELECT enabled, revision, workspace_path
+            FROM project_execution_policies
+            WHERE owner_id = $1 AND project_id = $2
+            FOR SHARE
+            """,
+            owner_id,
+            project_id,
+        )
+        if (
+            policy is None
+            or not policy["enabled"]
+            or policy["revision"] != policy_revision
+        ):
+            raise RunInputError("execution_policy")
+        await connection.execute(
+            """
+            INSERT INTO run_dispatches (
+                owner_id, run_id, task_id, project_id, instance_id, policy_revision,
+                workspace_path, state
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued')
+            """,
+            owner_id,
+            run_id,
+            task_id,
+            project_id,
+            instance_id,
+            policy_revision,
+            policy["workspace_path"],
+        )
     async def create_for_task(
-        self, owner_id: str, task_id: UUID, request_id: UUID
+        self,
+        owner_id: str,
+        task_id: UUID,
+        request_id: UUID,
+        *,
+        execution_policy_revision: int | None = None,
     ) -> tuple[Run, bool]:
-        async with self._pool.acquire() as connection:
-            async with connection.transaction():
+        async with self._sessions() as session:
+            async with session.begin():
+                connection = RawSQLExecutor(session)
                 await connection.execute(
                     "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
                     f"run-request:{owner_id}:{request_id}",
@@ -86,7 +126,21 @@ class PostgresRunRepository:
                 if existing is not None:
                     if existing["task_id"] != task_id:
                         raise RunInputError("idempotency_conflict")
-                    return _run(existing), False
+                    existing_run = _run(existing)
+                    if execution_policy_revision is not None:
+                        snapshot = existing_run.configuration_snapshot
+                        task_snapshot = snapshot["task"]
+                        instance_snapshot = snapshot["agent_instance"]
+                        await self._ensure_dispatch(
+                            connection,
+                            owner_id,
+                            existing_run.id,
+                            task_id,
+                            UUID(str(task_snapshot["project_id"])),
+                            UUID(str(instance_snapshot["id"])),
+                            execution_policy_revision,
+                        )
+                    return existing_run, False
 
                 await connection.execute(
                     "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
@@ -187,6 +241,14 @@ class PostgresRunRepository:
                 if len(skill_rows) != pin_count:
                     raise RunInputError("skill")
 
+                provider_config = await connection.fetchrow(
+                    """
+                    SELECT version, adapter, endpoint_url, model_id, route
+                    FROM provider_configs
+                    WHERE owner_id = $1
+                    """,
+                    owner_id,
+                )
                 snapshot = {
                     "task": {
                         "id": str(task_id),
@@ -226,7 +288,17 @@ class PostgresRunRepository:
                         }
                         for row in skill_rows
                     ],
-                    "provider": None,
+                    "provider": (
+                        None
+                        if provider_config is None
+                        else {
+                            "version": provider_config["version"],
+                            "adapter": provider_config["adapter"],
+                            "endpoint_url": provider_config["endpoint_url"],
+                            "model_id": provider_config["model_id"],
+                            "route": provider_config["route"],
+                        }
+                    ),
                     "runtime": None,
                 }
                 attempt_number = await connection.fetchval(
@@ -235,52 +307,57 @@ class PostgresRunRepository:
                     owner_id,
                     task_id,
                 )
-                row = await connection.fetchrow(
-                    """
-                    INSERT INTO runs (
-                        id, owner_id, task_id, task_revision, attempt_number,
-                        request_id, definition_id, definition_version,
-                        configuration_snapshot
-                    )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
-                    RETURNING id, owner_id, task_id, task_revision, attempt_number,
-                              request_id, status, configuration_snapshot, created_at
-                    """,
-                    uuid4(),
-                    owner_id,
-                    task_id,
-                    context["current_revision"],
-                    attempt_number,
-                    request_id,
-                    context["definition_id"],
-                    context["definition_version"],
-                    json.dumps(snapshot, ensure_ascii=False, allow_nan=False),
+                run = RunTable(
+                    id=uuid4(),
+                    owner_id=owner_id,
+                    task_id=task_id,
+                    task_revision=context["current_revision"],
+                    attempt_number=attempt_number,
+                    request_id=request_id,
+                    definition_id=context["definition_id"],
+                    definition_version=context["definition_version"],
+                    configuration_snapshot=snapshot,
                 )
-                if row is None:
-                    raise RuntimeError("created run could not be read")
-                return _run(row), True
+                session.add(run)
+                await session.flush()
+                if execution_policy_revision is not None:
+                    await self._ensure_dispatch(
+                        connection,
+                        owner_id,
+                        run.id,
+                        task_id,
+                        context["project_id"],
+                        context["instance_id"],
+                        execution_policy_revision,
+                    )
+                return _run_model(run), True
 
     async def get_for_owner(self, owner_id: str, run_id: UUID) -> Run | None:
-        row = await self._pool.fetchrow(
-            _RUN_SELECT + " WHERE owner_id = $1 AND id = $2", owner_id, run_id
-        )
-        return _run(row) if row is not None else None
+        async with self._sessions() as session:
+            row = await session.scalar(
+                select(RunTable).where(
+                    RunTable.owner_id == owner_id,
+                    RunTable.id == run_id,
+                )
+            )
+            return _run_model(row) if row is not None else None
 
     async def list_for_task(
         self, owner_id: str, task_id: UUID, *, limit: int, offset: int
     ) -> list[Run] | None:
-        async with self._pool.acquire() as connection:
-            if await connection.fetchval(
-                "SELECT 1 FROM tasks WHERE owner_id = $1 AND id = $2", owner_id, task_id
+        async with self._sessions() as session:
+            if await session.scalar(
+                select(TaskTable.id).where(
+                    TaskTable.owner_id == owner_id,
+                    TaskTable.id == task_id,
+                )
             ) is None:
                 return None
-            rows = await connection.fetch(
-                _RUN_SELECT
-                + " WHERE owner_id = $1 AND task_id = $2"
-                + " ORDER BY attempt_number LIMIT $3 OFFSET $4",
-                owner_id,
-                task_id,
-                limit,
-                offset,
+            rows = await session.scalars(
+                select(RunTable)
+                .where(RunTable.owner_id == owner_id, RunTable.task_id == task_id)
+                .order_by(RunTable.attempt_number)
+                .limit(limit)
+                .offset(offset)
             )
-        return [_run(row) for row in rows]
+            return [_run_model(row) for row in rows]

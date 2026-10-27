@@ -8,8 +8,8 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from test_api import MemoryProjectRepository, ORIGIN, database_ready, login, settings
-from app.registry import AgentDefinitionInputError
-from app.skills import TextResource
+from app.domain.registry import AgentDefinitionInputError
+from app.domain.skills import TextResource
 
 
 @dataclass(frozen=True)

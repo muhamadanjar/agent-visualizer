@@ -14,6 +14,8 @@ RUN python -m pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 COPY migrations ./migrations
+COPY alembic ./alembic
+COPY alembic.ini ./alembic.ini
 USER 10001:10001
 
 EXPOSE 8000

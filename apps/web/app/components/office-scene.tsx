@@ -9,7 +9,6 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 import type { RefObject } from "react";
 import { Vector3 } from "three";
 import type { Group } from "three";
-import { sampleAgents, type SampleAgent } from "../lib/sample-data";
 import {
   OFFICE_GRID_COUNT,
   OFFICE_GRID_MIN,
@@ -32,8 +31,6 @@ type OfficeSceneProps = {
   layoutId: OfficeLayoutId;
   spawnPosition: OfficePosition;
   activeDestination: OfficePosition | null;
-  visibleAgentIds: string[];
-  onSelectAgent: (agent: SampleAgent) => void;
   onSelectObject: (title: string, detail: string) => void;
   onPlayerPosition: (x: number, z: number) => void;
   onMovementMessage: (message: string) => void;
@@ -118,20 +115,16 @@ function ClickableFurniture({ item, onSelect }: { item: OfficeFurniture; onSelec
   );
 }
 
-function ProjectBoard({ onSelect }: { onSelect: (title: string, detail: string) => void }) {
+function WorkspaceTaskBoard({ onSelect }: { onSelect: (title: string, detail: string) => void }) {
   const open = (event: { stopPropagation: () => void }) => {
     event.stopPropagation();
-    onSelect("Atlas project board", "A local project-board prop. Opening it shows the sample Task Board only; no work is sent.");
+    onSelect("Workspace task board", "A fixed office-template object. Open persisted Tasks to inspect real Tasks; no task data is rendered in the scene.");
   };
   return (
     <group position={[0, 0, -5.98]} onClick={open}>
       <mesh position={[0, 1.45, 0]} castShadow><boxGeometry args={[1.8, 1.05, 0.12]} /><meshLambertMaterial color="#775c43" /></mesh>
       <mesh position={[0, 1.45, 0.075]}><boxGeometry args={[1.58, 0.82, 0.03]} /><meshLambertMaterial color="#d7c9a9" /></mesh>
-      <mesh position={[-0.42, 1.52, 0.1]}><boxGeometry args={[0.48, 0.47, 0.025]} /><meshLambertMaterial color="#9fb39c" /></mesh>
-      <mesh position={[0.34, 1.56, 0.1]}><boxGeometry args={[0.65, 0.08, 0.025]} /><meshLambertMaterial color="#698174" /></mesh>
-      <mesh position={[0.34, 1.38, 0.1]}><boxGeometry args={[0.65, 0.055, 0.025]} /><meshLambertMaterial color="#b89368" /></mesh>
-      <mesh position={[0.34, 1.2, 0.1]}><boxGeometry args={[0.65, 0.055, 0.025]} /><meshLambertMaterial color="#8b9980" /></mesh>
-      <Html position={[0, 2.1, 0.08]} center distanceFactor={12} style={{ pointerEvents: "none" }}><span className="scene-room-label">PROJECT BOARD</span></Html>
+      <Html position={[0, 2.1, 0.08]} center distanceFactor={12} style={{ pointerEvents: "none" }}><span className="scene-room-label">WORKSPACE TASKS</span></Html>
     </group>
   );
 }
@@ -158,17 +151,6 @@ function RoomLabel({ position, children }: { position: [number, number, number];
   return <Html position={position} center distanceFactor={12} style={{ pointerEvents: "none" }}><span className="scene-room-label">{children}</span></Html>;
 }
 
-function AgentAvatar({ agent, onSelect }: { agent: SampleAgent; onSelect: (agent: SampleAgent) => void }) {
-  return (
-    <group position={[agent.position[0], 0, agent.position[1]]} onClick={(event) => { event.stopPropagation(); onSelect(agent); }}>
-      <mesh position={[0, 0.52, 0]} castShadow><capsuleGeometry args={[0.25, 0.45, 4, 8]} /><meshLambertMaterial color={agent.color} /></mesh>
-      <mesh position={[0, 1.06, 0]} castShadow><dodecahedronGeometry args={[0.25, 0]} /><meshLambertMaterial color="#c9916e" flatShading /></mesh>
-      <mesh position={[0, 1.23, 0]}><sphereGeometry args={[0.23, 8, 5, 0, Math.PI * 2, 0, Math.PI * 0.55]} /><meshLambertMaterial color="#493b32" flatShading /></mesh>
-      <mesh position={[0.09, 1.07, 0.22]}><sphereGeometry args={[0.025, 6, 4]} /><meshBasicMaterial color="#2c2723" /></mesh>
-      <Html position={[0, 1.6, 0]} center distanceFactor={13} style={{ pointerEvents: "none" }}><span className="scene-avatar-label"><strong>{agent.name}</strong><small>Sample agent</small></span></Html>
-    </group>
-  );
-}
 
 function LocalAvatar({ bodyRef, onSelect, reducedMotion, spawnPosition }: {
   bodyRef: RefObject<RapierRigidBody | null>;
@@ -224,7 +206,7 @@ function PlayerController({ bodyRef, moveToRef, onMovementMessage, onPlayerPosit
   const lastBlockedReportRef = useRef(0);
   const objects = useMemo(() => [
     ...OFFICE_LAYOUTS[layoutId].furniture.map((item) => ({ title: item.title, x: item.x, z: item.z, detail: item.detail })),
-    { title: "Atlas project board", x: 0, z: -5.98, detail: "A local project-board prop. Opening it shows the sample Task Board only; no work is sent." },
+    { title: "Workspace task board", x: 0, z: -5.98, detail: "A fixed office-template object. Open persisted Tasks to inspect real Tasks; no task data is rendered in the scene." },
     { title: "Office entrance", x: 0, z: 6.02, detail: "A visual doorway marker; workspace permissions are not determined by room or proximity." },
   ], [layoutId]);
 
@@ -256,7 +238,7 @@ function PlayerController({ bodyRef, moveToRef, onMovementMessage, onPlayerPosit
           return distance < 1.7 && (!best || distance < best.distance) ? { distance, item } : best;
         }, null);
         if (nearest) onSelectObject(nearest.item.title, nearest.item.detail);
-        else onMovementMessage("No sample office object is within interaction range.");
+        else onMovementMessage("No office-template object is within interaction range.");
       }
     };
     const onKeyUp = (event: KeyboardEvent) => keysRef.current.delete(event.key.toLowerCase());
@@ -428,7 +410,7 @@ function SceneContents({ props }: { props: OfficeSceneProps }) {
         <OfficeStructure />
         <RoomFloors />
         {OFFICE_LAYOUTS[props.layoutId].furniture.map((item) => <ClickableFurniture key={item.id} item={item} onSelect={props.onSelectObject} />)}
-        <ProjectBoard onSelect={props.onSelectObject} />
+        <WorkspaceTaskBoard onSelect={props.onSelectObject} />
         <Doorway onSelect={props.onSelectObject} />
         <Plant position={[-7.2, 0, -5.1]} /><Plant position={[7.1, 0, 4.9]} /><Plant position={[-7.2, 0, 5.0]} />
         <mesh position={[-4.3, 0.03, -5.15]} rotation={[-Math.PI / 2, 0, 0]}><cylinderGeometry args={[0.42, 0.42, 0.02, 12]} /><meshLambertMaterial color="#a8b99a" /></mesh>
@@ -441,7 +423,7 @@ function SceneContents({ props }: { props: OfficeSceneProps }) {
         <mesh position={[0, 0.035, 0]} rotation={[-Math.PI / 2, 0, 0]} onClick={(event) => { event.stopPropagation(); moveToRef.current(event.point.x, event.point.z); }}>
           <planeGeometry args={[16.6, 12]} /><meshBasicMaterial transparent opacity={0} depthWrite={false} />
         </mesh>
-        {sampleAgents.filter((agent) => props.visibleAgentIds.includes(agent.id)).map((agent) => <AgentAvatar key={agent.id} agent={agent} onSelect={props.onSelectAgent} />)}
+        
         <LocalAvatar bodyRef={bodyRef} onSelect={onLocalAvatarSelect} reducedMotion={props.reducedMotion} spawnPosition={props.spawnPosition} />
         <PlayerController
           bodyRef={bodyRef}
@@ -469,7 +451,7 @@ export function OfficeScene(props: OfficeSceneProps) {
       gl={{ antialias: false, alpha: false, powerPreference: "low-power" }}
       shadows
       tabIndex={0}
-      aria-label="Interactive low-poly sample office. Focus the scene to move with WASD or arrow keys; click a clear floor tile to set a route."
+      aria-label="Interactive low-poly office template. Focus the scene to move with WASD or arrow keys; click a clear floor tile to set a route."
       onPointerDown={(event) => event.currentTarget.focus()}
     >
       <SceneContents props={props} />

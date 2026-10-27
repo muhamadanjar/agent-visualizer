@@ -29,6 +29,8 @@ owner_username="${OWNER_USERNAME:-owner}"
 postgres_db="${POSTGRES_DB:-agent_office}"
 app_db_user="${APP_DB_USER:-agent_office_app}"
 postgres_user="${POSTGRES_USER:-agent_office_admin}"
+runner_uid="${RUNNER_UID:-$(id -u)}"
+runner_gid="${RUNNER_GID:-$(id -g)}"
 
 [[ "$app_port" =~ ^[0-9]{1,5}$ ]] || die "APP_PORT must be a TCP port number"
 (( 10#$app_port >= 1 && 10#$app_port <= 65535 )) || die "APP_PORT must be between 1 and 65535"
@@ -39,6 +41,8 @@ postgres_user="${POSTGRES_USER:-agent_office_admin}"
 [[ "$app_db_user" =~ ^[a-z][a-z0-9_]{0,62}$ ]] || die "APP_DB_USER must be a lowercase SQL identifier"
 [[ "$app_db_user" != "$postgres_user" ]] || die "APP_DB_USER must differ from the PostgreSQL admin user"
 [[ "$postgres_user" =~ ^[a-z][a-z0-9_]{0,62}$ ]] || die "POSTGRES_USER must be a lowercase SQL identifier"
+[[ "$runner_uid" =~ ^[1-9][0-9]{0,9}$ ]] || die "RUNNER_UID must be a non-root numeric user id"
+[[ "$runner_gid" =~ ^[1-9][0-9]{0,9}$ ]] || die "RUNNER_GID must be a non-root numeric group id"
 
 case "$public_origin" in
     https://*)
@@ -86,6 +90,7 @@ argon2id_re='^\$argon2id\$[A-Za-z0-9./+,=$-]{20,}$'
 postgres_password="$(openssl rand -hex 32)"
 app_db_password="$(openssl rand -hex 32)"
 session_secret="$(openssl rand -hex 32)"
+runner_shared_token="$(openssl rand -hex 32)"
 tmp="$(mktemp "$ROOT_DIR/.env.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT
 
@@ -107,6 +112,9 @@ trap 'rm -f "$tmp"' EXIT
     # Single quotes keep Compose from expanding the hash's leading '$'.
     printf "OWNER_PASSWORD_HASH='%s'\n" "$owner_hash"
     printf 'SESSION_SECRET=%s\n' "$session_secret"
+    printf 'RUNNER_SHARED_TOKEN=%s\n' "$runner_shared_token"
+    printf 'RUNNER_UID=%s\n' "$runner_uid"
+    printf 'RUNNER_GID=%s\n' "$runner_gid"
     printf 'SESSION_TTL_SECONDS=28800\n'
     printf 'SESSION_COOKIE_SECURE=%s\n' "$cookie_secure"
     printf 'SESSION_COOKIE_SAMESITE=strict\n'

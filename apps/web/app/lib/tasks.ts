@@ -18,6 +18,17 @@ export type Task = {
   updated_at: string;
   revision_created_at: string;
 };
+export type TaskPreflightCheck = {
+  key: string;
+  status: "ready" | "blocked" | "unavailable";
+  detail: string;
+};
+
+export type TaskPreflight = {
+  task_id: string;
+  ready: boolean;
+  checks: TaskPreflightCheck[];
+};
 
 export type TaskWrite = {
   project_id: string;
@@ -97,6 +108,12 @@ export function requestTasks(signal?: AbortSignal): Promise<Task[]> {
 
 export function requestTask(taskId: string, signal?: AbortSignal): Promise<Task> {
   return requestTaskData<Task>(`/api/v1/tasks/${encodeURIComponent(taskId)}`, signal ? { signal } : undefined);
+}
+export function requestTaskPreflight(taskId: string, signal?: AbortSignal): Promise<TaskPreflight> {
+  return requestTaskData<TaskPreflight>(
+    `/api/v1/tasks/${encodeURIComponent(taskId)}/preflight`,
+    signal ? { signal } : undefined,
+  );
 }
 
 export function requestTaskRevisions(

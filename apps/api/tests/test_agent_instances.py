@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 from fastapi.testclient import TestClient
 
 from app.main import create_app
-from app.projects import Project
+from app.domain.projects import Project
 from test_api import ORIGIN, database_ready, login, settings
 
 

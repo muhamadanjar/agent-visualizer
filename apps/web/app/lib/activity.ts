@@ -1,0 +1,204 @@
+export type ActivityEvent = {
+  cursor: number;
+  run_id: string;
+  event_id: string;
+  event_type: string;
+  occurred_at: string;
+  source_sequence: number | null;
+};
+
+export type RuntimeProjection = {
+  run_id: string;
+  task_id: string;
+  project_id: string;
+  agent_instance_id: string;
+  status: string;
+  freshness: "fresh" | "stale";
+  last_event_cursor: number;
+  last_event_type: string;
+  last_event_at: string;
+  last_heartbeat_at: string | null;
+};
+
+export type ActivitySnapshot = {
+  cursor: number;
+  projections: RuntimeProjection[];
+};
+
+export type RunActivity = {
+  run_id: string;
+  status: string | null;
+  freshness: "unknown" | "fresh" | "stale";
+  last_event_at: string | null;
+  last_heartbeat_at: string | null;
+  cursor: number;
+  safe_action_summary: string | null;
+  events: ActivityEvent[];
+};
+
+export type ActivityConnection = "connecting" | "connected" | "disconnected" | "unavailable";
+
+export type ActivityMessage =
+  | { type: "snapshot"; snapshot: ActivitySnapshot }
+  | { type: "events"; events: ActivityEvent[] }
+  | { type: "connection"; state: ActivityConnection };
+
+export type ApprovalRecord = {
+  id: string;
+  run_id: string;
+  action_type: string;
+  action_digest: string;
+  resource_ref: string | null;
+  created_at: string;
+  expires_at: string;
+  decision: "approved" | "rejected" | "expired" | null;
+  decided_at: string | null;
+};
+
+export type ArtifactMetadata = {
+  id: string;
+  run_id: string;
+  artifact_type: string;
+  display_name: string;
+  media_type: string | null;
+  byte_length: number | null;
+  sha256: string | null;
+  created_at: string;
+  available: boolean;
+};
+
+async function requestActivity<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const response = await fetch(path, {
+    cache: "no-store",
+    credentials: "same-origin",
+    headers: { accept: "application/json" },
+    signal,
+  });
+  if (!response.ok) {
+    let detail: unknown;
+    try {
+      detail = (await response.json() as { detail?: unknown }).detail;
+    } catch {
+      detail = undefined;
+    }
+    throw new Error(typeof detail === "string"
+      ? detail
+      : `Could not load activity data (HTTP ${response.status}).`);
+  }
+  return response.json() as Promise<T>;
+}
+
+export function requestActivitySnapshot(signal?: AbortSignal): Promise<ActivitySnapshot> {
+  return requestActivity<ActivitySnapshot>("/api/v1/activity/snapshot", signal);
+}
+
+export function requestRunActivity(runId: string, signal?: AbortSignal): Promise<RunActivity> {
+  return requestActivity<RunActivity>(
+    `/api/v1/runs/${encodeURIComponent(runId)}/activity`,
+    signal,
+  );
+}
+
+export function requestRunApprovals(runId: string, signal?: AbortSignal): Promise<ApprovalRecord[]> {
+  return requestActivity<ApprovalRecord[]>(
+    `/api/v1/runs/${encodeURIComponent(runId)}/approvals`,
+    signal,
+  );
+}
+
+export function requestRunArtifacts(runId: string, signal?: AbortSignal): Promise<ArtifactMetadata[]> {
+  return requestActivity<ArtifactMetadata[]>(
+    `/api/v1/runs/${encodeURIComponent(runId)}/artifacts`,
+    signal,
+  );
+}
+
+function isActivityEvent(value: unknown): value is ActivityEvent {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.cursor === "number"
+    && typeof record.run_id === "string"
+    && typeof record.event_id === "string"
+    && typeof record.event_type === "string"
+    && typeof record.occurred_at === "string"
+    && (typeof record.source_sequence === "number" || record.source_sequence === null);
+}
+
+function isActivitySnapshot(value: unknown): value is ActivitySnapshot {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.cursor === "number"
+    && Array.isArray(record.projections)
+    && record.projections.every((projection) => {
+      if (typeof projection !== "object" || projection === null) return false;
+      const item = projection as Record<string, unknown>;
+      return typeof item.run_id === "string"
+        && typeof item.task_id === "string"
+        && typeof item.project_id === "string"
+        && typeof item.agent_instance_id === "string"
+        && typeof item.status === "string"
+        && (item.freshness === "fresh" || item.freshness === "stale")
+        && typeof item.last_event_cursor === "number"
+        && typeof item.last_event_type === "string"
+        && typeof item.last_event_at === "string"
+        && (typeof item.last_heartbeat_at === "string" || item.last_heartbeat_at === null);
+    });
+}
+
+export function subscribeToActivity(emit: (message: ActivityMessage) => void): () => void {
+  let socket: WebSocket | null = null;
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  let pingTimer: ReturnType<typeof setInterval> | undefined;
+  let stopped = false;
+
+  function connect() {
+    if (stopped) return;
+    emit({ type: "connection", state: "connecting" });
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    socket = new WebSocket(`${protocol}//${window.location.host}/api/v1/ws`);
+    socket.onmessage = (message) => {
+      let value: unknown;
+      try {
+        value = JSON.parse(String(message.data));
+      } catch {
+        return;
+      }
+      if (typeof value !== "object" || value === null) return;
+      const record = value as Record<string, unknown>;
+      if (record.type === "session_ready") {
+        emit({ type: "connection", state: "connected" });
+        socket?.send(JSON.stringify({ type: "subscribe" }));
+        pingTimer = setInterval(() => {
+          if (socket?.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: "ping" }));
+          }
+        }, 20_000);
+      } else if (record.type === "activity_snapshot" && isActivitySnapshot(record)) {
+        emit({ type: "snapshot", snapshot: { cursor: record.cursor, projections: record.projections as RuntimeProjection[] } });
+      } else if (record.type === "activity_events" && Array.isArray(record.events)) {
+        const events = record.events.filter(isActivityEvent);
+        if (events.length === record.events.length) emit({ type: "events", events });
+      } else if (record.type === "activity_unavailable") {
+        emit({ type: "connection", state: "unavailable" });
+      }
+    };
+    socket.onclose = () => {
+      clearInterval(pingTimer);
+      pingTimer = undefined;
+      socket = null;
+      if (stopped) return;
+      emit({ type: "connection", state: "disconnected" });
+      reconnectTimer = setTimeout(connect, 2_000);
+    };
+    socket.onerror = () => socket?.close();
+  }
+
+  connect();
+  return () => {
+    stopped = true;
+    clearTimeout(reconnectTimer);
+    clearInterval(pingTimer);
+    socket?.close();
+    socket = null;
+  };
+}

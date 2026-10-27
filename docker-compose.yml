@@ -29,7 +29,7 @@ services:
   migrate:
     build:
       context: ./apps/api
-    command: ["python", "-m", "app.migrate"]
+    command: ["python", "-m", "app.infrastructure.postgres.migrate"]
     environment:
       MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?set MIGRATION_DATABASE_URL in .env}
       APP_DB_USER: ${APP_DB_USER:?set APP_DB_USER in .env}
@@ -60,6 +60,7 @@ services:
       SESSION_COOKIE_SAMESITE: ${SESSION_COOKIE_SAMESITE:-strict}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN in .env}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      RUNNER_SHARED_TOKEN: ${RUNNER_SHARED_TOKEN:-}
     expose:
       - "8000"
     depends_on:
@@ -81,6 +82,38 @@ services:
     networks:
       - app
       - data
+
+  runner:
+    build:
+      context: ./apps/runner
+    user: "${RUNNER_UID:-1000}:${RUNNER_GID:-1000}"
+    environment:
+      RUNNER_API_URL: http://api:8000
+      RUNNER_SHARED_TOKEN: ${RUNNER_SHARED_TOKEN:-}
+      RUNNER_WORKSPACE_ROOT: /workspaces
+      RUNNER_STATE_ROOT: /state
+      NINEROUTER_URL: ${NINEROUTER_URL:-}
+      NINEROUTER_KEY: ${NINEROUTER_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./workspaces:/workspaces:rw
+      - ./.runner-state:/state:rw
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      api:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    logging: *default-logging
+    networks:
+      - app
 
   web:
     build:

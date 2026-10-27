@@ -7,8 +7,14 @@ import re
 from pathlib import Path
 
 import asyncpg
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import text as sqlalchemy_text
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
 
-MIGRATION_DIR = Path(__file__).resolve().parents[1] / "migrations"
+MIGRATION_DIR = Path(__file__).resolve().parents[3] / "migrations"
+ALEMBIC_CONFIG = Path(__file__).resolve().parents[3] / "alembic.ini"
 MIGRATION_NAME = re.compile(r"(?P<version>[0-9]{4})_[a-z0-9_]+\.sql\Z")
 MIGRATION_LOCK_KEY = 6_734_501_998_711_821_229
 
@@ -144,7 +150,10 @@ async def ensure_application_role(
                     'projects', 'agent_definitions', 'agent_definition_versions',
                     'skills', 'skill_versions', 'agent_definition_version_skills',
                     'agent_instances', 'tasks', 'task_revisions',
-                    'task_revision_dependencies', 'runs'
+                    'task_revision_dependencies', 'runs', 'provider_configs',
+                    'owner_event_cursors', 'activity_events', 'run_activity_projections',
+                    'approval_requests', 'approval_decisions', 'artifacts', 'office_scene_versions',
+                    'alembic_version'
                 ]::text[])
                   AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
                   AND relowner = (SELECT oid FROM pg_roles WHERE rolname = $1)
@@ -229,6 +238,50 @@ async def ensure_application_role(
             "SELECT format('GRANT SELECT, INSERT ON TABLE runs TO %I', $1::text)",
             role_name,
         )
+        grant_provider_configs = await connection.fetchval(
+            "SELECT format('GRANT SELECT, INSERT, UPDATE ON TABLE provider_configs TO %I', $1::text)",
+            role_name,
+        )
+        grant_owner_event_cursors = await connection.fetchval(
+            "SELECT format('GRANT SELECT, INSERT, UPDATE ON TABLE owner_event_cursors TO %I', $1::text)",
+            role_name,
+        )
+        grant_activity_events = await connection.fetchval(
+            "SELECT format('GRANT SELECT, INSERT ON TABLE activity_events TO %I', $1::text)",
+            role_name,
+        )
+        grant_run_activity_projections = await connection.fetchval(
+            "SELECT format('GRANT SELECT, INSERT, UPDATE ON TABLE run_activity_projections TO %I', $1::text)",
+            role_name,
+        )
+        grant_approval_requests = await connection.fetchval(
+            "SELECT format('GRANT SELECT, INSERT ON TABLE approval_requests TO %I', $1::text)",
+            role_name,
+        )
+        grant_approval_decisions = await connection.fetchval(
+            "SELECT format('GRANT SELECT, INSERT ON TABLE approval_decisions TO %I', $1::text)",
+            role_name,
+        )
+        grant_artifacts = await connection.fetchval(
+            "SELECT format('GRANT SELECT, INSERT ON TABLE artifacts TO %I', $1::text)",
+            role_name,
+        )
+        grant_office_scene_versions = await connection.fetchval(
+            "SELECT format('GRANT SELECT, INSERT ON TABLE office_scene_versions TO %I', $1::text)",
+            role_name,
+        )
+        grant_execution_policies = await connection.fetchval(
+            "SELECT format('GRANT SELECT, INSERT, UPDATE ON TABLE project_execution_policies TO %I', $1::text)",
+            role_name,
+        )
+        grant_runner_connections = await connection.fetchval(
+            "SELECT format('GRANT SELECT, INSERT, UPDATE ON TABLE runner_connections TO %I', $1::text)",
+            role_name,
+        )
+        grant_run_dispatches = await connection.fetchval(
+            "SELECT format('GRANT SELECT, INSERT, UPDATE ON TABLE run_dispatches TO %I', $1::text)",
+            role_name,
+        )
         for statement in (
             revoke_public_create,
             revoke_app_schema,
@@ -248,10 +301,58 @@ async def ensure_application_role(
             grant_task_revisions,
             grant_task_dependencies,
             grant_runs,
+            grant_provider_configs,
+            grant_owner_event_cursors,
+            grant_activity_events,
+            grant_run_activity_projections,
+            grant_approval_requests,
+            grant_approval_decisions,
+            grant_artifacts,
+            grant_execution_policies,
+            grant_runner_connections,
+            grant_run_dispatches,
+            grant_office_scene_versions,
         ):
             await connection.execute(statement)
     finally:
         await connection.fetchval("SELECT pg_advisory_unlock($1)", MIGRATION_LOCK_KEY)
+
+def _sqlalchemy_url(database_url: str) -> str:
+    if database_url.startswith("postgresql+asyncpg://"):
+        return database_url
+    if database_url.startswith("postgresql://"):
+        return database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    raise RuntimeError("MIGRATION_DATABASE_URL must use PostgreSQL")
+
+
+async def apply_alembic_migrations(database_url: str) -> None:
+    """Apply versioned migrations generated from SQLModel metadata."""
+    engine = create_async_engine(_sqlalchemy_url(database_url), poolclass=NullPool)
+    try:
+        async with engine.connect() as async_connection:
+            def upgrade(connection) -> None:
+                connection.execute(
+                    sqlalchemy_text("SELECT pg_advisory_lock(:lock_key)"),
+                    {"lock_key": MIGRATION_LOCK_KEY},
+                )
+                connection.commit()
+                try:
+                    config = Config(str(ALEMBIC_CONFIG))
+                    config.attributes["connection"] = connection
+                    command.upgrade(config, "head")
+                finally:
+                    if connection.in_transaction():
+                        connection.rollback()
+                    connection.execute(
+                        sqlalchemy_text("SELECT pg_advisory_unlock(:lock_key)"),
+                        {"lock_key": MIGRATION_LOCK_KEY},
+                    )
+                    connection.commit()
+
+            await async_connection.run_sync(upgrade)
+    finally:
+        await engine.dispose()
+
 
 async def migrate(
     migration_database_url: str,
@@ -262,6 +363,13 @@ async def migrate(
     connection = await asyncpg.connect(dsn=dsn, timeout=5)
     try:
         versions = await apply_migrations(connection)
+    finally:
+        await connection.close()
+
+    await apply_alembic_migrations(migration_database_url)
+
+    connection = await asyncpg.connect(dsn=dsn, timeout=5)
+    try:
         await ensure_application_role(connection, app_role_name, app_role_password)
         return versions
     finally:
@@ -280,7 +388,7 @@ def main() -> None:
         migrate(migration_database_url, app_role_name, app_role_password)
     )
     rendered = ", ".join(str(version) for version in versions) or "none"
-    print(f"database migrations ready; newly applied versions: {rendered}")
+    print(f"migration workflow ready; newly applied legacy SQL versions: {rendered}; Alembic is at head")
 
 
 if __name__ == "__main__":

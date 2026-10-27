@@ -126,6 +126,7 @@ class Settings:
     log_level: str = "INFO"
     login_rate_limit_attempts: int = 5
     login_rate_limit_window_seconds: int = 900
+    runner_shared_token: str | None = None
 
     def __post_init__(self) -> None:
         self._validate()
@@ -164,7 +165,8 @@ class Settings:
             raise ConfigError("LOGIN_RATE_LIMIT_ATTEMPTS must be between 1 and 20")
         if not 60 <= self.login_rate_limit_window_seconds <= 3600:
             raise ConfigError("LOGIN_RATE_LIMIT_WINDOW_SECONDS must be between 60 and 3600")
-        _validate_database_url(self.database_url)
+        if self.runner_shared_token is not None and len(self.runner_shared_token) < 32:
+            raise ConfigError("RUNNER_SHARED_TOKEN must be at least 32 characters when set")
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> "Settings":
@@ -186,6 +188,7 @@ class Settings:
             login_rate_limit_window_seconds=_int(
                 env, "LOGIN_RATE_LIMIT_WINDOW_SECONDS", 900, 60, 3600
             ),
+            runner_shared_token=(env.get("RUNNER_SHARED_TOKEN") or "").strip() or None,
         )
 
 

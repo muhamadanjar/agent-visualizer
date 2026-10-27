@@ -4,6 +4,17 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { requestRun, requestTaskRunPage, type RunRecord } from "../lib/runs";
 import { requestTaskData, type Task } from "../lib/tasks";
+import {
+  requestRunActivity,
+  requestRunApprovals,
+  requestRunArtifacts,
+  subscribeToActivity,
+  type ActivityConnection,
+  type ActivityEvent,
+  type ApprovalRecord,
+  type ArtifactMetadata,
+  type RunActivity,
+} from "../lib/activity";
 import { PageHeader, StatusPill } from "./workspace-components";
 
 const TASK_PAGE_SIZE = 100;
@@ -16,7 +27,7 @@ function formatDate(value: string) {
 
 function RunRow({ run }: { run: RunRecord }) {
   const snapshot = run.configuration_snapshot;
-  const status = run.status === "created" ? "Created · not dispatched" : `Unknown status · ${run.status}`;
+  const status = run.status === "created" ? "Created record" : `Unknown record status · ${run.status}`;
   return (
     <article className="run-record-card">
       <div className="run-record-heading">
@@ -29,7 +40,7 @@ function RunRow({ run }: { run: RunRecord }) {
         <div><dt>Definition version</dt><dd>{snapshot.agent_definition.name} · v{snapshot.agent_definition.version}</dd></div>
         <div><dt>Skills pinned</dt><dd>{snapshot.skills.length}</dd></div>
       </dl>
-      <p className="field-note">Immutable creation record only. No runtime events, dispatch, or execution status are available.</p>
+      <p className="field-note">This immutable record reports creation only; runtime events and freshness are shown separately on the Run detail page.</p>
     </article>
   );
 }
@@ -155,6 +166,151 @@ export function RunList() {
   );
 }
 
+function RunEvidenceView({ runId }: { runId: string }) {
+  const [activity, setActivity] = useState<RunActivity | null>(null);
+  const [activityError, setActivityError] = useState<string | null>(null);
+  const [approvals, setApprovals] = useState<ApprovalRecord[] | null>(null);
+  const [approvalError, setApprovalError] = useState<string | null>(null);
+  const [artifacts, setArtifacts] = useState<ArtifactMetadata[] | null>(null);
+  const [artifactError, setArtifactError] = useState<string | null>(null);
+  const [connection, setConnection] = useState<ActivityConnection>("connecting");
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setActivity(null);
+    setActivityError(null);
+    setApprovals(null);
+    setApprovalError(null);
+    setArtifacts(null);
+    setArtifactError(null);
+    setConnection("connecting");
+    let active = true;
+
+    function loadActivity() {
+      void requestRunActivity(runId, controller.signal)
+        .then((record) => {
+          if (!controller.signal.aborted) {
+            setActivity(record);
+            setActivityError(null);
+          }
+        })
+        .catch((reason: unknown) => {
+          if (!controller.signal.aborted) {
+            setActivityError(reason instanceof Error ? reason.message : "Could not load runtime evidence.");
+          }
+        });
+    }
+
+    function loadApprovals() {
+      void requestRunApprovals(runId, controller.signal)
+        .then((records) => {
+          if (!controller.signal.aborted) {
+            setApprovals(records);
+            setApprovalError(null);
+          }
+        })
+        .catch((reason: unknown) => {
+          if (!controller.signal.aborted) {
+            setApprovalError(reason instanceof Error ? reason.message : "Could not load approval records.");
+          }
+        });
+    }
+
+    function loadArtifacts() {
+      void requestRunArtifacts(runId, controller.signal)
+        .then((records) => {
+          if (!controller.signal.aborted) {
+            setArtifacts(records);
+            setArtifactError(null);
+          }
+        })
+        .catch((reason: unknown) => {
+          if (!controller.signal.aborted) {
+            setArtifactError(reason instanceof Error ? reason.message : "Could not load artifact metadata.");
+          }
+        });
+    }
+
+    loadActivity();
+    loadApprovals();
+    loadArtifacts();
+    const refreshTimer = setInterval(loadActivity, 5_000);
+    const unsubscribe = subscribeToActivity((message) => {
+      if (!active) return;
+      if (message.type === "connection") {
+        setConnection(message.state);
+      } else if (message.type === "snapshot") {
+        setConnection("connected");
+        loadActivity();
+      } else if (message.events.some((event) => event.run_id === runId)) {
+        loadActivity();
+      }
+    });
+
+    return () => {
+      active = false;
+      controller.abort();
+      clearInterval(refreshTimer);
+      unsubscribe();
+    };
+  }, [reloadKey, runId]);
+
+  function renderEvent(event: ActivityEvent) {
+    return (
+      <li className="run-event-row" key={event.cursor}>
+        <span><strong>{event.event_type.replaceAll(".", " · ")}</strong><small>Event {event.cursor}</small></span>
+        <time dateTime={event.occurred_at}>{formatDate(event.occurred_at)}</time>
+      </li>
+    );
+  }
+
+  return (
+    <section className="run-evidence-section" aria-labelledby="runtime-evidence-heading">
+      <div className="section-heading">
+        <h3 id="runtime-evidence-heading">Runtime evidence</h3>
+        <span className="muted">Live feed: {connection}</span>
+      </div>
+      {activityError ? <div className="empty-state"><strong>Runtime evidence unavailable</strong><span role="alert">{activityError}</span><button className="button button-secondary" type="button" onClick={() => setReloadKey((value) => value + 1)}>Retry</button></div> : null}
+      {!activityError && activity === null ? <p className="muted" role="status">Loading runtime evidence…</p> : null}
+      {activity && activity.status === null ? <div className="empty-state"><strong>No runtime projection is persisted</strong><span>Run creation is not dispatch. No Engine/Runner lifecycle events have been recorded for this attempt.</span></div> : null}
+      {activity && activity.status !== null ? (
+        <>
+          <div className="settings-row"><span>Runtime status</span><strong>{activity.freshness === "stale" ? `Stale · ${activity.status}` : `${activity.freshness} · ${activity.status}`}</strong></div>
+          <div className="settings-row"><span>Last event</span><strong>{activity.last_event_at ? formatDate(activity.last_event_at) : "Unavailable"}</strong></div>
+          <div className="settings-row"><span>Safe action summary</span><strong>{activity.safe_action_summary ?? "Unavailable"}</strong></div>
+          {activity.events.length ? <ol className="run-event-list" aria-label="Persisted runtime events">{activity.events.map(renderEvent)}</ol> : <p className="muted">No lifecycle events are available for this Run.</p>}
+        </>
+      ) : null}
+      <section className="run-evidence-section" aria-labelledby="approval-records-heading">
+        <h4 id="approval-records-heading">Approval records</h4>
+        {approvalError ? <p className="inline-error" role="alert">{approvalError}</p> : null}
+        {approvals === null && !approvalError ? <p className="muted" role="status">Loading approval records…</p> : null}
+        {approvals?.length === 0 ? <p className="muted">No approval requests are persisted.</p> : null}
+        {approvals && approvals.length > 0 ? (
+          <>
+            <ul className="run-evidence-list">{approvals.map((approval) => (
+              <li key={approval.id}>
+                <strong>{approval.action_type} · {approval.decision ?? "Pending decision"}</strong>
+                <span>{approval.resource_ref ?? "Resource scope unavailable"}</span>
+                <small>Expires {formatDate(approval.expires_at)}</small>
+              </li>
+            ))}</ul>
+            {approvals.some((approval) => approval.decision === null) ? <p className="field-note">This pending request cannot be approved in the UI: its parameter summary is unavailable, so the requested action cannot be safely inspected.</p> : null}
+          </>
+        ) : null}
+      </section>
+      <section className="run-evidence-section" aria-labelledby="artifact-records-heading">
+        <h4 id="artifact-records-heading">Artifact metadata</h4>
+        {artifactError ? <p className="inline-error" role="alert">{artifactError}</p> : null}
+        {artifacts === null && !artifactError ? <p className="muted" role="status">Loading artifact metadata…</p> : null}
+        {artifacts?.length === 0 ? <p className="muted">No artifact metadata is persisted.</p> : null}
+        {artifacts && artifacts.length > 0 ? <ul className="run-evidence-list">{artifacts.map((artifact) => <li key={artifact.id}><strong>{artifact.display_name}</strong><span>{artifact.artifact_type} · {artifact.media_type ?? "Media type unavailable"}</span><small>{artifact.available ? "Available" : "Metadata only · content unavailable"}</small></li>)}</ul> : null}
+      </section>
+    </section>
+  );
+}
+
 export function RunDetailView({ runId }: { runId: string }) {
   const [run, setRun] = useState<RunRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -182,13 +338,13 @@ export function RunDetailView({ runId }: { runId: string }) {
   const createdStatus = run.status === "created";
   return (
     <div className="page-stack">
-      <PageHeader eyebrow="Persisted Run / Attempt" title={`Attempt ${run.attempt_number}`} description="This immutable record freezes the selected Task revision and configuration at creation. It is not a runtime session and has not been dispatched." >
+      <PageHeader eyebrow="Persisted Run / Attempt" title={`Attempt ${run.attempt_number}`} description="This immutable record freezes the selected Task revision and configuration. Runtime lifecycle evidence is separate and appears below when persisted." >
         <Link className="button button-secondary" href={`/tasks/${run.task_id}`}>Open task</Link>
         <Link className="text-link" href="/runs">All Runs</Link>
       </PageHeader>
       <div className="run-layout">
         <section className="content-section run-main" aria-labelledby="run-record-heading">
-          <div className="run-title-row"><div><p className="eyebrow">Run ID · {run.id}</p><h2 id="run-record-heading">{task.title}</h2></div><StatusPill tone={createdStatus ? "neutral" : "amber"}>{createdStatus ? "Created · not dispatched" : `Unknown status · ${run.status}`}</StatusPill></div>
+          <div className="run-title-row"><div><p className="eyebrow">Run ID · {run.id}</p><h2 id="run-record-heading">{task.title}</h2></div><StatusPill tone={createdStatus ? "neutral" : "amber"}>{createdStatus ? "Created record" : `Unknown record status · ${run.status}`}</StatusPill></div>
           <p className="muted">Creation timestamp: <time dateTime={run.created_at}>{formatDate(run.created_at)}</time></p>
           <section className="run-evidence-section" aria-labelledby="snapshot-heading"><h3 id="snapshot-heading">Immutable configuration snapshot</h3>
             <div className="settings-row"><span>Task revision</span><strong>{task.revision}</strong></div>
@@ -199,11 +355,11 @@ export function RunDetailView({ runId }: { runId: string }) {
             <div className="settings-row"><span>Provider configuration</span><strong>{snapshot.provider === null ? "Not configured" : "Present in snapshot"}</strong></div>
             <div className="settings-row"><span>Runtime configuration</span><strong>{snapshot.runtime === null ? "Not configured" : "Present in snapshot"}</strong></div>
           </section>
-          <section className="run-evidence-section" aria-labelledby="evidence-heading"><h3 id="evidence-heading">Runtime evidence</h3><div className="empty-state"><strong>No runtime evidence is persisted</strong><span>Event ingestion, dispatch, execution, artifacts, approvals, and completion state are not available.</span></div></section>
+          <RunEvidenceView runId={run.id} />
         </section>
         <aside className="run-side-panel">
           <section className="content-section"><h2>Task context</h2><StatusPill>Task revision {task.revision}</StatusPill><p>{task.goal}</p><Link className="text-link" href={`/tasks/${run.task_id}`}>Open task record</Link></section>
-          <section className="content-section"><h2>Attempt identity</h2><dl className="preview-facts"><div><dt>Attempt number</dt><dd>{run.attempt_number}</dd></div><div><dt>Request ID</dt><dd>{run.request_id}</dd></div><div><dt>Task</dt><dd><Link href={`/tasks/${run.task_id}`}>{run.task_id}</Link></dd></div></dl><p className="field-note">Run status is separate from Task stage. No runtime lifecycle or status transition is implied.</p></section>
+          <section className="content-section"><h2>Attempt identity</h2><dl className="preview-facts"><div><dt>Attempt number</dt><dd>{run.attempt_number}</dd></div><div><dt>Request ID</dt><dd>{run.request_id}</dd></div><div><dt>Task</dt><dd><Link href={`/tasks/${run.task_id}`}>{run.task_id}</Link></dd></div></dl><p className="field-note">The persisted Run creation state is separate from the runtime event projection shown in Runtime evidence.</p></section>
         </aside>
       </div>
     </div>

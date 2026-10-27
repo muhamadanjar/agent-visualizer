@@ -1,9 +1,24 @@
-# M0 — Runtime and 3D Feasibility Evidence
+# M0 — Provider, Runtime, and 3D Feasibility Evidence
 
-**Status:** Partial; Phase 1 remains in progress.  
-**Run date:** 2026-10-22
+**Status: Phase 1/M0 feasibility completed on 2026-10-26 for the user-directed direct-provider and 3D scope. Managed execution and provider spend controls remain open blocking gates.** The evidence below covers bounded inference feasibility only; it does not establish product integration, universal compatibility, or an operational Managed MVP.
+**Evidence dates:** Historical runtime/3D probes began 2026-10-22; bounded direct-provider probe completed 2026-10-26.  
 **Progress register:** [`progress.md`](progress.md)  
 **Phase plan:** [`phase-plan.md`](phase-plan.md)
+
+**Scope note (2026-10-26):** OMP and Codex app-server findings below are historical feasibility evidence, not Phase 1 product-integration targets. Phase 1 prioritizes direct OpenAI-compatible Chat Completions inference and 3D feasibility. One bounded live request through local 9Router returned a correlated text completion on `openrouter/cohere/north-mini-code:free`; exact evidence and capability limits are recorded below. No production Provider Adapter, Managed runtime, or universal provider compatibility is claimed.
+
+
+## Direct provider API probe
+
+On 2026-10-26, after the user's direction to complete Phase 1 using a `:free` route, one bounded request was sent through the isolated proposed-adapter probe `spikes/m0-runtime/provider-completions-smoke.ts` to `NINEROUTER_URL=http://localhost:20128`, using `NINEROUTER_KEY` (value not recorded). The command enabled the one-request cost opt-in for this user-authorized smoke; the selected route's catalog pricing was `null`, and the provider account spend cap remains unverified. This request does not satisfy the plan's enforced-spend-control prerequisite; do not send another real request until spend and egress limits are verified.
+
+| Capability | Result | Evidence and limit |
+| --- | --- | --- |
+| OpenAI-compatible Chat Completions text response | Verified narrowly | One request for `openrouter/cohere/north-mini-code:free` returned the exact `m0-ok` completion. Provider response model: `cohere/north-mini-code:free`; request ID: `gen-1792987848-yosMf7dxWMAVHf0bu7DO`. The smoke capped output at 64 tokens, disabled streaming, and sent no tools. |
+| `openrouter/google/gemma-4-26b-a4b-it:free` route | Unavailable on this attempt | The single request returned HTTP 503; no retry was sent. |
+| Streaming, tool calls, multimodal input/output, context limits | Unknown; unsupported until tested | No such feature was requested or verified for the successful route. |
+| Pricing and account spend controls | Unknown | The selected route's catalog `pricing` field was `null`; the response did not report cost, and no provider-side spend cap was verified. `:free` is not evidence of zero cost. |
+| Product Provider Adapter and execution runtime | Not implemented | This is feasibility evidence from an isolated probe, not an API integration in `apps/api` or `apps/web`; provider output does not execute tasks or authorize tools. |
 
 ## Decision summary
 
@@ -42,18 +57,21 @@ The separate no-provider [`sandbox-egress-smoke.ts`](../spikes/m0-runtime/sandbo
 
 ## Phase 1 exit-criteria assessment
 
-| Exit criterion | Assessment |
-| --- | --- |
-| Observe a real task and attributable result through the adapter | Met narrowly: the no-tools text-only task on `cl/thinkingmachines/inkling-small:free` completed through the isolated OMP adapter. It used one provider request (HTTP 200), returned a settled completed result correlated by request ID, and emitted `agent_start`/`agent_end` events tagged by the adapter's single-active-task-window attribution. OMP activity frames do not carry their own request ID. The earlier host-side read-only probe that requested `PRD.md` remains unacceptable evidence. |
-| Demonstrate P0 Managed capabilities or record explicit blockers | Met as explicit blocker documentation, not capability completion. Remaining blockers: approval identity/policy, default child scope, production adapter/task isolation and resource limits, active-run health, side-effect-safe cancellation, interrupted-task reconciliation, provider tool capability, and account spend limits. |
-| Prove movement and collision on the target profile | Met narrowly for the provisional M0 profile: browser smokes exercised WASD movement, click-to-move, blocked destinations, and a physical boundary collision; the collision smoke is narrow, not a collision test suite. The final visible managed-Chromium performance run used exactly 1440×900 CSS / DPR 1.25 and held alternating W/S movement with follow camera, 50 avatar instances, and 10 synthetic streams for 20 seconds. Five 4-second RAF samples were 51/41/43/56/52 FPS and UI diagnostics were 47/41/46/58/51 FPS; every active sample exceeded 30 FPS. Idle-only samples ranged 19–50 FPS and a separate hidden/headless run produced 2–10 FPS with page-state resets; neither is the combined visible workload. Actual pilot hardware remains unselected.
-| Resolve unsafe/unknown Managed behavior before proceeding | Not met. The successful route proves only one synthetic text-only task with tools disabled. Required OMP safety controls, provider tool capability, applicable spend limits, and production runner integration remain unresolved. Do not generalize this smoke into full Managed readiness. Phase 2 proceeds only because the user separately authorized it; Phase 1 remains open. |
+| Exit criterion | Assessment | Evidence / limit |
+| --- | --- | --- |
+| Historical OMP task evidence (not a post-pivot Phase 1 criterion) | Retained as historical evidence only | A synthetic no-tools task completed through the isolated OMP feasibility probe; this is not product integration or current Phase 1 provider-inference evidence. |
+| Bounded direct Chat Completions inference | Met narrowly | One explicitly authorized request through `NINEROUTER_URL` to `openrouter/cohere/north-mini-code:free` returned correlated text `m0-ok`; response model `cohere/north-mini-code:free`, request ID `gen-1792987848-yosMf7dxWMAVHf0bu7DO`. Request count 1, `max_tokens=64`, non-streaming, no tools. |
+| Provider/model/endpoint capability status recorded | Met narrowly | The matrix above records the tested plain-text path; untested streaming, tools, multimodal input, context limits, other routes, and provider behavior remain unsupported or unknown. Catalog pricing was `null`; account-level spend limits were not verified. |
+| Demonstrate P0 Managed capabilities or record explicit blockers | Met as explicit blocker documentation, not capability completion | Remaining blockers: approval identity/policy, default child scope, production adapter/task isolation and resource limits, active-run health, side-effect-safe cancellation, interrupted-task reconciliation, provider tool capability, and account spend limits. |
+| Prove movement and collision on the target profile | Met narrowly for the provisional M0 profile | Browser smokes exercised movement, click-to-move, blocked destinations, and physical boundary collision. The provisional browser workload exceeded 30 FPS; actual pilot hardware remains unselected. |
+| Resolve unsafe/unknown Managed behavior before any Managed execution | Not met; remains blocking | No production Provider Adapter, tool authorization/isolation, execution lifecycle/event attribution, or recovery was demonstrated. Phase 1 feasibility closure does not waive this gate. |
+| Avoid universal compatibility and Managed MVP claims | Complete | Only the tested endpoint/route and plain-text completion are evidenced. Managed execution remains blocked. |
 
 ## Phase 1 closure conclusion
 
-Phase 1 remains open. The active 50-avatar/10-stream walking/follow-camera workload passed the provisional 1440×900 CSS / DPR 1.25 profile (RAF samples 51/41/43/56/52 FPS); movement/collision evidence is narrow and actual pilot hardware is unselected. The real-task criterion is now met narrowly: `cl/thinkingmachines/inkling-small:free` completed a synthetic no-tools task through the isolated OMP adapter with one HTTP 200 provider request and a settled result correlated by request ID. `agent_start`/`agent_end` were attributed by the adapter's single-active-task window, not IDs supplied by OMP. Other tested routes returned HTTP 503/410, or HTTP 200 followed by abort. Runtime RPC evidence remains limited: approval lacks proven call/resource binding, default child scope is not constrained, active health/heartbeat is absent, cancellation side-effect safety is unknown, and crash continuation does not replay an interrupted task. Generic Bubblewrap, local mock egress, and resource controls pass only within their stated boundaries. Tool capability, applicable spend controls, and full production runner integration remain unverified. Phase 2 continues only by explicit user authorization; it does not close Phase 1.
+Phase 1/M0 feasibility is closed for the user-directed provider-inference and 3D scope based on the bounded request and provisional browser-scene evidence above. This closure establishes neither universal compatibility nor operational Managed readiness; the actual target device remains unselected.
 
-The full production adapter, durable cancellation/reconciliation, and production resource enforcement belong to later implementation phases; Phase 1 records their feasibility and blockers rather than claiming they are implemented. Keep Phase 1 open. Continue Phase 2 only under the user's explicit authorization; do not record Phase 1 complete until its exit criteria have evidence and every required scope decision is resolved. Pilot budget amounts remain a separate pilot-readiness gate, not a standalone Phase 1 exit criterion.
+Managed execution remains blocked: no production Provider Adapter, Agent Office-owned tool loop/authorization, workspace and credential isolation, lifecycle event attribution, or recovery was proven. The one user-authorized `:free` request did not verify pricing or an account hard cap; spend and egress controls are required before any further real requests. No Managed MVP claim is supported.
 
 ## Alternative runtime evaluation
 

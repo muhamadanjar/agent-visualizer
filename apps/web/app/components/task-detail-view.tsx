@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { requestTask, requestTaskRevisions, type Task } from "../lib/tasks";
+import { requestTask, requestTaskPreflight, requestTaskRevisions, type Task, type TaskPreflight } from "../lib/tasks";
 import { TaskRunHistory } from "./run-list";
 import { PageHeader, StatusPill } from "./workspace-components";
 
@@ -29,6 +29,130 @@ function RevisionContents({ task }: { task: Task }) {
 }
 
 const REVISION_PAGE_SIZE = 100;
+const PREFLIGHT_LABELS: Record<string, string> = {
+  agent_assignment: "Agent Instance assignment",
+  provider_configuration: "Provider configuration",
+  workspace_policy: "Workspace policy",
+  tool_allowlist: "Tool allowlist",
+  runner_connection: "Runner connection",
+};
+
+function TaskPreflightPanel({ taskId }: { taskId: string }) {
+  const [preflight, setPreflight] = useState<TaskPreflight | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [refreshGeneration, setRefreshGeneration] = useState(0);
+  const [startingRun, setStartingRun] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
+  const [createdRunId, setCreatedRunId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setPreflight(null);
+    setError(null);
+    setLoading(true);
+    void requestTaskPreflight(taskId, controller.signal)
+      .then((result) => {
+        if (!controller.signal.aborted) setPreflight(result);
+      })
+      .catch((reason: unknown) => {
+        if (!controller.signal.aborted) {
+          setError(reason instanceof Error ? reason.message : "Could not load Task preflight.");
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [taskId, refreshGeneration]);
+
+  async function startRun() {
+    if (!preflight?.ready || startingRun) return;
+    setStartingRun(true);
+    setStartError(null);
+    try {
+      const response = await fetch(`/api/v1/tasks/${encodeURIComponent(taskId)}/runs`, {
+        method: "POST",
+        cache: "no-store",
+        credentials: "same-origin",
+        headers: { accept: "application/json", "content-type": "application/json" },
+        body: JSON.stringify({ request_id: crypto.randomUUID() }),
+      });
+      const body = await response.json().catch(() => null) as { id?: unknown; detail?: unknown } | null;
+      if (!response.ok || typeof body?.id !== "string") {
+        const detail = typeof body?.detail === "string"
+          ? body.detail
+          : typeof body?.detail === "object" && body.detail !== null && "message" in body.detail
+            ? String(body.detail.message)
+            : "Run could not be created. Recheck the policy and Runner connection.";
+        throw new Error(detail);
+      }
+      setCreatedRunId(body.id);
+    } catch (reason) {
+      setStartError(reason instanceof Error ? reason.message : "Run could not be created.");
+    } finally {
+      setStartingRun(false);
+    }
+  }
+
+  return (
+    <section className="content-section" aria-labelledby="task-preflight-heading">
+      <div className="section-heading">
+        <h2 id="task-preflight-heading">Execution preflight</h2>
+        <button
+          className="button button-secondary"
+          disabled={loading}
+          onClick={() => setRefreshGeneration((generation) => generation + 1)}
+          type="button"
+        >
+          {loading ? "Checking…" : "Recheck"}
+        </button>
+      </div>
+      <p className="field-note">Readiness gates must pass before a Run can be created.</p>
+      {loading ? <p role="status">Checking Task readiness…</p> : null}
+      {error ? (
+        <div className="preflight-error" role="alert">
+          <p>Preflight could not be loaded: {error}</p>
+          <p>No Run can be started while the checks are unavailable.</p>
+        </div>
+      ) : null}
+      {preflight ? (
+        <>
+          <p className={`preflight-summary${preflight.ready ? " is-ready" : ""}`} role="status">
+            {preflight.ready
+              ? "All reported checks are ready. Starting a Run requires an explicit action."
+              : "Run start is blocked: one or more required checks are blocked or unavailable."}
+          </p>
+          <ul className="preflight-list">
+            {preflight.checks.map((check) => (
+              <li className="preflight-row" key={check.key}>
+                <div className="preflight-row-heading">
+                  <strong>{PREFLIGHT_LABELS[check.key] ?? check.key.replaceAll("_", " ")}</strong>
+                  <StatusPill tone={check.status === "ready" ? "green" : check.status === "blocked" ? "amber" : "neutral"}>
+                    {check.status === "ready" ? "Ready" : check.status === "blocked" ? "Blocked" : "Unavailable"}
+                  </StatusPill>
+                </div>
+                <p>{check.detail}</p>
+              </li>
+            ))}
+          </ul>
+          {preflight.ready ? (
+            <div className="form-actions">
+              {createdRunId ? (
+                <Link className="button" href={`/runs/${encodeURIComponent(createdRunId)}`}>Open Run</Link>
+              ) : (
+                <button className="button" type="button" disabled={startingRun} onClick={() => void startRun()}>
+                  {startingRun ? "Queueing Run…" : "Start Run"}
+                </button>
+              )}
+            </div>
+          ) : null}
+          {startError ? <p className="inline-error" role="alert">{startError}</p> : null}
+        </>
+      ) : null}
+    </section>
+  );
+}
 
 export function TaskDetailView({ taskId }: { taskId: string }) {
   const [task, setTask] = useState<Task | null>(null);
@@ -159,6 +283,7 @@ export function TaskDetailView({ taskId }: { taskId: string }) {
               <div><dt>Updated</dt><dd><time dateTime={task.updated_at}>{new Date(task.updated_at).toLocaleString()}</time></dd></div>
             </dl>
           </section>
+          <TaskPreflightPanel key={task.id} taskId={task.id} />
           <section className="content-section">
             <h2>Run / Attempt history</h2>
             <p>Run / Attempt creation records are append-only snapshots. No dispatcher, runtime execution, event stream, or Task-stage transition is connected.</p>

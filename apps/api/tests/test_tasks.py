@@ -7,8 +7,8 @@ from uuid import UUID, uuid4
 from fastapi.testclient import TestClient
 
 from app.main import create_app
-from app.projects import Project
-from app.tasks import TaskSpec
+from app.domain.projects import Project
+from app.domain.tasks import TaskSpec
 from test_api import ORIGIN, MemoryProjectRepository, database_ready, login, settings
 
 

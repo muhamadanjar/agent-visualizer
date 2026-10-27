@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 from fastapi.testclient import TestClient
 
 from app.main import create_app
-from app.registry import AgentDefinition
+from app.domain.registry import AgentDefinition
 from test_api import MemoryProjectRepository, ORIGIN, database_ready, login, settings
 
 

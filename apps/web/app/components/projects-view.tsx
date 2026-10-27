@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState, type FormEvent } from "react";
+import { ProjectExecutionPolicy } from "./project-execution-policy";
 import { PageHeader, StatusPill } from "./workspace-components";
 
 type Project = {
@@ -167,6 +168,7 @@ export function ProjectDetailView({ projectId }: { projectId: string }) {
           <div><dt>Created</dt><dd>{new Date(project.created_at).toLocaleString()}</dd></div>
         </dl>
       </section>
+      <ProjectExecutionPolicy projectId={project.id} />
       <section className="content-section">
         <div className="section-heading"><h2>Assigned agent instances</h2><Link className="text-link" href="/agents/new">Add instance</Link></div>
         {instanceError ? <p className="inline-error" role="alert">{instanceError}</p> : null}
@@ -179,7 +181,7 @@ export function ProjectDetailView({ projectId }: { projectId: string }) {
           </article>
         ))}</div> : null}
       </section>
-      <p className="muted">Project association is context only; it does not grant repository access or change permissions. Repository resources and runtime work are not configured.</p>
+      <p className="muted">Project association is context only; it does not grant repository access. Runner access is limited to the workspace path and tools configured above.</p>
       <Link className="text-link" href="/projects">Back to projects</Link>
     </div>
   );

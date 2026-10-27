@@ -115,8 +115,11 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
   const isTaskPath = pathname === "/tasks" || pathname.startsWith("/tasks/");
   const isSampleRunPath = pathname.startsWith("/runs/run-sample-");
   const isRunPath = (pathname === "/runs" || pathname.startsWith("/runs/")) && !isSampleRunPath;
-  const isApiDataPath = isProjectPath || isAgentPath || isSkillPath || isTaskPath || isRunPath;
-  const dataLabel = isApiDataPath ? "API-backed records" : "Sample preview · no live work";
+  const isOfficePath = pathname === "/office";
+  const isApiDataPath = isProjectPath || isAgentPath || isSkillPath || isTaskPath || isRunPath || isOfficePath;
+  const dataLabel = isOfficePath ? "Saved agents · event projections" : isApiDataPath ? "API-backed records" : "Sample preview · no live work";
+  const topbarLabel = isOfficePath ? "Event projections" : isApiDataPath ? "API-backed records" : "Sample preview";
+  const topbarBadgeClass = isOfficePath ? "is-office" : isApiDataPath ? "is-api" : "is-sample";
 
   return (
     <div className="workspace-frame">
@@ -155,7 +158,7 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
         <header className="workspace-topbar">
           <div className="mobile-brand"><span className="brand-mark" aria-hidden="true">AO</span><strong>Agent Office</strong></div>
           <div className="topbar-context"><span className="context-indicator" />Private workspace</div>
-          <div className="topbar-right"><span className={`sample-badge${isApiDataPath ? " is-api" : " is-sample"}`}>{isApiDataPath ? "API-backed records" : "Sample preview"}</span><span className="topbar-owner">{owner.username}</span><button className="quiet-button topbar-logout" type="button" onClick={() => void handleLogout()} disabled={loggingOut} aria-label={`Keluar dari akun ${owner.username}`}>{loggingOut ? "…" : "Keluar"}</button></div>
+          <div className="topbar-right"><span className={`sample-badge ${topbarBadgeClass}`}>{topbarLabel}</span><span className="topbar-owner">{owner.username}</span><button className="quiet-button topbar-logout" type="button" onClick={() => void handleLogout()} disabled={loggingOut} aria-label={`Keluar dari akun ${owner.username}`}>{loggingOut ? "…" : "Keluar"}</button></div>
         </header>
         {logoutError ? <p className="inline-error topbar-logout-error" role="alert">{logoutError}</p> : null}
         <details className="mobile-navigation" onClick={(event) => { if ((event.target as HTMLElement).closest("a")) event.currentTarget.open = false; }}>

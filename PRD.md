@@ -1,27 +1,25 @@
 # PRD — Agent Office
 
-**Kantor 3D yang dapat dijelajahi secara live untuk mengelola dan memantau AI agent serta sub-agent**
+**Platform orkestrasi agent AI dengan kantor 3D live untuk melihat pekerjaan nyata setiap agent**
 
 | Metadata | Nilai |
 | --- | --- |
-| Versi | 0.7 |
-| Tanggal | 23 Oktober 2026 — Asia/Jakarta |
-| Status | Runtime-neutral adapter direction dikonfirmasi; Orca CLI hanya digunakan untuk orkestrasi. Approval tool-call tetap menjadi tanggung jawab Agent Office dan menunggu implementasi serta bukti call-binding |
+| Versi | 1.0 |
+| Tanggal | 26 Oktober 2026 — Asia/Jakarta |
+| Status | Scope P0 dipersempit ke alur nyata: beberapa Agent Instance menjalankan Task terpisah pada satu workspace dengan satu endpoint, lalu status/aksi aman terlihat di kantor 3D dari event Engine/Runner. Belum diimplementasikan. Delegasi, provider breadth, dan skala pilot ditunda; batas isolasi, tool policy, secret/egress, dan freshness tetap wajib. |
 | Platform awal | Aplikasi web privat, desktop sebagai pengalaman utama |
 | Pengguna awal | Engineer yang mengoperasikan beberapa AI agent |
-| Fokus | Mengetahui siapa mengerjakan apa, menemukan hambatan, memeriksa hasil, dan menambah agent dari prompt serta skill milik pengguna |
+| Fokus | Mengetahui siapa mengerjakan apa, menemukan hambatan, memeriksa hasil, dan menambah agent dari system prompt; katalog Skill opsional P1 |
 
 ## 1. Ringkasan produk
 
-Agent Office adalah aplikasi kantor 3D yang dapat dijelajahi langsung seperti game simulasi kantor. Pengguna mengendalikan karakter sendiri, berjalan antarruang, mengatur kamera, mendekati meja, dan berinteraksi dengan AI agent. Setiap agent menampilkan peran, pekerjaan aktif, aktivitas terakhir, hubungan delegasi, dan hasil kerja melalui avatar serta panel detail.
+Agent Office membantu pengguna memberi pekerjaan nyata kepada beberapa AI agent dan melihat aktivitas yang terverifikasi di kantor 3D live. Pengguna membuat Task, memilih Agent Instance, dan melihat Run, aksi tool yang diizinkan, hambatan, serta hasil. Kantor 3D menampilkan data kerja yang sama dengan daftar/detail; animasi tidak menentukan status.
 
-Pengalaman yang dituju adalah rasa hadir di kantor seperti permainan simulasi dengan kamera diagonal/isometrik: kantor tetap hidup ketika pengguna menjelajah, dan status agent berubah mengikuti pekerjaan nyata. Pengguna juga dapat beralih ke tampilan overview atau daftar untuk akses cepat.
+Agent Definition adalah template reusable untuk system prompt dan role; integrasi Skill bersifat opsional P1. “Tambah agent” membuat Agent Instance persisten yang idle. Work dimulai hanya setelah Task/Run dimulai secara eksplisit.
 
-Agent dapat ditambahkan dari definisi Markdown, system prompt, dan kumpulan skill milik pengguna. Jenis peran tidak dibatasi pada daftar bawaan. Architect, backend, frontend, reviewer, dan security merupakan contoh; pengguna juga dapat membuat agent dokumentasi, riset, atau peran lain.
+Fokus pertama adalah satu alur utuh: pengguna memberi Task, Agent Office Execution Engine menjalankan Run nyata pada workspace terpilih memakai tools allowlist, Engine/Runner menghasilkan event aman, dan kantor 3D menampilkan statusnya. Beberapa Agent Instance dapat mengerjakan Task terpisah; child delegation dan integrasi banyak provider bukan syarat alur ini.
 
-Nilai utama produk adalah **visibilitas pekerjaan yang dapat dibuktikan**. Animasi dan indikator harus mengikuti event dari runtime yang benar-benar menjalankan agent. Mendefinisikan sebuah agent belum berarti agent tersebut sedang berjalan. Perpindahan avatar juga tidak membuktikan bahwa terjadi komunikasi atau delegasi.
-
-MVP mencakup eksplorasi kantor 3D secara live, pengelolaan definisi agent dan skill, pemantauan runtime nyata, penugasan dasar, serta pemeriksaan hasil. Dukungan banyak runtime, orkestrasi kompleks, dan editor dunia virtual penuh dikembangkan bertahap.
+MVP fokus memerlukan Agent Office Execution Engine dan Runner yang dibatasi policy, satu konfigurasi Provider Adapter, event lifecycle minimum, dan visualisasi 3D event-backed. Tidak ada simulasi yang disebut pekerjaan nyata. Tool di dalam allowlist workspace tidak meminta approval per langkah; aksi destruktif atau di luar scope tetap dibatasi/di-approve.
 
 ## 2. Dasar kebutuhan, asumsi, dan tingkat keyakinan
 
@@ -34,10 +32,11 @@ Label keyakinan berikut menunjukkan kekuatan dasar informasi. Target di PRD meru
 | Materi pengguna | Memiliki system prompt, base agent Markdown, dan skill yang akan bertambah | Terkonfirmasi — [High confidences], contoh disertakan |
 | Permintaan lanjutan pengguna | Kantor dapat dieksplor secara live seperti game simulasi/The Sims | Terkonfirmasi — [High confidences], disebut langsung pada revisi ini |
 | Arah visual | Dunia 3D, karakter yang dapat dikendalikan, kamera diagonal/isometrik dan overview | Rekomendasi desain untuk memenuhi eksplorasi live; detail gaya aset tetap dapat disesuaikan |
-| Batas MVP | Runtime-independent domain dan control plane melalui Runtime Adapter contract; provider endpoint tetap terpisah. | Terkonfirmasi pengguna 23 Oktober 2026. Tidak ada engine yang otomatis didukung; setiap adapter harus lulus capability dan safety gates. MVP memerlukan setidaknya satu adapter Managed yang terverifikasi. |
-| Cakupan model provider | Provider-neutral: dukung API native dan OpenAI-compatible melalui adapter provider yang terdaftar. OpenAI-compatible adalah salah satu protokol, bukan prasyarat. | Terkonfirmasi pengguna; dukungan setiap adapter/provider/model tetap harus diuji. Tidak ada klaim bahwa semua provider bekerja otomatis. |
-| Kandidat runtime | OMP dan Codex app-server adalah kandidat execution runtime; runtime lain memerlukan API yang teridentifikasi dan kualifikasi yang sama. ACP adalah protokol untuk runtime yang kompatibel, bukan runtime itu sendiri. | Kandidat belum menjadi dukungan produk sebelum bukti task, lifecycle, capability, dan safety lulus. Tool orkestrasi seperti Orca memerlukan batas integrasi terpisah kecuali API execution-runtime yang konkret sudah teridentifikasi. |
-| Sumber aktivitas | Status operasional dihasilkan dari event, heartbeat, dan rekonsiliasi runtime | Persyaratan produk, bukan klaim tentang kemampuan runtime tertentu |
+| Batas MVP | Beberapa Agent Instance menjalankan Task terpisah melalui Agent Office Execution Engine; satu Provider Adapter/endpoint terkonfigurasi; event nyata menggerakkan visualisasi | Keputusan pengguna 26 Oktober 2026. Execution engine belum diimplementasikan; isolasi workspace, tool allowlist, secret/egress, dan status stale tetap gate minimum. |
+| Cakupan provider | Satu endpoint OpenAI-compatible terkonfigurasi untuk alur awal; batas Provider Adapter tetap netral agar adapter lain dapat ditambahkan | Keputusan pengguna 26 Oktober 2026; kompatibilitas adapter/provider lain dan native API bukan gate visualisasi awal. |
+| Batas execution | Agent Office memiliki execution loop, tools, policy, dan event lifecycle; tidak memakai coding-agent runtime tertentu sebagai dependency P0 | Probe OMP/Codex historis; tidak membuktikan Managed execution. |
+| Sumber aktivitas | Agent Office Execution Engine/Runner menghasilkan lifecycle dan safe tool-action events; Provider Adapter hanya memasok inference | Persyaratan terkonfirmasi; belum diimplementasikan atau dibuktikan end-to-end. |
+| Batas visual data | Agent Instance yang tersimpan boleh tampil sebagai identitas pada daftar/detail; avatar agent, lokasi, aktivitas, dan status kerja hanya berasal dari data scene/event kanonis. | Keputusan pengguna 26 Oktober 2026; tanpa data runtime, lokasi/status ditampilkan tidak tersedia dan tidak diganti fixtures. |
 
 Dokumen ini tidak mengasumsikan bahwa seluruh agent dan skill pengguna sudah tersedia untuk diperiksa. Contoh `system-architect` menjadi bahan desain format impor dan perilaku produk.
 
@@ -46,10 +45,10 @@ Dokumen ini tidak mengasumsikan bahwa seluruh agent dan skill pengguna sudah ter
 1. Aktivitas agent tersebar di terminal, sesi chat, log, dan repository sehingga pengguna sulit memperoleh gambaran tim.
 2. Label “running” tidak menjelaskan apakah agent sedang membaca berkas, menjalankan tool, menunggu input, atau terhambat.
 3. Prompt dan skill yang bertambah dapat menimbulkan konflik peran, ketergantungan yang hilang, serta perbedaan konfigurasi antar-run.
-4. Hubungan parent dan sub-agent sulit ditelusuri: siapa mendelegasikan pekerjaan, apa hasilnya, dan siapa yang masih menunggu.
-5. Demo visual dapat terlihat aktif meskipun runtime sudah terputus. Pengguna memerlukan indikator kesegaran data dan bukti hasil.
+4. Tanpa status terverifikasi, pengguna tidak tahu agent mana sedang menjalankan Task, sedang memakai tool yang diizinkan, menunggu, atau sudah berhenti.
+5. Animasi dapat terlihat aktif meski runtime terputus; kantor membutuhkan freshness dan bukti event.
 
-**Pernyataan masalah:** ketika beberapa agent bekerja untuk satu atau lebih proyek, pengguna memerlukan satu tempat untuk memahami pekerjaan, hambatan, delegasi, dan hasil tanpa memeriksa setiap sesi secara terpisah.
+**Pernyataan masalah:** ketika beberapa Agent Instance menjalankan pekerjaan terpisah, pengguna memerlukan satu tempat untuk melihat Task, status, dan aksi aman yang sedang terjadi tanpa memeriksa tiap sesi.
 
 ## 4. Tujuan dan batas produk
 
@@ -68,7 +67,7 @@ Dokumen ini tidak mengasumsikan bahwa seluruh agent dan skill pengguna sudah ter
 - Simulasi kebutuhan karakter, ekonomi virtual, VR, atau editor bangunan/furnitur bebas. Eksplorasi kantor, gerak karakter, collision, dan interaksi objek termasuk MVP.
 - Multiplayer manusia dengan sinkronisasi gerak, suara, atau dunia game persisten lintas banyak pemain.
 - Agent yang otomatis membuat agent lain tanpa batas atau menaikkan hak aksesnya sendiri.
-- Dukungan runtime dan provider tidak tersedia otomatis hanya dari nama atau protokol. Domain task/run dan control plane harus runtime-neutral melalui Runtime Adapter contract; setiap adapter tetap harus lulus capability, credential, egress, dan safety gates. MVP memerlukan setidaknya satu Managed adapter yang lulus; adapter tambahan dapat ditambahkan tanpa mengubah domain inti. Tidak ada prasyarat OpenAI-compatible.
+- Dukungan provider/runtime tidak otomatis dari nama atau protokol. Fokus P0 memakai satu endpoint terkonfigurasi; runtime execution, tool policy, egress, dan status tetap dimiliki Agent Office. Validasi adapter lain dan native API ditunda, bukan dianggap kompatibel.
 - Integrasi GitHub, GitLab, dan VPS lengkap secara bersamaan; eksekusi deployment produksi otomatis.
 - SaaS publik multi-tenant, billing pelanggan, marketplace skill, dan kolaborasi banyak operator.
 - Jaminan kualitas kode hanya karena run selesai, atau penayangan reasoning internal tersembunyi model.
@@ -104,7 +103,7 @@ Engineer atau pemilik proyek yang menggunakan beberapa agent untuk perencanaan, 
 
 ## 7. Konsep dan model domain
 
-Pembedaan istilah Model Provider, Model Endpoint, Provider Router, dan Runtime Adapter dirangkum di [GLOSSARY.md](GLOSSARY.md).
+Pembedaan istilah Agent Office Execution Engine, Agent Definition/Instance, Activity Event, Visual Agent State, Model Provider, Model Endpoint, Provider Adapter, dan Runtime Adapter opsional dirangkum di [GLOSSARY.md](GLOSSARY.md).
 
 | Konsep | Definisi dan aturan |
 | --- | --- |
@@ -112,22 +111,23 @@ Pembedaan istilah Model Provider, Model Endpoint, Provider Router, dan Runtime A
 | Project | Konteks pekerjaan beserta resource, instruksi, dan batas aksesnya |
 | Agent Definition | Identitas peran, instruksi, referensi skill, dan konfigurasi yang dapat dipakai ulang; memiliki versi |
 | Skill Version | Paket instruksi dan resource berversi; ketergantungan tool/runtime dicatat eksplisit |
-| Agent Instance | Identitas agent yang ditempatkan di kantor dan dihubungkan ke suatu definisi; dapat idle tanpa menjalankan model |
-| Runtime Connection | Sambungan ke proses/layanan agent beserta identitas, kemampuan, dan kesehatan koneksi |
-| Runtime Session | Sesi eksekusi/konteks pada runtime; terpisah dari identitas avatar yang dapat bertahan antar-sesi |
+| Agent Instance | Identitas persisten di kantor yang dibuat dari Agent Definition; dapat idle tanpa Task/Run aktif |
+| Runner Connection | Koneksi terautentikasi antara control plane dan Runner yang menjalankan Agent Office Execution Engine; health koneksi tidak membuktikan sebuah Run aktif |
+| Runtime Session | Konteks eksekusi milik Agent Office Execution Engine; terpisah dari identitas Agent Instance dan satu Task Run |
 | Task | Pekerjaan dengan tujuan, input, acceptance criteria, pemilik, dan dependensi |
 | Run / Attempt | Satu upaya agent mengerjakan task; menyimpan snapshot konfigurasi dan hasil. Retry membuat attempt baru |
-| Delegation | Hubungan eksplisit antara parent run, child task, dan child run; dicatat, bukan disimpulkan dari teks prompt |
-| Activity Event | Kejadian yang dikirim sumber runtime/runner atau tindakan pengguna; memiliki waktu dan identitas sumber |
+| Delegation | Hubungan eksplisit parent Run → child Task/Run yang memerlukan approval pengguna sebelum child dimulai |
+| Activity Event | Event kanonis dari Agent Office Execution Engine/Runner atau tindakan pengguna; memiliki sumber, waktu, dan korelasi; provider completion saja bukan event kerja |
 | Artifact | Hasil seperti dokumen, diff, patch, laporan, atau tautan perubahan, terhubung ke run |
 | Approval | Keputusan pengguna atas tindakan spesifik; scope dan masa berlakunya jelas |
-| Office Layout / Scene Version | Penempatan ruang, meja, collider, jalur berjalan, spawn point, dan anchor interaksi; memiliki versi, tidak menentukan permission runtime |
-| Player Avatar / Presence | Karakter milik pengguna dan pose/kameranya; terpisah dari AI agent, bukan runtime model |
-| Visual Agent State | Pose, animasi, dan tujuan gerak representasi agent; diturunkan dari state pekerjaan serta scene, tidak boleh menulis status run |
-| Model Provider | Layanan cloud atau lokal yang menyediakan inferensi model; berbeda dari runtime agent yang menjalankan task |
-| Runtime Adapter | Integrasi yang menerjemahkan perintah dan bukti dari aplikasi ke agent execution runtime | Batas vendor/protokol berada di adapter; terpisah dari Model Provider dan Model Endpoint. OMP dan Codex app-server adalah kandidat, bukan asumsi produk. |
-| Model Endpoint | Konfigurasi tujuan inferensi, termasuk base URL dan ID model/route; dapat menunjuk langsung ke provider atau ke gateway |
-| Provider Router / Gateway | Endpoint perantara yang meneruskan atau memilih upstream provider; upstream sebenarnya hanya diketahui bila gateway memberikan telemetry |
+| Office Layout / Scene Version | Penempatan ruang, meja, collider, jalur berjalan, spawn point, dan anchor interaksi; memiliki versi, tidak menentukan permission |
+| Player Avatar / Presence | Karakter pengguna dan pose/kameranya; terpisah dari AI agent dan runtime state |
+| Visual Agent State | Pose, animasi, dan tujuan gerak agent, diturunkan dari state pekerjaan terverifikasi dan scene; tidak boleh menulis status Run atau memberi permission |
+| Agent Office Execution Engine | Loop eksekusi milik Agent Office yang menjalankan Task/Run, menerapkan tool policy, memanggil Provider Adapter, serta menghasilkan event kanonis |
+| Runtime Adapter | Integrasi opsional ke execution runtime eksternal; bukan jalur MVP dan tidak mengubah Provider Adapter, Task, atau Run |
+| Model Provider | Layanan cloud/lokal yang memasok inference; berbeda dari Agent Office Execution Engine |
+| Model Endpoint | Tujuan inference terkonfigurasi, dengan base URL dan model/route ID; dapat menunjuk provider atau gateway |
+| Provider Router / Gateway | Endpoint perantara yang meneruskan/memilih upstream; upstream dan biaya hanya diketahui jika dilaporkan |
 
 ```mermaid
 flowchart TD
@@ -149,13 +149,13 @@ P0 wajib untuk rilis MVP, P1 merupakan pengembangan setelah MVP, dan P2 merupaka
 | Area | P0 — MVP | P1 | P2 |
 | --- | --- | --- | --- |
 | Kantor | Dunia 3D dari template, karakter pengguna, WASD/click-to-move, collision, kamera isometrik/follow/overview, minimap, interaksi agent/objek, detail dan daftar | Penyunting layout terbatas, beberapa lantai, eksplorasi touch lebih lengkap | Dunia virtual penuh dan editor dekorasi |
-| Definisi agent | Tambah/edit/impor/ekspor Markdown, clone, versi, arsip, peran bebas | Sinkronisasi direktori/Git | Registry bersama |
-| Skill | Impor instruksi dan resource teks, versi, attach/detach, validasi dependensi | Paket skrip dengan proses verifikasi dan eksekusi terisolasi | Marketplace |
-| Runtime | Runtime Adapter contract yang netral + setidaknya satu adapter Managed terverifikasi; kapabilitas dan batas tiap adapter terlihat | Adapter runtime tambahan dapat dipilih berdasarkan hasil pilot dan kesamaan kontrak |
-| Task | Assign, antrean, input, cancel, retry eksplisit, hasil dan penerimaan | Scheduler dan workflow reusable | Routing agent otomatis berbasis evaluasi |
-| Sub-agent | Hubungan parent–child, delegasi ke definisi terdaftar, batas jumlah dan kedalaman | Promosi child menjadi instance permanen, pengaturan lanjutan | Tim yang berubah secara otomatis |
-| Repository | Satu sumber repository/workspace melalui runner, isolasi perubahan | GitHub/GitLab connector dan PR/MR workflow | Deployment multi-environment |
-| Kendali | Policy per proyek, approval untuk tindakan yang memerlukannya, audit, batas eksekusi | Banyak operator dan role | Organisasi multi-tenant |
+| Definisi agent | P0: buat/impor/edit prompt Markdown, tambah Instance, dan bekukan versi prompt per Run | P1: clone/arsip, katalog dan versi Skill, serta pengelolaan lanjutan | P2: registry bersama |
+| Skill | P0: tidak menjadi prasyarat Run; agent dapat bekerja dari system prompt dan tool allowlist | P1: impor/versi/attach skill, compatibility preflight, dan audit penggunaannya | P2: marketplace |
+| Runtime | P0: Agent Office Execution Engine di Runner, satu Provider Adapter terkonfigurasi, tool allowlist, lifecycle dan event minimum | P1: adapter/provider tambahan dan advanced runtime controls |
+| Task | P0: assign Task ke Instance, start Run, status, aksi aman, dan hasil | P1: child delegation, reusable workflow, dan routing otomatis |
+| Sub-agent | Tidak termasuk alur P0; Instance mengerjakan Task terpisah | P1: parent-child Task/Run, approval per child, dan batas delegasi |
+| Repository | P0: satu repository/workspace privat dengan workspace terisolasi per Run | P1: GitHub/GitLab connector dan PR/MR workflow |
+| Kendali | P0: tools allowlist tanpa approval per langkah; approval untuk aksi destruktif/di luar scope; batas run dan secret/egress | P1: banyak operator, role, dan kebijakan lanjutan |
 
 **Batas hasil rilis:** prototipe yang seluruh event-nya simulasi boleh menjadi milestone desain, tetapi tidak dihitung sebagai MVP operasional.
 
@@ -164,26 +164,25 @@ P0 wajib untuk rilis MVP, P1 merupakan pengembangan setelah MVP, dan P2 merupaka
 ### 9.1 Menyiapkan kantor dan mengimpor agent
 
 1. Pengguna membuka workspace privat dan membuat proyek.
-2. Pengguna memilih koneksi runtime dan lokasi kerja yang diizinkan; aplikasi memeriksa kemampuan adapter.
+2. Pengguna memilih workspace/repository yang diizinkan dan mengonfigurasi Provider Adapter/model endpoint yang tersedia.
 3. Pengguna mengimpor `system-architect.md` atau menempelkan system prompt.
-4. Aplikasi menampilkan hasil parsing: nama, deskripsi, instruksi, referensi skill, dan peringatan.
-5. Pengguna menautkan skill, memeriksa konfigurasi efektif, lalu menyimpan versi definisi.
-6. Pengguna membuat instance dan memilih meja/ruang. Instance ditampilkan sebagai belum terhubung atau idle sesuai bukti koneksinya.
-7. Pengguna menjalankan task uji. Event dan hasil pertama muncul dengan label sumber nyata.
+4. Aplikasi menampilkan nama, deskripsi, system prompt, dan metadata yang dipertahankan; referensi Skill dapat ditandai belum didukung tanpa menghalangi Run P0.
+5. Pengguna menyimpan versi Agent Definition berbasis prompt, membuat Agent Instance, lalu memilih home desk/room. Instance tetap idle sampai Task/Run dimulai eksplisit.
+6. Pengguna membuat Task dan memulai Run melalui Agent Office Execution Engine setelah preflight kebijakan.
 
 ### 9.2 Menjalankan pekerjaan
 
 1. Pengguna membuat task, misalnya “Rancang fitur notifikasi email dan WhatsApp”.
 2. Pengguna mengisi konteks proyek, input, batas pekerjaan, serta acceptance criteria.
-3. Pengguna memilih agent, versi definisi, dan skill yang relevan.
-4. Preflight memeriksa akses, dependensi, kapasitas, dan kebijakan. Kekurangan ditampilkan sebelum run dimulai.
-5. Setelah runtime mengakui start, avatar menunjukkan run aktif. Panel memperlihatkan tahap/aktivitas yang tersedia.
-6. Jika agent menunggu input atau approval, tugas muncul di Attention Inbox.
+3. Pengguna memilih Agent Instance dan versi system prompt; katalog Skill bukan prasyarat P0.
+4. Preflight memeriksa workspace/tool allowlist, kapasitas, dan kebijakan. Dependensi Skill diperiksa hanya bila integrasi P1 diaktifkan.
+5. Setelah Execution Engine menerima dan memulai Run, avatar menampilkan state dari event tercatat. Panel menunjukkan lifecycle dan safe tool events, bukan hidden reasoning.
+6. Jika agent menunggu input atau approval, Run Detail menampilkan alasan dan tindakan yang dibutuhkan; Attention Inbox penuh adalah P1.
 7. Setelah run selesai, hasil tersedia untuk review. Pengguna menerima hasil atau membuat revisi yang terhubung ke hasil sebelumnya.
 
 ### 9.3 Delegasi dan kolaborasi
 
-Parent dapat meminta delegasi melalui kontrak adapter ke definisi yang sudah terdaftar dan diizinkan. Pengguna juga dapat membuat child task secara manual. Aplikasi mencatat tujuan, input, batas akses, dan hubungan ke parent sebelum eksekusi.
+Parent dapat mengusulkan delegasi kepada Agent Definition/version yang terdaftar dan diizinkan. Sistem membuat child Task/Run hanya setelah pengguna menyetujui definition/version, tujuan, project scope, input, dan budget. Child disimpan dalam parentage/history dan tidak otomatis menjadi Agent Instance permanen.
 
 Sebagai contoh workflow, architect menghasilkan desain; task backend dan frontend dimulai setelah dependensi desain terpenuhi; reviewer memeriksa hasil setelah kedua pekerjaan tersedia. Workflow ini merupakan contoh konfigurasi, bukan urutan wajib atau perilaku yang otomatis disebabkan oleh nama peran.
 
@@ -205,14 +204,14 @@ Saat heartbeat terhenti, kantor mempertahankan status terakhir dengan label wakt
 
 ## 10. Persyaratan fungsional
 
-### FR-01 — Pengelolaan agent yang dapat diperluas · P0
+### FR-01 — Agent Definition dan Agent Instance · P0
 
-- Pengguna dapat membuat, mengimpor, menggandakan, mengubah, dan mengarsipkan definisi agent.
-- Identitas memakai ID stabil; nama tampilan dapat diubah. Peran baru tidak memerlukan enum atau perubahan kode aplikasi.
-- Nama/slug yang bertabrakan menghasilkan pilihan membuat salinan atau versi baru; tidak ditimpa diam-diam.
-- Mengarsipkan definisi menghentikan penggunaan untuk run baru, tetapi tidak menghapus histori atau menghentikan run aktif secara implisit.
-- Membuat definisi tidak otomatis menyalakan instance atau membelanjakan token.
-- Kapasitas tersimpan dan kapasitas agent yang berjalan ditampilkan terpisah; batas penggunaan dapat dikonfigurasi.
+- Pengguna dapat membuat, mengimpor, dan mengubah Agent Definition berbasis system prompt, lalu menambahkan Agent Instance idle.
+- ID stabil, slug unik, dan peran bebas tanpa enum/perubahan kode aplikasi.
+- Slug yang bertabrakan ditolak; definisi lama tidak ditimpa diam-diam.
+- Membuat definisi atau Instance tidak otomatis memulai Run atau membelanjakan token.
+- Kapasitas tersimpan dan Instance yang sedang menjalankan Run ditampilkan terpisah; batas eksekusi dapat dikonfigurasi.
+- Clone, archive, dan alur historis definisi lengkap adalah P1; pengarsipan tidak menghentikan Run aktif.
 
 ### FR-02 — Impor prompt dan base agent · P0
 
@@ -223,38 +222,34 @@ Saat heartbeat terhenti, kantor mempertahankan status terakhir dengan label wakt
 - Field asing tetap dipertahankan sebagai metadata yang belum dipetakan; aplikasi menjelaskan bila runtime mengabaikannya.
 - Importer tidak mengikuti perintah yang tertulis dalam file sebagai instruksi untuk melakukan aksi saat impor.
 
-### FR-03 — Pengelolaan skill · P0
+### FR-03 — Pengelolaan skill · P1
 
-- Skill dapat ditambahkan, diberi versi, diarsipkan, dan ditautkan ke satu atau beberapa definisi agent.
+- Skill dapat diimpor, diberi versi, diarsipkan, dan ditautkan ke definisi agent setelah alur visualisasi P0.
 - Metadata minimum: ID, nama, deskripsi, instruksi, versi, resource, dan dependensi yang dinyatakan.
-- Setiap run mencatat skill tersedia, skill yang dimuat, dan pemanggilan skill jika runtime melaporkannya. Terpasang tidak berarti telah digunakan.
-- Dependensi yang hilang atau tidak kompatibel ditampilkan sebelum start. Referensi wajib yang tidak terpenuhi memblokir run.
-- MVP mengeksekusi instruksi dan resource teks melalui runtime yang didukung. Skrip dari paket skill tidak dijalankan hanya karena diunggah; paket di luar dukungan ditandai tidak kompatibel.
-- Memasang skill tidak memberikan hak baru ke file, jaringan, secret, atau tool.
+- P1 preflight menjelaskan dependensi/tool yang tidak kompatibel; skill yang membutuhkan kemampuan tak tersedia tidak boleh dijalankan.
+- Menyimpan atau melampirkan skill tidak memberikan hak baru ke file, jaringan, secret, atau tool.
+- Skrip dari paket skill tidak dijalankan hanya karena diunggah. Run P0 menggunakan system prompt, Task, workspace, dan tool allowlist.
 
 ### FR-04 — Versi dan konfigurasi efektif · P0
 
-- Perubahan definisi/skill menghasilkan versi baru. Run aktif tetap memakai snapshot awal.
-- Sebelum start, pengguna dapat melihat instruksi efektif yang dikirim, asal setiap bagian, versi runtime/model bila tersedia, skill, serta permission yang diterapkan.
-- Kebijakan aplikasi dan proyek membatasi instruksi role, task, dan skill. Mapping ke mekanisme prioritas runtime harus didokumentasikan dan diuji.
-- Pemeriksaan konflik menandai ketergantungan hilang dan aturan eksplisit yang bertentangan. Konflik semantik kompleks adalah bantuan review, bukan deteksi sempurna.
-- Export mencakup definisi dan referensi/versi skill tanpa credential. Restore versi lama menghasilkan konfigurasi yang dapat dipakai untuk run baru, bukan mengubah histori.
+- Perubahan system prompt menghasilkan versi definisi baru; Run membekukan versi yang dipilih saat start.
+- Run P0 memakai system prompt dan Task yang terpilih. Skill attachment, inventory instruksi efektif, konflik lanjutan, dan export/restore skill merupakan P1.
+- Kebijakan aplikasi membatasi instruksi system prompt dan Task. Prompt tidak memberikan izin tool atau egress.
 
-### FR-05 — Koneksi runtime dan mode operasional · P0
+### FR-05 — Agent Office Execution Engine dan mode operasional · P0
 
-Terdapat dua mode yang selalu terlihat:
+Alur P0 menggunakan mode Managed yang dimiliki Agent Office. Integrasi Observe ke runtime eksternal bukan syarat alur fokus dan ditunda.
 
 | Mode | Perilaku |
 | --- | --- |
-| Managed | Aplikasi mengirim task dan kontrol yang didukung ke runtime; status berubah setelah acknowledgement/event yang sesuai |
-| Observe | Aplikasi menampilkan sesi yang sudah berjalan; kontrol yang tidak tersedia dinonaktifkan dengan alasan |
+| Managed | Agent Office Execution Engine menjalankan Task/Run, tool loop terbatas policy, dan event lifecycle; Provider Adapter hanya memasok inference |
+| Observe | Integrasi Runtime Adapter eksternal, bila kelak diprioritaskan, bukan bagian alur P0 |
 
-- MVP operasional wajib memiliki setidaknya satu adapter Managed dengan start, event aktivitas, terminal result, health/heartbeat, pengiriman input lanjutan, cancel request dan acknowledgement, serta delegasi terbatas.
-- Dukungan native, wrapper, atau kombinasi runner ditentukan saat spike. Wrapper tetap harus mengamati pekerjaan nyata.
-- Adapter mengekspos capability, versi protokol, serta batasnya. Resume, pause, token detail, dan skill invocation tidak diasumsikan tersedia.
-- Pause/resume boleh ditambahkan jika terbukti didukung. Jika tidak, UI menyatakan tidak tersedia; cancel tidak dilabeli pause.
-- Runtime eksternal tidak otomatis ditemukan di seluruh perangkat. Pengguna menautkan koneksi/session yang diizinkan.
-- Sesi Observe yang belum mempunyai definisi terkelola dapat ditampilkan sebagai “agent eksternal”, kemudian dipetakan secara eksplisit.
+- Engine berjalan di Runner terisolasi dan menyediakan start, event lifecycle, safe tool-action summary, terminal result, health/freshness, serta cancel request/acknowledgement.
+- Tool yang cocok dengan allowlist workspace dapat berjalan tanpa approval per pemanggilan. Aksi destruktif, akses resource di luar scope, atau egress baru tidak diwarisi dari prompt dan tetap memerlukan policy/approval.
+- Provider response tidak memulai Run, menetapkan status kerja, atau mengotorisasi tool. Run menjadi Running setelah Engine mengonfirmasi start.
+- Hanya capability yang diuji yang diaktifkan. Pause/resume, child delegation, banyak provider, dan detail token bukan kemampuan P0.
+- Runner terdaftar dan diautentikasi eksplisit; credential tidak dikirim ke browser, prompt, atau log umum.
 
 ### FR-06 — Kantor virtual dan navigasi · P0
 
@@ -262,8 +257,8 @@ Terdapat dua mode yang selalu terlihat:
 - Desktop menyediakan pan, zoom, pencarian agent, filter proyek/status/peran, dan tindakan “fokus ke agent”.
 - Klik avatar membuka detail. Pengguna tidak harus berjalan sebagai karakter untuk mengakses informasi.
 - Ruang dan meja dapat diberi nama serta dipetakan ke proyek/tim. MVP memakai template dan penempatan sederhana.
-- Avatar memiliki nama, peran, ikon status, ringkasan task, dan penanda kesegaran. Warna bukan satu-satunya pembeda.
-- Animasi yang menyatakan aktivitas kerja mengikuti status atau handoff terverifikasi. Saat data kedaluwarsa, animasi kerja agent dibekukan dan posisi terakhir diberi label stale; karakter pengguna tetap dapat berjalan. Animasi berjalan dan dekorasi merupakan presentasi visual, bukan bukti bahwa model bekerja.
+- Avatar menampilkan Agent Instance, Task/Run, safe action terkini, dan freshness; sedikitnya dua Instance dengan Task terpisah dapat terlihat bersamaan.
+- Animasi mengikuti event kanonis Engine/Runner. Avatar berawal di home desk dan berpindah ke anchor Task hanya setelah assignment/start terverifikasi. Saat data stale, animasi kerja berhenti dan posisi terakhir diberi label stale; karakter pengguna tetap dapat berjalan.
 - Jika kantor penuh, agent tetap tersedia melalui daftar, pengelompokan, dan area tambahan dari template; kapasitas tidak bergantung pada jumlah meja hardcoded.
 - Perubahan lokasi tidak memicu task, tidak membagikan memori, dan tidak mengubah akses proyek.
 
@@ -271,55 +266,47 @@ Terdapat dua mode yang selalu terlihat:
 
 - Explore Mode, Overview Mode, Agent List, Task Board, dan Run Detail memakai data pekerjaan kanonis yang sama. Posisi visual bukan sumber kebenaran status pekerjaan.
 - Task Board mencakup Backlog, Ready, In progress, Blocked/Waiting, In review, dan Accepted; status run diperlihatkan terpisah.
-- Tablet mendukung inspeksi dan kontrol inti; mobile memprioritaskan daftar, detail, dan Attention Inbox. Editor layout lanjutan tidak diperlukan pada mobile.
+- Tablet mendukung inspeksi dan kontrol inti; mobile memprioritaskan daftar dan detail Agent/Task/Run. Attention Inbox penuh adalah P1.
 - Keyboard dapat membuka daftar, memilih agent/task, dan menjalankan tindakan tanpa mengoperasikan kanvas.
 - Mendukung reduced motion, fokus yang terlihat, label pembaca layar pada kontrol HTML, serta fallback daftar ketika WebGL tidak tersedia.
 
 ### FR-08 — Identitas status dan bukti aktivitas · P0
 
-- Status eksekusi, kesehatan koneksi, dan status penerimaan task disimpan terpisah.
-- Aktivitas dibedakan antara event runtime, tindakan pengguna, dan ringkasan yang dihasilkan aplikasi/AI.
-- Setiap ringkasan menunjuk ke event pendukung dan timestamp. Jika bukti tidak tersedia, UI menyatakan “aktivitas rinci tidak tersedia”.
-- Tidak menampilkan persentase progress atau ETA tanpa dasar terukur. Untuk checklist eksplisit, boleh menampilkan “3 dari 5 langkah selesai”, dengan batas bahwa ukuran tersebut bukan estimasi waktu.
-- Status “generating response” hanya ditampilkan jika ada bukti sesuai adapter; UI tidak mengklaim mengetahui pikiran internal model.
+- Status eksekusi, connection health, dan task acceptance disimpan terpisah.
+- Activity Event membedakan Engine/Runner events, tindakan pengguna, dan ringkasan aplikasi/AI. Event mencatat sumber/waktu; safe tool events hanya menampilkan informasi yang diizinkan policy. Ringkasan menunjuk ke event pendukung; tanpa bukti, UI menyatakan aktivitas rinci tidak tersedia.
+- Progress/ETA tidak ditampilkan tanpa dasar terukur. Hidden reasoning, secret, prompt internal, dan konten di luar scope tidak ditampilkan sebagai aktivitas.
+- Status `generating response` hanya ditampilkan jika Engine mencatat inference call aktif; respons Provider Adapter sendiri tidak menetapkan Run state atau memberi izin tool.
 
 ### FR-09 — Penugasan dan antrean · P0
 
 - Task memuat judul, tujuan, proyek, input/resource, acceptance criteria, agent yang dituju, dan batas eksekusi.
 - Pengguna dapat menentukan task blocked by task lain. Siklus dependensi ditolak.
 - Start memiliki request ID yang idempotent; klik ganda tidak membuat dua run.
-- Task menunggu kapasitas ditampilkan sebagai queued beserta alasan. Task tidak dianggap running sebelum runtime menerima dan memulai.
+- Task menunggu kapasitas ditampilkan sebagai queued beserta alasan. Task tidak dianggap running sebelum Agent Office Execution Engine mengakui dan memulai Run.
 - MVP menjalankan satu run aktif per instance dan menggunakan antrean sederhana. Kebijakan antrean default FIFO; prioritas manual merupakan P1.
 - Edit task setelah start berlaku pada task revision berikutnya; instruksi tambahan ke run aktif dicatat sebagai pesan terpisah dengan acknowledgement.
 
-### FR-10 — Sub-agent dan handoff · P0
+### FR-10 — Sub-agent dan handoff · P1
 
-- Delegasi mengacu ke definisi yang terdaftar, versi, child task, input, project scope, parent run, dan budget yang dibatasi.
-- Default usulan: maksimum 3 child aktif per parent dan kedalaman 2 edge delegasi dari root; keduanya dapat dikonfigurasi dalam batas workspace.
-- Parent dan child bersama-sama tunduk pada batas total concurrency; child tidak mendapat kapasitas tak terbatas melalui delegasi.
-- Scheduler tidak menahan seluruh slot untuk parent yang menunggu child. Pekerjaan siap jalan memperoleh kapasitas tanpa membuat siklus tunggu parent–child.
-- Child memperoleh akses minimum yang merupakan irisan izin parent, definisi child, dan proyek. Secret serta percakapan parent tidak diwariskan seluruhnya.
-- Parent menerima hasil terstruktur, artefak, atau kegagalan child sesuai kontrak handoff.
-- Child sementara ditampilkan selama run dan disimpan dalam histori. Selesai bekerja tidak otomatis menjadikannya agent permanen.
-- Rujukan nama agent di prose tidak otomatis menciptakan atau menjalankan agent. Referensi delegasi perlu dipetakan dan divalidasi.
+- Child delegation tidak termasuk alur P0; Agent Instance menjalankan Task yang ditugaskan secara independen.
+- Jika diaktifkan pada P1, child mengacu pada Agent Definition/version, Task, input, project scope, parent Run, dan budget; pengguna menyetujui tiap child sebelum Task/Run dibuat.
+- Child tunduk pada batas concurrency/depth/duration dan izin minimum; akses/secret parent tidak diwariskan otomatis.
+- Child Run tidak menjadi Agent Instance permanen secara otomatis. Parent-child relation berasal dari record/event, bukan teks prompt atau kedekatan avatar.
 
 ### FR-11 — Input, kontrol, dan approval · P0
 
-- Detail run menampilkan pertanyaan yang menunggu jawaban, scope aksi yang diminta, dan dampaknya.
-- Tindakan yang memerlukan approval mengikuti policy proyek; tidak semua tool call meminta konfirmasi ulang.
-- Approval terikat pada action, parameter, dan resource yang spesifik; perubahan material pada payload membatalkan approval dan memerlukan keputusan baru.
-- Orca CLI digunakan untuk orkestrasi saja; decision gate Orca yang didokumentasikan hanya untuk keputusan Task-DAG milik coordinator dan MUST NOT digunakan untuk approval tool runtime. Approval per-tool-call menjadi tanggung jawab Agent Office. Approval tetap fail-closed sampai tersedia keputusan Agent Office yang terikat pada invocation ID stabil, action, payload parameter/resource, dan policy; OMP saat ini belum menyediakan `toolCallId` pada frame approval yang diamati.
-- Penolakan dan kedaluwarsa approval menghasilkan event dan perilaku runtime yang jelas.
-- Cancel menampilkan “cancel requested” sampai runtime mengonfirmasi. Bila acknowledgement tidak diterima, hasilnya “status tidak pasti”, bukan “canceled”.
-- Cancel parent berlaku ke turunannya secara default. Child yang tidak dapat dihentikan atau putus koneksi tetap ditampilkan dan diekskalasi.
-- Cancel tidak menjamin efek eksternal dapat dibatalkan; perubahan yang sudah terjadi tetap dicatat.
-- Retry membuat run baru, dengan tautan ke attempt sebelumnya. Side effect tidak diulang otomatis tanpa pemeriksaan idempotensi dan status attempt lama.
+- Detail Run menampilkan status, pertanyaan yang menunggu jawaban, serta tindakan yang memerlukan approval berikut scope dan dampaknya.
+- Tools dalam allowlist yang sudah disetujui untuk workspace/Run dapat berjalan tanpa approval per langkah.
+- Aksi destruktif, resource di luar scope, atau egress yang belum disetujui tetap dibatasi; approval terikat pada action, parameter, dan resource. Perubahan payload yang material memerlukan approval baru.
+- Prompt, skill attachment, dan keputusan Task-DAG pihak lain tidak memberi izin tool. Policy ditegakkan oleh Agent Office.
+- Penolakan dan kedaluwarsa approval tercatat. Cancel tetap “cancel requested” sampai Engine mengonfirmasi; status yang tidak pasti tidak ditampilkan sebagai canceled.
+- Retry membuat Run baru hanya setelah status attempt sebelumnya diketahui; side effect tidak diulang otomatis.
 
 ### FR-12 — Detail run, timeline, dan hasil · P0
 
-Detail mencakup identitas agent, task/proyek, runtime session, versi definisi/skill, waktu mulai/akhir, aktivitas terakhir, status koneksi, parent/child, tool event yang tersedia, artefak, serta hasil pemeriksaan.
+Detail Run menampilkan identitas agent, Task/proyek, Runtime Session, versi system prompt, waktu mulai/akhir, safe activity terakhir, freshness, safe tool events, artefak, dan hasil pemeriksaan. Skill/version metadata tampil bila integrasi P1 kelak diaktifkan.
 
-- Timeline dapat difilter berdasarkan jenis event dan run; output besar dipaginasi/dipotong dengan tautan ke artefak.
+- Safe activity summary dan tautan hasil tersedia di detail Run P0; filter timeline, raw output, dan pencarian histori merupakan P1.
 - Prompt sensitif, secret, dan isi berkas di luar scope tidak dimasukkan ke log publik atau panel umum.
 - Menampilkan teks respons yang memang disediakan runtime dan ringkasan tindakan; tidak meminta atau menyimpan hidden chain-of-thought.
 - Artefak menyimpan asal, waktu, versi/checksum bila relevan, dan hubungan ke run. Link yang kedaluwarsa atau artefak terhapus diberi status jelas.
@@ -334,29 +321,24 @@ Detail mencakup identitas agent, task/proyek, runtime session, versi definisi/sk
 - Membaca/menulis lokal mengikuti policy proyek. Push, PR/MR, merge, dan deployment hanya dilakukan bila fitur tersedia serta diizinkan policy/approval yang berlaku.
 - Konflik perubahan menjadi status blocked dengan file/artefak terkait; tidak diselesaikan dengan overwrite diam-diam.
 
-### FR-14 — Attention Inbox dan notifikasi · P0
+### FR-14 — Attention Inbox dan notifikasi · P1
 
-- Mengumpulkan waiting input, approval, blocked, failed, koneksi stale, dan pelampauan batas.
-- Item memiliki task/run sumber dan tindakan yang relevan; item duplikat dikonsolidasikan.
-- Masalah selesai ditandai resolved berdasarkan event atau keputusan pengguna, dengan histori tetap tersedia.
-- Notifikasi in-app termasuk MVP; email, WhatsApp, Slack, atau Telegram merupakan integrasi lanjutan, bukan default.
+- Mengumpulkan waiting input, approval, blocked, failed, koneksi stale, dan pelampauan batas pada skala banyak proyek/agent.
+- Item memiliki Task/Run sumber dan tindakan relevan; duplikat dikonsolidasikan dan resolved berdasarkan event/keputusan.
+- Notifikasi in-app/email/messaging memerlukan prioritas terpisah; detail Run tetap menjadi jalur P0.
 
 ### FR-15 — Kuota dan visibilitas penggunaan · P0
 
-- Default target kapasitas MVP: 50 instance terdaftar dan maksimal 10 run yang aktif mengeksekusi, termasuk child. Angka dapat dikonfigurasi; bukan klaim skala tanpa batas.
-- Batas minimum yang ditegakkan: concurrency, durasi run, jumlah child, dan kedalaman delegasi. Pemeriksaan dilakukan sebelum start/spawn, bukan hanya setelah kejadian.
-- Token/biaya hanya ditampilkan jika ada data provider/runtime. Ketidaktersediaan ditampilkan sebagai “tidak tersedia”, bukan nol.
-- Biaya estimasi dibedakan dari biaya aktual; memuat dasar tarif/tanggal bila estimasi diaktifkan. Tidak menjanjikan hard spending cap jika runtime tidak dapat menegakkannya.
-- Parent total tidak menggandakan pemakaian child ketika agregasi. Attribution run yang tidak lengkap diberi label.
+- P0 menegakkan batas concurrency per Instance, durasi, inference turn/token, dan tool call per Run sebelum start.
+- Kapasitas skala 50 Instance/10 Run aktif, batas child/depth, dan agregasi penggunaan parent-child merupakan target P1/pilot, bukan gate visualisasi P0.
+- Token/biaya hanya ditampilkan jika tersedia; upstream/biaya yang tidak dilaporkan tampil sebagai tidak diketahui, bukan nol/gratis.
+- Biaya estimasi dibedakan dari biaya aktual; hard spending cap tidak dijanjikan kecuali ditegakkan provider/router.
 
 ### FR-16 — Penyimpanan, audit, dan portabilitas · P0
 
-- Definisi, task, run, keputusan approval, dan artefak bertahan setelah refresh/restart.
-- Audit mencatat perubahan konfigurasi, penugasan, kontrol, dan aktor/sumbernya.
-- Impor/ekspor definisi dan skill tidak mengharuskan pengguna memakai vendor model tertentu, tetapi kompatibilitas runtime tetap dinyatakan.
-- Retensi default usulan: event/log rinci 30 hari; definisi, ringkasan run, approval, dan artefak 90 hari. Pengguna dapat mengubahnya sebelum pemakaian.
-- Penghapusan menampilkan scope dan konsekuensi, termasuk jika hanya link artefak yang disimpan. Audit tidak menyimpan ulang payload sensitif yang sudah dihapus.
-- Pengguna dapat mengekspor histori miliknya; credential dan secret dikecualikan.
+- Definition, Task, Run, status aktivitas terbaru, keputusan policy/approval, dan artefak P0 bertahan setelah refresh/restart.
+- P0 merekam sumber/waktu event yang diperlukan untuk menjelaskan status Run; payload sensitif tidak disalin ke log umum.
+- Full audit history, configurable retention, bulk export, dan extended deletion workflows merupakan P1; credential/secret tidak pernah masuk export.
 
 ### FR-17 — Eksplorasi live seperti game simulasi · P0
 
@@ -377,7 +359,7 @@ Detail mencakup identitas agent, task/proyek, runtime session, versi definisi/sk
 - Pisahkan tiga sumber state: layout kantor persisten, pose/animasi yang bersifat sementara, dan state pekerjaan agent yang persisten.
 - Scene berjalan dengan loop rendering lokal; pembaruan status kerja diterima melalui event server. Setiap frame gerak tidak menjadi event audit, panggilan API, atau pemanggilan model.
 - Transisi animasi memakai state machine presentasi: idle, walk, work, attention, dan stale. State machine ini tidak boleh menetapkan run succeeded/failed atau memberi permission.
-- Gerakan agent ke meja/ruang merupakan representasi suatu assignment/handoff. Keterlambatan perjalanan atau jalur terhalang tidak menahan task nyata; UI tetap menampilkan status pekerjaan yang benar.
+- Gerakan agent ke meja/ruang memvisualisasikan assignment/start yang terverifikasi. Child handoff tidak termasuk alur P0; waktu perjalanan tidak menunda atau mengubah status Task/Run.
 - Jika layout berubah, client memuat scene version baru dan menghitung ulang jalur. Referensi meja/ruang yang hilang dipetakan ke area default dengan pemberitahuan.
 - Reconnect mengambil snapshot beserta cursor sebelum melanjutkan delta event. Panel, badge, task board, dan animasi diselaraskan pada revisi data yang sama.
 - Ketika browser berada di background, rendering dikurangi/dihentikan sesuai kemampuan platform; eksekusi agent di runner tetap berjalan. Saat kembali, lakukan pengecekan freshness dan rekonsiliasi.
@@ -385,14 +367,12 @@ Detail mencakup identitas agent, task/proyek, runtime session, versi definisi/sk
 
 ### FR-19 — Koneksi model provider yang dapat dikonfigurasi · P0
 
-- Pengguna mengonfigurasi koneksi model dengan memilih Provider Adapter, provider/service, model atau route ID, referensi credential opsional, dan endpoint jika adapter memerlukannya. Tidak ada prasyarat OpenAI-compatible.
-- Adapter dapat berbicara dengan API native provider atau endpoint OpenAI-compatible. Provider hanya dapat digunakan jika adapter terdaftar; penambahan adapter tidak boleh mengubah domain Runtime Adapter, Task, atau Run.
-- OpenAI-compatible adalah salah satu protokol opsional. Dukungan provider tidak diasumsikan dari nama, label, atau base URL; setiap kombinasi adapter/provider/model harus diuji.
-- Integrasi kustom dapat memakai adapter yang sudah tersedia atau menambahkan Provider Adapter yang menerapkan kontrak inference berversi; URL endpoint sembarang tidak otomatis dianggap didukung.
-- Kapabilitas yang dibutuhkan runtime—termasuk streaming dan tool calls—divalidasi per adapter/provider/model/endpoint. Preflight menolak atau menonaktifkan fitur yang tidak tersedia; tidak ada fallback provider diam-diam dari Agent Office.
-- Credential dikelola di runner/secret store; credential tidak masuk browser, prompt, log umum, atau export.
-- Runner hanya mengizinkan egress ke endpoint yang dikonfigurasi dan disetujui; custom URL tidak menjadi izin untuk mengakses host/internal service lain.
-- Untuk router yang tidak melaporkan upstream atau biaya, UI menyebut gateway/model route yang dipilih dan menampilkan upstream/biaya sebagai tidak tersedia. Hard spending cap harus ditegakkan pada akun/router upstream yang relevan; Agent Office tidak mengklaimnya sendiri.
+- Alur P0 memakai satu endpoint OpenAI-compatible Chat Completions yang dipilih pengguna melalui Provider Adapter; adapter/provider/model/route disimpan sebagai konfigurasi non-secret.
+Provider Adapter menerjemahkan inference request/response; ia tidak mengelola Task, tool execution, approval, lifecycle, atau event kerja.
+- Kombinasi adapter/provider/model/fitur harus diuji sebelum dipakai. Alur awal tidak mengklaim dukungan universal atau native API.
+- Batas request/token/turn per Run ditetapkan sebelum inference; biaya/upstream yang tidak dilaporkan ditampilkan sebagai tidak diketahui, bukan nol atau gratis.
+- Credential dikelola di Runner/secret store; tidak masuk browser, prompt, log umum, atau export.
+- Runner hanya mengizinkan egress ke endpoint terkonfigurasi. Custom URL tidak memberi izin ke host/internal service lain.
 
 
 ## 11. Status dan perilaku visual
@@ -406,7 +386,7 @@ Detail mencakup identitas agent, task/proyek, runtime session, versi definisi/sk
 | Running | Runtime mengonfirmasi run aktif | Avatar bekerja, ringkasan aktivitas berbukti |
 | Waiting input | Runtime membutuhkan jawaban pengguna | Ikon pertanyaan dan Attention Inbox |
 | Waiting approval | Aksi tertentu menunggu keputusan | Ikon approval dan rincian scope |
-| Waiting child | Parent menunggu hasil delegasi | Indikator child yang masih aktif |
+| Waiting child | Digunakan hanya bila child delegation P1 diaktifkan | Indikator child yang masih aktif |
 | Blocked | Ada hambatan yang diketahui | Alasan dan tindakan pemulihan |
 | Cancel requested | Permintaan berhenti belum dikonfirmasi | Label menunggu penghentian |
 | Succeeded | Runtime melaporkan selesai | Link hasil, task default masuk In review |
@@ -425,7 +405,7 @@ Terminal state tidak kembali menjadi running karena event lama. Retry menggunaka
 
 ## 12. Arsitektur dan teknologi yang direkomendasikan
 
-**Rekomendasi: aplikasi web dengan renderer 3D di browser, backend modular monolith, PostgreSQL sebagai sumber data utama, dan runner terpisah.** Gunakan Next.js + React Three Fiber/Three.js untuk pengalaman kantor dan FastAPI untuk API/event. Runner menggunakan Runtime Adapter yang terdaftar; OMP bukan dependensi domain atau control plane.
+**Rekomendasi:** aplikasi web dengan renderer 3D di browser, backend modular monolith, PostgreSQL sebagai sumber data utama, dan Runner terpisah. Gunakan Next.js + React Three Fiber/Three.js untuk kantor dan FastAPI untuk API/event. Runner meng-host Agent Office Execution Engine; Provider Adapter terpisah memanggil model endpoint. Runtime Adapter eksternal bukan dependency MVP.
 
 **[Medium Confidence]** untuk kecocokan keseluruhan arsitektur: didasarkan pada kebutuhan satu owner, 50 agent terdaftar/10 run aktif, dan stack Next.js/Python yang sudah dikenal pengguna. Performa serta operasi end-to-end belum diuji. Fakta kemampuan library pada tabel didukung dokumentasi primer; pemilihan komponennya merupakan rekomendasi desain.
 
@@ -441,12 +421,13 @@ Terminal state tidak kembali menjadi running karena event lama. Retry menggunaka
 | UI overlay | Komponen React/HTML + shadcn/ui | Panel task, formulir, menu interaksi, Inbox dan shortcut tetap terbaca serta dapat diakses di luar canvas [R9] |
 | State web | TanStack Query + TanStack Store | Query untuk data server; Store untuk pilihan agent, mode kamera dan panel. Transform tiap frame disimpan pada object/ref scene, bukan query cache [R10–R11] |
 | Backend | FastAPI + Pydantic | REST API, validasi, policy, event ingestion dan WebSocket; satu codebase modular [R12] |
-| Data dan migrasi | PostgreSQL + SQLAlchemy async + Alembic | Relasi agent/task/run, versi konfigurasi, audit, transaksi, dan migrasi terkontrol [R13–R15] |
+| Data dan migrasi | PostgreSQL + SQLModel (SQLAlchemy async) + Alembic | CRUD dan pemetaan schema standar menggunakan SQLModel/SQLAlchemy async; Alembic mengelola perubahan schema berversi. Raw SQL tetap didukung untuk operasi khusus [R13–R15] |
 | Realtime browser | WebSocket native melalui FastAPI | Snapshot/delta status dan notifikasi; REST untuk command penting dengan request ID dan hasil yang dapat di-query |
 | Scheduler/dispatcher | Worker Python terpisah + tabel command/outbox PostgreSQL | Antrean awal yang durable; satu sumber transaksi tanpa broker tambahan. Lease, retry dan deduplikasi harus diimplementasikan serta diuji |
-| Runner | Service Python pada host eksekusi; menjalankan Runtime Adapter terpilih di isolasi per run/scope | Menjaga proses runtime/tool di luar proses HTTP; runner menegakkan workspace, credential, egress, resource, dan event boundaries |
-| Runtime Adapter | Kontrak aplikasi berversi; OMP RPC dan Codex app-server adalah kandidat; ACP hanya untuk runtime yang kompatibel | Memetakan start/input/cancel/health/events/result/recovery ke domain kanonis. Adapter hanya diiklankan setelah capability/safety tests lulus |
-| Model provider | Provider Adapter dan koneksi endpoint yang dikonfigurasi | Adapter menerjemahkan kontrak inference ke protokol native atau OpenAI-compatible; provider/model/route, endpoint, credential reference, dan kemampuan diverifikasi terpisah dari Runtime Adapter |
+| Runner | Service pada host eksekusi | Menyiapkan isolated workspace, meng-host Agent Office Execution Engine, menegakkan policy/resource/egress, mengawasi proses, dan menyimpan event hingga diakui |
+| Agent Office Execution Engine | Loop execution milik produk di Runner | Menjalankan Task/Run dan tool loop, meminta inference melalui Provider Adapter, menegakkan approval/policy, dan menghasilkan event lifecycle |
+| Runtime Adapter | Extension boundary opsional untuk runtime eksternal setelah MVP | Bukan target produk atau syarat MVP; tidak menggantikan Engine atau Provider Adapter |
+| Model provider | Provider Adapter dan koneksi endpoint yang dikonfigurasi | Phase 1 memprioritaskan subset OpenAI-compatible Chat Completions; provider/model/route, endpoint, credential reference, dan kemampuan diverifikasi per kombinasi |
 | Artefak | Volume berkas privat pada pilot, melalui abstraction Artifact Store | Diff, log besar, dan dokumen di luar kolom event. Adapter S3-compatible dapat memakai layanan yang sudah ada setelah kompatibilitas diuji |
 | Deployment | Docker Compose + reverse proxy Nginx dengan HTTPS | Layanan aplikasi, database, worker, dan volume dapat dikelola pada satu Linux host privat; runner dapat ditempatkan di host lain [R18] |
 | Operasional | Structured logs + correlation ID serta ekspor metrik | Ukur lag event, error, antrean, reconnect, FPS dan waktu kontrol secara terpisah; backend tidak menyimpan trace reasoning tersembunyi |
@@ -527,8 +508,8 @@ Untuk pilot, satu proses gateway mengelola koneksi aktif; registry koneksi in-me
 
 1. API memvalidasi scope dan kapasitas, lalu menyimpan task/run intent serta command/outbox dalam satu transaksi.
 2. Dispatcher mengambil command siap jalan dengan lock singkat; PostgreSQL mendokumentasikan SKIP LOCKED untuk pola tabel antrean. Lock dilepas setelah pencatatan lease, tidak ditahan selama model bekerja. [R13]
-3. Dispatcher mengirim command melalui gateway ke runner yang terdaftar. Identitas runner, request ID, run ID, lease dan acknowledgement dicatat.
-4. Runner memeriksa deduplikasi, menyiapkan workspace dan snapshot konfigurasi, lalu menjalankan runtime. Event nyata dikirim ke gateway; start baru dianggap berjalan setelah konfirmasi yang sesuai.
+3. Dispatcher mengirim command ke Runner yang terdaftar; identitas Runner, request ID, Run ID, lease, dan acknowledgement dicatat.
+4. Runner menyiapkan workspace/snapshot, lalu Agent Office Execution Engine menjalankan Run, memanggil Provider Adapter untuk inference, dan mengeksekusi hanya tool yang diizinkan. Engine/Runner mencatat event kerja; provider response saja tidak menjadi event lifecycle.
 5. Gateway memvalidasi, meredaksi, menyimpan event dan projection, lalu menyiarkannya ke browser. Event diakui setelah commit.
 6. Runner menyimpan spool event lokal sebelum acknowledgement dan mengirim ulang ketika koneksi pulih. Ledger command/run dan lease membantu rekonsiliasi sesudah crash.
 7. Lease kedaluwarsa tidak otomatis membuktikan proses lama sudah mati. Reconcile/fence runner lama sebelum menjalankan attempt pengganti yang dapat menimbulkan side effect; jika tidak dapat dipastikan, status tetap tidak pasti.
@@ -537,10 +518,7 @@ Antrean PostgreSQL membutuhkan implementasi reaper, lease renewal, observabilita
 
 Setiap run memakai worktree/workspace tersendiri. Isolasi Git tidak sama dengan pembatasan akses OS: jalankan proses dalam container atau batas OS yang sesuai dengan scope file, jaringan, resource dan secret. Runner supervisor boleh mengelola sandbox, tetapi credential supervisor dan Docker socket tidak diberikan kepada proses agent.
 
-**Jalur kandidat OMP:** dokumentasi resmi menyediakan protokol JSONL melalui stdio, respons/event, dialog ekstensi, dan client Python. RPC UI dapat menjembatani pertanyaan; penggunaan no-ui dapat menonaktifkan jalur approval tertentu. Mapping completion harus memperhatikan hasil prompt serta session yang benar-benar settled, bukan setiap agent_end. [R16]
-- Konfigurasi provider model terpisah dari Runtime Adapter. Runner hanya memberi runtime akses ke endpoint yang dipilih dan dibatasi policy; gateway yang meneruskan request ke upstream memiliki kebijakan dan batas biaya tersendiri.
-
-**[High confidences]** untuk keberadaan surface tersebut berdasarkan dokumentasi yang dibaca; **[Low Confidence]** untuk kompatibilitas instalasi pengguna sampai pengujian. SDK Bun menjadi alternatif bila adapter memerlukan kontrol in-process lebih dalam. [R17] M0 harus memvalidasi dialog, timeout, cancel beserta queued follow-up, sub-agent, dan policy. Prompt/skill asli disimpan; konversi ke konfigurasi runtime dilakukan oleh adapter dan dicatat sebagai effective configuration.
+Probes OMP/Codex yang tercatat di `docs/m0-feasibility.md` adalah bukti historis saja, bukan kandidat runtime MVP. Agent Office Execution Engine dan Provider Adapter tetap batas yang terpisah; provider/gateway tidak memberi event, policy, atau otorisasi tool secara implisit.
 
 
 ### 12.7 Event minimum
@@ -662,30 +640,32 @@ Metrik performa kantor tidak mencakup waktu respons model. Tidak ada janji SLA p
 
 ## 16. Kriteria penerimaan end-to-end
 
+Kriteria berlabel `[P1]` tidak memblokir alur fokus M3. Acceptance P0 memerlukan Task nyata, dua Run independen, safe action events, dan visualisasi 3D event-backed; bukan child handoff atau dukungan banyak provider.
+
 | ID | Skenario dan tindakan | Hasil yang wajib terlihat | Rujukan |
 | --- | --- | --- | --- |
-| AC-01 | Impor base agent `system-architect` yang diberikan pengguna | Nama/deskripsi terpetakan, body tetap utuh, sumber asli dapat diekspor | FR-01–04 |
+| AC-01 | Impor base agent `system-architect` yang diberikan pengguna | Nama/deskripsi terpetakan, body system prompt tetap utuh, sumber asli dapat diekspor | FR-01–02 |
 | AC-02 | Impor prompt bebas tanpa YAML | Pengguna melengkapi metadata dan menyimpan definisi tanpa mengubah isi otomatis | FR-02 |
-| AC-03 | Tambah peran baru dan instance ke-11 pada pilot | Tidak memerlukan perubahan kode; instance dapat tampil walau belum menjalankan task | FR-01, FR-06, FR-15 |
-| AC-04 | Pasang skill yang memerlukan tool tidak tersedia | Preflight menjelaskan ketidakcocokan; run yang membutuhkan tool itu tidak dimulai | FR-03–05 |
-| AC-05 | Ubah definisi/skill saat run berjalan | Run lama tetap memakai versi awal; run baru dapat memilih versi baru | FR-04 |
+| AC-03 | Tambah peran baru dan Agent Instance tambahan | Tidak memerlukan perubahan kode; instance idle dapat tampil dan ditugaskan Task | FR-01, FR-06, FR-15 |
+| [P1] AC-04 | Pasang skill yang memerlukan tool tidak tersedia | Preflight menjelaskan ketidakcocokan; run yang membutuhkan tool itu tidak dimulai | FR-03 |
+| AC-05 | Ubah system prompt saat Run berjalan | Run lama tetap memakai versi prompt awal; Run baru memakai versi baru | FR-04 |
 | AC-06 | Klik start dua kali untuk task yang sama | Hanya satu run dibuat; status Starting berubah setelah acknowledgement yang sesuai | FR-05, FR-09 |
 | AC-07 | Jalankan task nyata yang membaca resource dan menghasilkan artefak | Avatar dan detail mengikuti event; hasil dapat dibuka dan ditelusuri ke run | FR-05, FR-08, FR-12 |
-| AC-08 | Jalankan parent dengan dua child terdaftar | Hubungan terlihat; input/akses dibatasi; parent menerima hasil atau error child | FR-10 |
-| AC-09 | Capai batas concurrency dan delegasi | Child/run tambahan antre atau ditolak dengan alasan; tidak ada oversubscription atau deadlock parent menunggu child | FR-09, FR-10, FR-15 |
-| AC-10 | Runtime meminta input atau approval, lalu pengguna merespons | Inbox muncul; respons tercatat dan diakui; aksi tidak berjalan jika approval ditolak | FR-11, FR-14 |
+| [P1] AC-08 | Parent mengusulkan dua child terdaftar; pengguna menyetujui setiap child sebelum Task/Run dibuat | Hubungan terlihat; input/akses dibatasi; parent menerima hasil atau error child | FR-10 |
+| [P1] AC-09 | Capai batas concurrency dan delegasi | Child/run tambahan antre atau ditolak; tidak ada oversubscription atau deadlock | FR-09, FR-10, FR-15 |
+| AC-10 | Engine meminta approval untuk aksi destruktif/di luar scope; pengguna menyetujui atau menolak dari detail Run | Run tetap menunggu sampai keputusan tercatat; aksi tidak dijalankan saat ditolak | FR-11 |
 | AC-11 | Putuskan heartbeat selama lebih dari 30 detik | Tampilan stale, waktu terakhir terlihat, animasi kerja agent berhenti; karakter pengguna tetap dapat berjalan; run tidak otomatis dianggap selesai/gagal | FR-06, FR-08, bagian 11 |
-| AC-12 | Sambungkan ulang dengan event duplikat dan terlambat | Timeline direkonsiliasi, terminal state tidak mundur, run/biaya tidak ganda | Bagian 12, NFR-07/11 |
-| AC-13 | Kirim cancel pada parent yang memiliki child | Cancel requested terlihat sampai dikonfirmasi; status setiap child terlihat; yang belum berhenti tetap menjadi perhatian | FR-11 |
+| AC-12 | Reconnect setelah event start/aksi/terminal duplikat atau terlambat | Status dan last safe action cocok dengan snapshot terbaru; terminal state tidak mundur dan Run tidak terduplikasi | FR-08, FR-18 |
+| [P1] AC-13 | Kirim cancel pada parent yang memiliki child | Cancel pending sampai dikonfirmasi; status child terlihat; yang belum berhenti tetap menjadi perhatian | FR-11 |
 | AC-14 | Retry run yang gagal; lalu coba retry run yang statusnya tidak pasti | Gagal: attempt baru tercatat. Tidak pasti: eksekusi ulang diblokir sampai direkonsiliasi atau diisolasi secara eksplisit | FR-11, bagian 12 |
 | AC-15 | Dua agent mengubah proyek yang sama | Masing-masing memiliki workspace terisolasi atau aturan serialisasi; konflik menjadi blocked | FR-13 |
 | AC-16 | Runtime mengirim succeeded tanpa bukti test | Run selesai; task tetap In review; test tidak dilabeli terverifikasi | FR-12 |
-| AC-17 | Adapter hanya mendukung Observe atau tidak mendukung pause | Status dan capability terlihat; tombol kontrol yang tidak didukung tidak dapat mengirim command | FR-05 |
-| AC-18 | Upload prompt/skill yang memerintahkan akses lintas proyek atau membocorkan secret | Impor tidak mengeksekusi instruksi; runner menolak akses terlarang; secret uji tidak muncul di UI/log | FR-02/03, bagian 14 |
+| AC-17 | Agent Office Execution Engine melaporkan pause tidak didukung untuk Run yang dipilih | Capability terlihat; kontrol pause tidak dapat mengirim command, dan status tetap berdasarkan event yang tersedia | FR-05 |
+| AC-18 | Impor prompt yang memerintahkan akses lintas proyek atau membocorkan secret | Impor tidak mengeksekusi instruksi; runner menolak akses terlarang; secret uji tidak muncul di UI/log | FR-02/11, bagian 14 |
 | AC-19 | Refresh browser dan restart application service | Definisi, task, hasil, dan event yang diakui tetap ada; status runtime direkonsiliasi | FR-16, NFR-08 |
-| AC-20 | Buka aplikasi di mobile atau tanpa WebGL, serta gunakan keyboard | Agent, task, hasil, dan Inbox tetap dapat diakses melalui daftar/detail | FR-07 |
-| AC-21 | Sumber tidak menyediakan token, detail skill, atau progress | Menampilkan tidak tersedia; tidak mengisi nol, persentase, atau klaim penggunaan skill secara fiktif | FR-03, FR-08, FR-15 |
-| AC-22 | Arsipkan definisi dengan histori dan run aktif | Run aktif tidak berhenti mendadak; histori tetap tersedia; definisi tidak dipakai untuk run baru | FR-01 |
+| AC-20 | Buka aplikasi di mobile atau tanpa WebGL, serta gunakan keyboard | Agent, Task, Run, hasil, dan kontrol inti tetap dapat diakses melalui daftar/detail yang dapat dioperasikan; Inbox bukan syarat P0 | FR-07 |
+| AC-21 | Sumber tidak menyediakan token, progress, ETA, atau detail safe action | Menampilkan tidak tersedia; tidak mengisi nol, persentase, estimasi, atau aktivitas fiktif | FR-08, FR-15 |
+| [P1] AC-22 | Arsipkan definisi dengan histori dan run aktif | Run aktif tidak berhenti mendadak; histori tetap tersedia; definisi tidak dipakai untuk run baru | FR-01 |
 | AC-23 | Berjalan dengan WASD dan click-to-move melintasi beberapa ruang | Karakter responsif, menemukan jalur valid, dan tidak menembus dinding/furnitur solid | FR-17, NFR-13 |
 | AC-24 | Klik tujuan yang terhalang atau berada di luar lantai | Indikator tujuan tidak valid muncul; tidak ada loop berjalan, teleport salah, atau task baru | FR-17 |
 | AC-25 | Rotate/zoom/follow/overview lalu mengetik di panel | Kamera bekerja; karakter berhenti menerima hotkey saat fokus berada di input; session agent tetap sama | FR-17 |
@@ -695,10 +675,11 @@ Metrik performa kantor tidak mencakup waktu respons model. Tidak ada janji SLA p
 | AC-29 | Refresh setelah posisi tersimpan, lalu ubah layout sehingga posisi lama tertutup | Posisi valid dipulihkan; posisi tidak valid kembali ke spawn aman tanpa mengubah task | FR-17/18 |
 | AC-30 | Hilangkan meja atau tutup jalur saat scene version berubah | Client menghitung ulang rute dan menggunakan fallback; agent run tetap dapat diinspeksi | FR-18 |
 | AC-31 | Background tab selama 60 detik lalu kembali, dan uji kegagalan aset/WebGL | Pekerjaan berlanjut di runner; snapshot dipulihkan; daftar tersedia ketika scene gagal | FR-18, NFR-16 |
-| AC-32 | Uji 50 avatar, 10 run aktif dan navigasi bersamaan; restart dispatcher saat start dikirim | Target render/event diukur terpisah; request yang sama tidak membuat proses agent kedua | NFR-01/04/13, bagian 12 |
-| AC-33 | Jalankan task melalui sedikitnya dua Provider Adapter yang tersedia; pilih provider/protokol berbeda bila adapter yang diuji mendukungnya, tanpa mewajibkan vendor atau API tertentu; uji pula provider tanpa adapter atau kemampuan yang belum tersedia | Setiap run merekam adapter/provider/model/route yang dipilih; preflight hanya mengaktifkan kemampuan yang teruji; provider/kemampuan yang tidak didukung gagal tertutup; secret tidak muncul di browser/export/log; egress hanya menuju endpoint yang diizinkan; upstream dan biaya yang tidak dilaporkan tampil sebagai tidak tersedia | FR-19, bagian 14 |
+| [P1] AC-32 | Uji 50 avatar/10 Run dan navigasi bersamaan; restart dispatcher saat start dikirim | Target skala diukur terpisah; request sama tidak membuat Run kedua | NFR-01/04/13, bagian 12 |
+| [P1] AC-33 | Jalankan task melalui sedikitnya dua Provider Adapter; uji provider/fitur yang belum tersedia | Setiap Run merekam adapter/provider/model/route; kemampuan unsupported gagal tertutup; secret dan egress tetap terlindungi | FR-19, bagian 14 |
+| AC-34 | Jalankan Task berbeda pada sedikitnya dua Agent Instance; amati status selama kedua Run berjalan | Kedua Instance dan Task/Run terlihat bersamaan. Status dan safe action mengikuti event Engine/Runner yang sama dengan detail Run; avatar hanya berpindah setelah assignment terverifikasi. Saat event stale, animasi kerja berhenti dan status stale terlihat; reasoning tersembunyi tidak ditampilkan. | FR-05, FR-06, FR-08, FR-18 |
 
-**Demo penerimaan wajib:** pengguna masuk kantor, berjalan antarruang, berinteraksi dengan agent/meja, dan mengganti kamera sambil satu task nyata berjalan sampai menghasilkan artefak; satu parent mendelegasikan kepada child; satu kegagalan/approval ditindaklanjuti; koneksi diputus dan dipulihkan tanpa memalsukan status. Demonstrasi simulasi tidak menggantikan bukti integrasi ini.
+**Demo penerimaan wajib:** pengguna memberi dua Task terpisah kepada dua Agent Instance, memulai keduanya, lalu melihat status, safe action, hasil, serta freshness masing-masing melalui event Engine/Runner nyata di kantor 3D dan list/detail. Satu Run menghasilkan artefak dari workspace terpilih. Putus koneksi tidak menghasilkan status rekaan; informasi yang sama tetap tersedia melalui daftar/detail. Simulasi tidak menggantikan bukti eksekusi nyata.
 
 ## 17. Ukuran keberhasilan produk
 
@@ -719,13 +700,13 @@ Jumlah avatar bergerak, jumlah pesan AI, dan durasi animasi tidak dipakai sebaga
 
 | Tahap | Hasil | Syarat keluar |
 | --- | --- | --- |
-| M0 — Validasi runtime adapter dan 3D | Capability matrix dan task smoke untuk runtime kandidat; adapter contract dan gap lifecycle/safety; scene sederhana dengan karakter/camera/collision pada perangkat target | Runtime-neutral boundary ditetapkan; setidaknya satu adapter Managed layak dan gap kandidat lain diketahui; kontrol/performa terbukti |
-| M1 — Fondasi data | Definisi/skill berversi, task/run, event pipeline, list view, permission dasar | AC impor, versi, task, event, dan persistensi lulus |
-| M2 — Kantor yang dapat dijelajahi | Explore/Overview Mode, WASD/click-to-move, camera, collision, minimap, interaksi agent/objek dan fallback | AC eksplorasi, keterbacaan, aksesibilitas, dan performance pilot lulus |
-| M3 — MVP operasional | Managed task, child run, Inbox, approval, artefak, cancel/retry, recovery | Demo nyata serta seluruh AC P0 lulus; batas adapter terdokumentasi |
-| M4 — Perluasan | Runtime tambahan, connector repository, workflow reusable, multi-user sesuai prioritas | Dipilih berdasarkan hasil pilot, bukan dimasukkan otomatis ke MVP |
+| M0 — Provider inference API dan 3D feasibility | Capability matrix dan bounded Chat Completions request; 3D scene movement/collision/camera evidence | Inference request/response terkorrelasi dan fitur unsupported/unknown tercatat; scene/performance diukur; tidak menyatakan Managed execution |
+| M1 — Fondasi data | Definition/Skill/Instance, Task/Run, satu endpoint config, permission dasar | Task/Run persisten dan scope owner/workspace terverifikasi |
+| M2 — Kantor yang dapat dijelajahi | Explore/Overview, movement, collision, layout, aksesibilitas dan fallback | Karakter/scene dapat dijelajahi; belum mengklaim agent live |
+| M3 — Alur kerja agent terlihat di 3D | Satu endpoint, tools allowlist, beberapa Run independen, event minimum, safe action summary, status stale, hasil | Demo AC-34 memakai Engine/Runner nyata; minimal safety boundaries dan event freshness lulus |
+| M4 — Perluasan | Delegasi child, provider adapter tambahan/native API, advanced recovery, skala pilot, connectors, dan multi-user | Diprioritaskan terpisah; tidak memblokir demo alur M3 |
 
-Durasi kalender belum ditetapkan karena runtime awal, jumlah engineer, kualitas aset visual, dan target deployment belum dipilih. Estimasi diberikan setelah M0. Jika adapter minimum tidak layak, keputusan produk perlu direvisi secara eksplisit; prototipe Observe tidak disebut MVP Managed yang telah selesai.
+Target kalender dan skala pilot belum ditetapkan. M3 tidak menunggu child delegation, validasi banyak provider, atau target 50-avatar/10-Run. M3 tetap memerlukan satu alur Engine/Runner nyata, workspace/tools allowlist, secret/egress boundaries, bounded inference, dan event freshness; jangan mengganti bukti tersebut dengan simulasi atau klaim provider gratis.
 
 ## 19. Risiko dan trade-off
 
@@ -734,7 +715,7 @@ Durasi kalender belum ditetapkan karena runtime awal, jumlah engineer, kualitas 
 | Tinggi | Telemetry runtime tidak lengkap atau berubah antarversi | Mulai satu adapter, capability matrix, protokol berversi, contract tests; tampilkan gap |
 | Tinggi | Animasi membuat pengguna percaya agent produktif padahal data stale | Timestamp, health terpisah, bukti aktivitas, hentikan animasi kerja agent ketika stale; eksplorasi pengguna tetap tersedia |
 | Tinggi | Prompt/skill memberi instruksi yang melampaui akses | Enforcement di runner, scope minimum, isolasi, approval sesuai policy |
-| Tinggi | Delegasi berulang meningkatkan biaya dan jumlah proses | Batas child/depth/concurrency/durasi, deduplikasi request, budget bersama |
+| P1 | Delegasi berulang meningkatkan biaya dan jumlah proses | Child delegation ditunda dari P0; ketika diprioritaskan, batas child/depth/concurrency/duration dan budget bersama diberlakukan |
 | Tinggi | Konflik perubahan atau pengulangan side effect saat retry | Isolasi workspace, korelasi attempt, rekonsiliasi sebelum retry |
 | Sedang | Cakupan 3D menghabiskan waktu sebelum integrasi berguna | Template kecil, list view sejak awal, kualitas visual bertahap, gate pada telemetry |
 | Sedang | Peran architect/backend tumpang tindih | Scope eksplisit, peringatan konflik, task acceptance criteria, versi konfigurasi |
@@ -742,7 +723,7 @@ Durasi kalender belum ditetapkan karena runtime awal, jumlah engineer, kualitas 
 | Sedang | Ringkasan AI tidak akurat | Ringkasan opsional, label sumber, tautan event, raw evidence tetap dapat dibuka |
 | Sedang | Klaim “selesai” disamakan dengan hasil benar | Run state terpisah dari task acceptance, bukti review/test |
 
-**Trade-off utama:** kantor 3D mendukung orientasi dan pengalaman produk, tetapi memerlukan biaya rendering dan desain. Produk mempertahankan daftar sebagai jalur kerja setara. Banyak adapter menambah fleksibilitas, tetapi satu adapter yang terbukti lebih penting untuk validasi MVP.
+**Trade-off utama:** kantor 3D menjadi permukaan utama untuk memahami aktivitas, sementara daftar/detail menyediakan fallback dan bukti. Satu configured provider/tool allowlist cukup untuk memvalidasi alur awal; provider breadth, delegasi, dan skala pilot ditunda tanpa mengubah batas keselamatan P0.
 
 ## 20. Keputusan yang perlu ditetapkan sebelum implementasi
 
@@ -750,18 +731,18 @@ Dokumen ini sudah dapat digunakan untuk review kebutuhan. Pertanyaan berikut tid
 
 | ID | Keputusan | Default yang diusulkan | Dampak jika berbeda |
 | --- | --- | --- | --- |
-| D-01 | Kontrak Runtime Adapter dan runtime yang dipilih | Runtime-neutral contract; OMP dan Codex app-server kandidat awal, ACP hanya bila runtime mendukungnya. Tidak ada engine default sebelum capability/safety spike. | Setiap adapter memerlukan task smoke, capability mapping, dan uji policy/lifecycle; label protokol tidak membuktikan dukungan |
+| D-01 | Kontrak execution/runtime | Execution loop dan policy berada di Agent Office; Phase 1 tidak mengintegrasikan OMP/Codex atau coding-agent backend khusus. | Model inference API bukan runtime; tools, workspace, lifecycle, approvals, events, dan safety tetap harus dibangun serta dibuktikan Agent Office |
 | D-02 | Target deployment | Rekomendasi: Docker Compose pada Linux privat; runner pada host terkontrol, dapat terpisah | VPS/NAS/laptop memengaruhi resource dan akses; runner tidak memerlukan endpoint publik |
-| D-03 | Observasi saja atau menjalankan pekerjaan | Managed pada satu adapter; Observe sebagai mode kompatibilitas | Observe-only mengurangi scope kontrol dan memerlukan perubahan kriteria MVP |
+| D-03 | Eksekusi dikelola Agent Office atau observasi runtime eksternal | Managed execution dimiliki Agent Office sebagai MVP; Observe melalui Runtime Adapter opsional setelah MVP | External runtime bukan dependency MVP; inference provider dan task execution adalah batas terpisah |
 | D-04 | Detail pengalaman visual | Eksplorasi live ditetapkan; rekomendasi 3D isometrik, karakter sendiri, template kantor | Gaya aset, sudut kamera, dan perangkat minimum dibekukan setelah spike visual |
 | D-05 | Bentuk paket skill yang tersedia | Markdown dan resource teks terlebih dahulu | Skrip, tool eksternal, dan format khusus membutuhkan validasi tambahan |
-| D-06 | Cara memilih agent | Penugasan eksplisit, delegasi hanya ke definisi terdaftar | Routing otomatis menambah kebutuhan evaluasi, budget, dan penjelasan keputusan |
+| D-06 | Cara memilih agent | Task ditugaskan eksplisit ke satu Instance; beberapa Instance boleh menjalankan Task independen; child delegation P1 | Routing/delegasi otomatis memperluas kebutuhan approval, budget, dan penjelasan keputusan |
 | D-07 | Jumlah operator | Satu owner | Banyak manusia memerlukan role, konflik kontrol, dan audit lebih luas |
 | D-08 | Sumber proyek pertama | Satu repository/workspace melalui runner | Integrasi GitHub/GitLab/VPS langsung membutuhkan scope serta credential terpisah |
 | D-09 | Budget dan retensi | Tetapkan sebelum pilot; gunakan batas eksekusi dan retensi usulan sebagai awal | Menentukan biaya provider, storage, dan perilaku penghentian |
 | D-10 | Baseline stack dan aset | Stack rekomendasi bagian 12; pin dependensi yang kompatibel dan aset yang boleh digunakan | Mengunci build reproducible, kapasitas renderer, dan kompatibilitas adapter |
-| D-11 | Cakupan API model provider | Terkonfirmasi: tidak mewajibkan OpenAI-compatible; API native dan kompatibel dapat dipakai melalui Provider Adapter yang tersedia dan teruji. | Tidak semua provider/protokol memiliki adapter atau fitur yang sama; kompatibilitas, credential, egress, dan telemetry diverifikasi per adapter/provider/model. |
-| D-12 | Batas integrasi Orca dan approval | User memilih Orca CLI hanya untuk orkestrasi; Agent Office bertanggung jawab atas approval tool-call. Gate Task-DAG Orca tidak boleh dipakai sebagai izin tool runtime. | Implementasi approval Agent Office dan identitas invocation stabil dari runtime masih diperlukan; OMP approval tetap fail-closed sampai binding tersebut terbukti. |
+| D-11 | Cakupan API model provider | Satu endpoint OpenAI-compatible melalui Provider Adapter untuk alur P0; adapter tambahan/native APIs P1 | Kompatibilitas hanya untuk endpoint/model/fitur yang diuji; tidak mengklaim semua provider otomatis kompatibel |
+| D-12 | Batas izin tools | Tool allowlist untuk workspace/Run berjalan tanpa approval per langkah; destructive/out-of-scope action dan egress baru memerlukan policy/approval | Mengurangi interupsi tanpa memberi akses tak terbatas; Agent Office tetap mengikat approval pada action/resource yang diminta |
 
 ## 21. Definition of Done PRD dan tindak lanjut
 
@@ -814,4 +795,8 @@ Tidak ada klaim integrasi dengan Gather/Kumospace atau penyamaan fitur dengan Th
 | 0.4 | Cakupan provider diperluas: tidak ada prasyarat OpenAI-compatible; API native dan endpoint kompatibel diakses melalui Provider Adapter yang tersedia. FR-19, AC-33, arsitektur, dan verifikasi Phase 1 diperbarui; belum ada klaim dukungan provider yang belum diuji. |
 | 0.6 | Orca CLI-only broker feasibility recorded. Its decision gates are not valid runtime tool approvals; FR-11 remains fail-closed pending a compatible interface and stable runtime invocation identity. |
 | 0.7 | Orca CLI dibatasi untuk orkestrasi. Approval tool-call tetap berada di Agent Office; OMP call identity belum tersedia, sehingga approval masih fail-closed. |
+| 0.8 | Phase 1 diarahkan dari integrasi coding-agent tertentu ke inference API OpenAI-compatible Chat Completions; probe OMP/Codex dipertahankan sebagai bukti historis, bukan target produk. Execution loop, tools, policy, lifecycle, dan safety tetap tanggung jawab Agent Office; dukungan provider/model/fitur harus diuji per kombinasi. |
+| 0.9 | Tujuan dipertegas sebagai orkestrasi agent oleh Agent Office dengan kantor 3D live berbasis event. Definition menjadi template reusable, instance dibuat idle, Execution Engine memiliki loop/state, Provider Adapter hanya inference, child delegation memerlukan approval, dan Runtime Adapter eksternal bukan prasyarat MVP. Menambahkan AC-34 untuk handoff event-backed; 3D tetap sample-only. |
+| 1.0 | Fokus P0 disederhanakan ke beberapa Agent Instance yang menjalankan Task terpisah pada satu workspace/endpoint; safe action/status event terlihat di 3D. Child delegation, katalog Skill, provider breadth, dan skala pilot ditunda; tool allowlist, workspace isolation, secret/egress boundaries, serta freshness tetap wajib. AC-34 menguji dua Run independen. |
+| 1.1 | Kantor menampilkan Agent Instance persisten tanpa fixture agent/task; layout kantor tetap template statis. Avatar, lokasi, dan aktivitas kerja hanya ditampilkan dari data runtime/event yang terverifikasi, dan tetap tidak tersedia sampai feed nyata tersambung. |
 

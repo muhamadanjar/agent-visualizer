@@ -3,6 +3,7 @@ import {
   sampleArtifacts,
   sampleAuditEntries,
 } from "../lib/ui-preview-data";
+import { ProviderConnectionForm } from "./provider-connection-form";
 import {
   DisabledWorkAction,
   PageHeader,
@@ -10,41 +11,26 @@ import {
   StatusPill,
 } from "./workspace-components";
 
-
-
-
 export function ConnectionsView() {
   return (
     <div className="page-stack">
-      <PageHeader eyebrow="Connections" title="Providers & runtimes" description="Model inference providers and agent execution runtimes are different connections. Neither is connected in this UI preview." />
-      <SampleNotice />
+      <PageHeader eyebrow="Connections" title="Providers & runtimes" description="Provider selection is saved as non-secret configuration. Runtime execution remains unavailable." />
       <div className="settings-grid">
-        <section className="content-section settings-card">
-          <div className="settings-card-heading"><div><p className="eyebrow">Inference</p><h2>Model provider</h2></div><StatusPill tone="amber">No adapter registered</StatusPill></div>
-          <p>Choose a registered Provider Adapter first. Native provider APIs and compatible endpoints are optional adapter capabilities; a URL or provider name alone does not establish support.</p>
-          <div className="settings-row"><span>Provider Adapter</span><strong>None registered</strong></div>
-          <div className="settings-row"><span>Protocol and provider/model IDs</span><strong>Unavailable until an adapter is registered</strong></div>
-          <div className="settings-row"><span>Endpoint and credential reference</span><strong>Not configured; no browser entry field</strong></div>
-          <div className="settings-row"><span>Streaming / tool calls</span><strong>Not verified</strong></div>
-          <div className="settings-row"><span>Upstream / cost reporting</span><strong>Not available</strong></div>
-          <p className="field-note">Provider settings are read-only here. Do not paste or enter credentials; there is no provider configuration API.</p>
-          <DisabledWorkAction reason="A registered, qualified Provider Adapter and a server-side secret reference are required.">Save provider connection</DisabledWorkAction>
-          <DisabledWorkAction reason="Provider endpoint, model, credentials, and capabilities have not been qualified by an adapter.">Test provider connection</DisabledWorkAction>
-        </section>
+        <ProviderConnectionForm />
         <section className="content-section settings-card">
           <div className="settings-card-heading"><div><p className="eyebrow">Execution</p><h2>Runtime connection</h2></div><StatusPill tone="amber">Not connected</StatusPill></div>
           <p>The Runtime Adapter starts and observes agent work. It is separate from the model provider endpoint.</p>
-          <div className="settings-row"><span>Runtime Adapter</span><strong>None registered</strong></div>
-          <div className="settings-row"><span>Operating mode</span><strong>Unavailable until a runtime is qualified</strong></div>
+          <div className="settings-row"><span>Runtime Adapter</span><strong>Not available</strong></div>
+          <div className="settings-row"><span>Operating mode</span><strong>Unavailable until the Engine/Runner is implemented</strong></div>
           <div className="settings-row"><span>Managed capability</span><strong>Not approved</strong></div>
-          <div className="settings-row"><span>Tool-call approval</span><strong>Fail-closed · invocation binding missing</strong></div>
+          <div className="settings-row"><span>Tool-call approval</span><strong>Fail-closed · runtime identity unavailable</strong></div>
           <div className="settings-row"><span>Credentials / egress</span><strong>Not configured</strong></div>
-          <DisabledWorkAction reason="No qualified Managed runtime adapter is currently available.">Connect runtime</DisabledWorkAction>
+          <DisabledWorkAction reason="The Engine/Runner is not implemented; saving a provider endpoint does not enable execution.">Connect runtime</DisabledWorkAction>
         </section>
       </div>
       <section className="content-section">
         <div className="section-heading"><h2>Independent contracts</h2><StatusPill>Separate</StatusPill></div>
-        <p className="muted">A configured model endpoint does not imply that an agent execution runtime is available. Unsupported adapters, models, capabilities, and endpoints remain unavailable rather than silently falling back.</p>
+        <p className="muted">A configured model endpoint records a selection only. It does not prove provider availability, support a tool call, enable task execution, or authorize outbound network access.</p>
         <Link className="text-link" href="/usage">View usage and limits</Link>
       </section>
     </div>
@@ -127,11 +113,11 @@ export function DelegationsView() {
 
 const readinessItems = [
   { area: "Office exploration and accessible alternatives", evidence: "Presentation route exists; complete AC-23–31 and failure scenarios are not verified.", href: "/office" },
-  { area: "Agent definitions, imports, and skills", evidence: "Definitions, Skill versions/pins, and Agent Instances use owner-scoped APIs; runtime compatibility and preflight remain unavailable.", href: "/agents/definitions" },
-  { area: "Tasks, assignment, and runtime controls", evidence: "Task revisions and Backlog use the API; stage transitions, preflight, queueing, and dispatch are unavailable.", href: "/tasks" },
-  { area: "Run evidence, artifacts, and acceptance", evidence: "Immutable Run creation snapshots are API-backed; runtime events, artifacts, and acceptance evidence are unavailable.", href: "/runs" },
-  { area: "Providers, runtime safety, and approvals", evidence: "No production provider adapter or Managed runtime is qualified; tool approval stays fail-closed.", href: "/connections" },
-  { area: "Delegation, isolation, and recovery", evidence: "No verified parentage, isolated workspace, lease, replay, or recovery path.", href: "/delegations" },
+  { area: "Agent definitions, imports, and skills", evidence: "Definitions, Skill versions/pins, and Agent Instances use owner-scoped APIs. Task assignment and workspace execution policy are API-backed; runtime/provider compatibility remains unqualified.", href: "/agents/definitions" },
+  { area: "Tasks, assignment, and runtime controls", evidence: "Workspace policy, fixed file-tool allowlist, bounded Run dispatch, and Runner readiness checks are implemented. End-to-end configured-provider execution is not verified.", href: "/tasks" },
+  { area: "Run evidence, artifacts, and acceptance", evidence: "Run snapshots, authenticated lifecycle events, acknowledgements, and fixed action summaries have component evidence; final-answer/artifact persistence and live 3D acceptance remain open.", href: "/runs" },
+  { area: "Providers, runtime safety, and approvals", evidence: "Runner uses a bounded OpenAI-compatible tool loop; live configured-provider execution and OS-enforced provider-only egress are unverified. Destructive tools are not exposed.", href: "/connections" },
+  { area: "Delegation, isolation, and recovery", evidence: "Runs sharing a configured workspace path are serialized and event outbox restart is unit-tested. Per-Run worktrees, cancel acknowledgement, and full service restart recovery remain open.", href: "/delegations" },
   { area: "Private pilot durability and audit", evidence: "This UI does not verify API scope, persisted events, or audit retention.", href: "/audit" },
   { area: "Capacity, costs, and target profile", evidence: "Live measurements are unavailable; proposed targets are not acceptance results.", href: "/usage" },
 ] as const;

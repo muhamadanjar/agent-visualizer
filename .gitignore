@@ -3,4 +3,6 @@ graphify-out
 .env.*
 !.env.example
 backups/
+/.runner-state/
+/workspaces/
 __pycache__**
