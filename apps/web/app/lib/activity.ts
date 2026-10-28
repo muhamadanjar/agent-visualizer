@@ -1,10 +1,19 @@
 export type ActivityEvent = {
-  cursor: number;
-  run_id: string;
   event_id: string;
-  event_type: string;
-  occurred_at: string;
-  source_sequence: number | null;
+  event_version: number;
+  sequence: number;
+  timestamp: string;
+  type: string;
+  owner_id: string;
+  project_id: string;
+  agent_id: string;
+  run_id: string;
+  task_id: string;
+  payload: {
+    task_revision: number;
+    source_sequence: number | null;
+    safe_action_summary: string | null;
+  };
 };
 
 export type RuntimeProjection = {
@@ -18,6 +27,7 @@ export type RuntimeProjection = {
   last_event_type: string;
   last_event_at: string;
   last_heartbeat_at: string | null;
+  safe_action_summary: string | null;
 };
 
 export type ActivitySnapshot = {
@@ -36,7 +46,7 @@ export type RunActivity = {
   events: ActivityEvent[];
 };
 
-export type ActivityConnection = "connecting" | "connected" | "disconnected" | "unavailable";
+export type ActivityConnection = "connecting" | "syncing" | "connected" | "disconnected" | "unavailable";
 
 export type ActivityMessage =
   | { type: "snapshot"; snapshot: ActivitySnapshot }
@@ -116,12 +126,24 @@ export function requestRunArtifacts(runId: string, signal?: AbortSignal): Promis
 function isActivityEvent(value: unknown): value is ActivityEvent {
   if (typeof value !== "object" || value === null) return false;
   const record = value as Record<string, unknown>;
-  return typeof record.cursor === "number"
-    && typeof record.run_id === "string"
-    && typeof record.event_id === "string"
-    && typeof record.event_type === "string"
-    && typeof record.occurred_at === "string"
-    && (typeof record.source_sequence === "number" || record.source_sequence === null);
+  if (
+    typeof record.event_id !== "string"
+    || typeof record.event_version !== "number"
+    || typeof record.sequence !== "number"
+    || typeof record.timestamp !== "string"
+    || typeof record.type !== "string"
+    || typeof record.owner_id !== "string"
+    || typeof record.project_id !== "string"
+    || typeof record.agent_id !== "string"
+    || typeof record.run_id !== "string"
+    || typeof record.task_id !== "string"
+    || typeof record.payload !== "object"
+    || record.payload === null
+  ) return false;
+  const payload = record.payload as Record<string, unknown>;
+  return typeof payload.task_revision === "number"
+    && (typeof payload.source_sequence === "number" || payload.source_sequence === null)
+    && (typeof payload.safe_action_summary === "string" || payload.safe_action_summary === null);
 }
 
 function isActivitySnapshot(value: unknown): value is ActivitySnapshot {
@@ -141,7 +163,8 @@ function isActivitySnapshot(value: unknown): value is ActivitySnapshot {
         && typeof item.last_event_cursor === "number"
         && typeof item.last_event_type === "string"
         && typeof item.last_event_at === "string"
-        && (typeof item.last_heartbeat_at === "string" || item.last_heartbeat_at === null);
+        && (typeof item.last_heartbeat_at === "string" || item.last_heartbeat_at === null)
+        && (typeof item.safe_action_summary === "string" || item.safe_action_summary === null);
     });
 }
 
@@ -150,6 +173,7 @@ export function subscribeToActivity(emit: (message: ActivityMessage) => void): (
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   let pingTimer: ReturnType<typeof setInterval> | undefined;
   let stopped = false;
+  let lastCursor = 0;
 
   function connect() {
     if (stopped) return;
@@ -166,18 +190,41 @@ export function subscribeToActivity(emit: (message: ActivityMessage) => void): (
       if (typeof value !== "object" || value === null) return;
       const record = value as Record<string, unknown>;
       if (record.type === "session_ready") {
-        emit({ type: "connection", state: "connected" });
-        socket?.send(JSON.stringify({ type: "subscribe" }));
+        emit({ type: "connection", state: lastCursor > 0 ? "syncing" : "connected" });
+        const subscription = lastCursor > 0
+          ? { type: "subscribe", after_cursor: lastCursor }
+          : { type: "subscribe" };
+        socket?.send(JSON.stringify(subscription));
         pingTimer = setInterval(() => {
           if (socket?.readyState === WebSocket.OPEN) {
             socket.send(JSON.stringify({ type: "ping" }));
           }
         }, 20_000);
       } else if (record.type === "activity_snapshot" && isActivitySnapshot(record)) {
+        lastCursor = Math.max(lastCursor, record.cursor);
         emit({ type: "snapshot", snapshot: { cursor: record.cursor, projections: record.projections as RuntimeProjection[] } });
-      } else if (record.type === "activity_events" && Array.isArray(record.events)) {
+      } else if (
+        (record.type === "activity_events" || record.type === "activity_replay")
+        && Array.isArray(record.events)
+      ) {
+        if (record.type === "activity_replay") {
+          emit({ type: "connection", state: "syncing" });
+        }
         const events = record.events.filter(isActivityEvent);
-        if (events.length === record.events.length) emit({ type: "events", events });
+        if (events.length !== record.events.length) return;
+        const unseen: ActivityEvent[] = [];
+        for (const event of events) {
+          if (event.sequence <= lastCursor) continue;
+          if (event.sequence !== lastCursor + 1) {
+            socket?.close(4000, "activity cursor gap");
+            return;
+          }
+          unseen.push(event);
+          lastCursor = event.sequence;
+        }
+        if (unseen.length > 0) emit({ type: "events", events: unseen });
+      } else if (record.type === "activity_replay_complete") {
+        emit({ type: "connection", state: "connected" });
       } else if (record.type === "activity_unavailable") {
         emit({ type: "connection", state: "unavailable" });
       }

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Awaitable, Callable
 
 import asyncpg
 from fastapi import FastAPI
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import Settings, load_settings
@@ -17,9 +19,10 @@ from app.domain.evidence import (
 from app.domain.execution import ExecutionRepository
 from app.domain.instances import AgentInstanceRepository
 from app.domain.projects import ProjectRepository
-from app.domain.provider_config import ProviderConfigRepository
+from app.domain.model_endpoints import ModelEndpointRepository
 from app.domain.registry import AgentRegistryRepository
 from app.domain.runs import RunRepository
+from app.domain.run_results import RunResultRepository
 from app.domain.skills import SkillRepository
 from app.domain.tasks import TaskRepository
 from app.infrastructure.postgres.evidence import (
@@ -31,11 +34,17 @@ from app.infrastructure.postgres.evidence import (
 from app.infrastructure.postgres.execution import PostgresExecutionRepository
 from app.infrastructure.postgres.instances import PostgresAgentInstanceRepository
 from app.infrastructure.postgres.projects import PostgresProjectRepository
-from app.infrastructure.postgres.provider_config import PostgresProviderConfigRepository
+from app.infrastructure.postgres.model_endpoints import PostgresModelEndpointRepository
 from app.infrastructure.postgres.registry import PostgresAgentRegistryRepository
 from app.infrastructure.postgres.runs import PostgresRunRepository
+from app.infrastructure.postgres.run_results import PostgresRunResultRepository
 from app.infrastructure.postgres.skills import PostgresSkillRepository
 from app.infrastructure.postgres.tasks import PostgresTaskRepository
+from app.infrastructure.redis.activity_stream import (
+    ActivityEventHub,
+    consume_stream,
+    publish_outbox,
+)
 from app.presentation.http.application import create_http_app
 
 
@@ -66,12 +75,13 @@ def create_app(
     agent_instance_repository: AgentInstanceRepository | None = None,
     task_repository: TaskRepository | None = None,
     run_repository: RunRepository | None = None,
-    provider_config_repository: ProviderConfigRepository | None = None,
+    model_endpoint_repository: ModelEndpointRepository | None = None,
     execution_repository: ExecutionRepository | None = None,
     activity_event_repository: ActivityEventRepository | None = None,
     approval_repository: ApprovalRepository | None = None,
     artifact_repository: ArtifactRepository | None = None,
     office_scene_repository: OfficeSceneRepository | None = None,
+    run_result_repository: RunResultRepository | None = None,
 ) -> FastAPI:
     configured = settings or load_settings()
     verify_database = database_check or (
@@ -84,12 +94,13 @@ def create_app(
         ("agent_instance_repository", agent_instance_repository),
         ("task_repository", task_repository),
         ("run_repository", run_repository),
-        ("provider_config_repository", provider_config_repository),
+        ("model_endpoint_repository", model_endpoint_repository),
         ("activity_event_repository", activity_event_repository),
         ("execution_repository", execution_repository),
         ("approval_repository", approval_repository),
         ("artifact_repository", artifact_repository),
         ("office_scene_repository", office_scene_repository),
+        ("run_result_repository", run_result_repository),
     )
 
     @asynccontextmanager
@@ -97,6 +108,7 @@ def create_app(
         if any(repository is not None for _, repository in overrides):
             for name, repository in overrides:
                 setattr(application.state, name, repository)
+            application.state.activity_event_hub = None
             yield
             return
 
@@ -115,16 +127,40 @@ def create_app(
         application.state.agent_instance_repository = PostgresAgentInstanceRepository(sessions)
         application.state.task_repository = PostgresTaskRepository(sessions)
         application.state.run_repository = PostgresRunRepository(sessions)
-        application.state.provider_config_repository = PostgresProviderConfigRepository(sessions)
+        application.state.model_endpoint_repository = PostgresModelEndpointRepository(sessions)
         application.state.execution_repository = PostgresExecutionRepository(sessions)
-        application.state.activity_event_repository = PostgresActivityEventRepository(sessions)
+        activity_events = PostgresActivityEventRepository(sessions)
+        application.state.activity_event_repository = activity_events
         application.state.approval_repository = PostgresApprovalRepository(sessions)
         application.state.artifact_repository = PostgresArtifactRepository(sessions)
         application.state.office_scene_repository = PostgresOfficeSceneRepository(sessions)
+        application.state.run_result_repository = PostgresRunResultRepository(sessions)
+        redis = Redis.from_url(
+            configured.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=2,
+            socket_timeout=5,
+        )
+        stop = asyncio.Event()
+        consumer_ready = asyncio.Event()
+        hub = ActivityEventHub()
+        application.state.activity_event_hub = hub
+        tasks = (
+            asyncio.create_task(consume_stream(redis, hub, stop, consumer_ready)),
+            asyncio.create_task(
+                publish_outbox(activity_events, redis, stop, consumer_ready)
+            ),
+        )
         try:
             yield
         finally:
+            stop.set()
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await redis.aclose()
             await engine.dispose()
+
 
     return create_http_app(configured, verify_database, lifespan)
 

@@ -1,61 +1,21 @@
-# Historical M0 coding-agent runtime probes
+# Historical M0 utility probes
 
-**Status:** Historical feasibility evidence only; these OMP/Codex probes are not Phase 1 product integration targets. The current Phase 1 direction is a direct OpenAI-compatible Chat Completions provider API probe. This directory does not contain a production Provider Adapter.
+**Status:** These isolated diagnostics are not production code or current PRD acceptance evidence. The OMP/Codex-specific adapter/task probes and the separate M0 3D spike were removed on 2026-10-27 after the product scope changed. Historical work logs remain in `docs/progress.md`; they do not reproduce every detail from the removed feasibility report.
 
-This directory contains bounded legacy runtime probes, synthetic adapter-failure tests, and a no-provider Bubblewrap boundary smoke:
+## Remaining probes
 
-- `provider-completions-smoke.ts` is the current Phase 1 direct API probe. `--self-test` sends one Chat Completions request to a loopback-only mock without provider credentials or a coding-agent process; it exercises `NINEROUTER_URL` / `NINEROUTER_KEY` and the selected model against that mock. `--provider` requires `M0_PROVIDER_ALLOW_REAL_REQUEST=I_ACKNOWLEDGE_PROVIDER_COST`. It reads the key from `M0_PROVIDER_API_KEY`, `NINEROUTER_KEY`, or legacy `NINE_ROUTER_API_KEY`; the base URL comes from `M0_PROVIDER_BASE_URL`, `NINEROUTER_URL`, legacy `NINE_ROUTER_BASE_URL`, or defaults to `http://localhost:20128`. The selected default model is `openrouter/cohere/north-mini-code:free`; override it with `M0_PROVIDER_MODEL_ID` or `M0_ROUTER_MODEL_ID`. A root URL is sent to `/v1/chat/completions`; a base ending in `/v1` is also accepted. A `:free` label is not a zero-cost guarantee; real requests may incur provider charges.
+- `provider-completions-smoke.ts` checks a direct OpenAI-compatible Chat Completions endpoint. `--self-test` uses a loopback mock; `--provider` requires the explicit `M0_PROVIDER_ALLOW_REAL_REQUEST=I_ACKNOWLEDGE_PROVIDER_COST` opt-in and may incur charges. This is not the selected LangChain Runtime acceptance path.
+- `sandbox-smoke.ts` checks a generic Bubblewrap filesystem/network boundary without a model or external network request.
+- `sandbox-resource-smoke.ts` checks bounded per-process RLIMITs and cgroup-v2 process-count controls. It does not prove production Run resource limits.
+- `sandbox-egress-smoke.ts` checks the Bubblewrap-to-local-mock egress bridge. It does not contact a real provider or prove production endpoint-only egress.
 
-- `rpc-task-smoke.ts` is a direct RPC test client. It negotiates protocol v2, submits one prompt that reads the first heading of `PRD.md`, correlates the terminal result by request ID, and prints frame types, tool names, and terminal metadata.
-- `rpc-health-smoke.ts` negotiates v2 and makes one bounded `get_state` request without a model call. It prints only settlement booleans and whether a heartbeat-like field exists.
-- `rpc-abort-smoke.ts` starts a read-only task, sends `abort` after `agent_start`, and requires successful abort acknowledgement plus an aborted, settled prompt result. Only `read` is enabled.
-- `rpc-approval-smoke.ts` is an unverified negative-control probe. It launches `bash` and must not be run on the host; the reviewed RPC approval frame carries no `toolCallId`, so the probe cannot prove call-ID binding.
-- `rpc-child-smoke.ts` selects the project agent `.omp/agents/read-only-child.md` (only `read`), requests one child read, and prints child lifecycle IDs and child tool names without tool arguments or message bodies. The profile applies only when explicitly selected; omitted/default child agents are not constrained by the parent allowlist.
-- `omp-rpc-adapter.ts` is an isolated M0 adapter prototype. It launches OMP with `--mode rpc --no-session --no-ui --tools=read --max-time=60s`, negotiates RPC v2, accepts one task, and exposes allowlisted activity/result metadata. It does not persist a session or forward prompt text, message bodies, tool arguments/output, credentials, or full RPC frames.
-- `adapter-health-smoke.ts` connects to idle OMP RPC, verifies the adapter's settled point-in-time health response, and makes no model call.
-- `rpc-recovery-smoke.ts` persists an isolated read-only session, kills OMP with SIGKILL during an active task, then runs `--continue` over RPC, queries restored state, and submits a fresh read-only task. It reports whether the same session reopens and whether the follow-up succeeds; it does not claim replay of the interrupted prompt.
-- `adapter-smoke.ts` runs one real read-only task through the prototype, confirms blank and oversized prompts are rejected without consuming the process, verifies `read` activity and the terminal result, rejects a concurrent second task, and closes the child process.
-- `adapter-failure-smoke.ts` uses temporary fake OMP processes to test malformed/chunked frames, negotiation timeout, abnormal exit, duplicate activity, late-event dropping, and cancellation ordering/idempotency. It is not evidence about installed OMP cancellation safety, crash recovery, or upstream replay guarantees.
-- `sandbox-smoke.ts` runs a no-provider probe inside Bubblewrap. It verifies host HOME/canary invisibility, bound-workspace writes, isolated `/tmp`, and a loopback-only network namespace with no default route. It does not launch OMP or test resource limits.
-- `sandbox-omp-health-smoke.ts` stages OMP v18.12.3, its declared runtime dependencies, matching platform-specific optional dependencies, and the Bun executable under a private `/tmp` directory before mounting them read-only in Bubblewrap. It copies Bun through a no-follow file descriptor, rejects symlinked/non-regular package entries and manifests, rejects a host HOME path that overlaps the read-only `/usr`, `/lib`, or `/lib64` mounts, clears the inherited environment, and sets only sandbox `PATH`/`HOME`. It disables session/UI/extensions/skills/rules. The smoke uses `--model=openai/gpt-5.2` only as a startup catalog selector because its isolated empty HOME has no default model; it negotiates RPC v2 and reads idle `get_state`, submits no prompt, and makes no provider call. This selector is not provider availability or integration evidence; the smoke does not test the production adapter, credentials, resource limits, or task execution.
-- `sandbox-resource-smoke.ts` runs controlled CPU-time, address-space, file-size, and cgroup-v2 process-count probes in Bubblewrap using temporary files only. It makes no provider call or external network request, mounts no host HOME, and fails if the host cannot enforce a limit. Evidence is per-process for RLIMITs and cgroup-scoped for process count; it does not prove aggregate CPU/memory or production task/workspace limits.
-- `sandbox-egress-smoke.ts` verifies a no-provider endpoint bridge: Bubblewrap retains `--unshare-all`/no default route, mounts one read-only Unix socket, and exposes only a loopback HTTP bridge to a local mock gateway. The mock forwards only the synthetic `POST /provider/infer` route for `test-provider/test-model` with a scoped test token; wrong paths, models, tokens, CONNECT tunnels, and direct external networking are denied. It does not launch OMP or reach a real provider.
-- `sandbox-omp-provider-task-smoke.ts` attempts one synthetic text-only OMP task using the verified `cl/thinkingmachines/inkling-small:free` route by default, inside Bubblewrap with `--no-tools`; it stages no repository data and mounts no host HOME. For another catalog-listed route, set `M0_ROUTER_MODEL_ID` to an ID ending in `:free`. OMP reaches only a loopback bridge connected to one read-only Unix socket; the host-side bridge forwards one bounded request only to the configured local 9Router endpoint and keeps the router credential outside the sandbox. Each run allows one provider request and may incur account charges; a `free` label is not a zero-cost guarantee. This verifies provider integration only if the task completes with HTTP 200 and attributable OMP lifecycle/result evidence.
-- `codex-app-server-smoke.ts` starts the experimental Codex app-server with a fresh temporary `HOME`/`CODEX_HOME`, sends only JSON-RPC `initialize` and `initialized`, and shuts it down. It submits no thread/turn task, sends no provider task request, uses no existing Codex credentials, and prints only allowlisted status/cleanup metadata. A passing handshake proves protocol startup only, not task execution or provider compatibility.
-
-Current Phase 1 local-mock check:
+## Local checks
 
 ```sh
 rtk bun run spikes/m0-runtime/provider-completions-smoke.ts --self-test
-```
-
-The following commands reproduce historical runtime probes only; they are not Phase 1 integration targets:
-
-```sh
-rtk bun run spikes/m0-runtime/rpc-health-smoke.ts
-rtk bun run spikes/m0-runtime/adapter-health-smoke.ts
-rtk bun run spikes/m0-runtime/adapter-failure-smoke.ts
-rtk bun run spikes/m0-runtime/sandbox-omp-health-smoke.ts
 rtk bun run spikes/m0-runtime/sandbox-smoke.ts
 rtk bun run spikes/m0-runtime/sandbox-resource-smoke.ts
 rtk bun run spikes/m0-runtime/sandbox-egress-smoke.ts
-rtk bun run spikes/m0-runtime/codex-app-server-smoke.ts
 ```
 
-The OMP provider-task command below is also historical; it is not the Phase 1 provider API target and may incur charges. Do not run it without an approved endpoint, egress policy, and provider-side spend limit. It sends a synthetic no-tools task through OMP, not a direct provider API request:
-
-```sh
-rtk bun run spikes/m0-runtime/sandbox-omp-provider-task-smoke.ts
-```
-
-The bounded local resource smoke passed on Bubblewrap 0.13.0: RLIMIT_CPU, RLIMIT_AS (128 MiB), RLIMIT_FSIZE (64 KiB), and cgroup v2 `pids.max` (32) enforced their negative controls; all under-limit controls passed and cgroup cleanup completed. Workloads stop before a reserved cleanup window; cgroup release checks population even if the workload deadline is exhausted. SIGINT/SIGTERM kills the active process group and follows the cleanup path; a SIGTERM smoke returned `interrupted_sigterm` with cleanup `ok`. SIGKILL or host failure cannot run cleanup. The smoke makes no provider call, sends no external network traffic, and does not prove aggregate CPU/memory bounds or production OMP task isolation. It requires a writable/delegated cgroup v2 `pids` controller; unsupported hosts fail closed.
-
-Prior direct approval evidence covered only `bash true` allow/deny and did not establish resource- or call-bound authorization. The current approval probe is unverified and omitted from runnable commands; it launches `bash` and must not run on the host. The OMP sandbox health smoke tests only startup and idle RPC health; it does not exercise shell or approval, and therefore does not make this probe safe or prove call-ID binding. OMP v18.12.3 approval `select` requests carry no `toolCallId`, so exact prompt/argument matching does not prove identity binding. See the [v18.12.3 RPC reference](https://github.com/can1357/oh-my-pi/blob/v18.12.3/docs/rpc.md) and [approval-mode reference](https://github.com/can1357/oh-my-pi/blob/v18.12.3/docs/approval-mode.md).
-
-The runtime's `prompt_result` contains the prompt request ID and is correlated directly. Activity frames observed here do not carry that ID; the adapter labels activity with `attribution: "single-active-task-window"`. This is local temporal association, not upstream event-ID correlation.
-
-The health probe observed `get_state.isSettled` and `get_state.hasPendingAsyncWork`, but no heartbeat field. `adapter-health-smoke.ts` verified the adapter's idle-only, point-in-time responsiveness poll against OMP. The synthetic `adapter-failure-smoke.ts` fixture verifies that active tasks report `reason: "active_task"` rather than issuing `get_state`, which waits for session settlement. This does not establish autonomous heartbeat, stale-session detection, or live active-run health.
-
-`--restore` is not a supported recovery route for this RPC probe: OMP v18.12.3 reports `--restore requires an interactive terminal (not --print or --mode)`. The updated probe uses `--continue` after SIGKILL. Observed: RPC ready, original session ID preserved, `get_state` reports `isSettled: true`, no old `prompt_result`/agent/read replay, and a fresh read-only task completes. This proves reopening and subsequent usability only; interrupted-task reconciliation and replay guarantees remain unresolved. The probe does not print session contents.
-
-The M0 adapter itself does not prove workspace/process isolation, child delegation, or upstream event-ID attribution. `sandbox-smoke.ts` validates the generic Bubblewrap mount/network boundary. `sandbox-omp-health-smoke.ts` additionally starts OMP and receives idle RPC health inside Bubblewrap without mounting host HOME, passing credentials, submitting a prompt, or accessing external network; it is not an adapter integration or task test and does not prove resource limits. The direct child probe observed the child's `parentToolCallId` matching the parent's task `toolCallId`, but did not receive the parent prompt request ID on child frames; prompt-level association is only temporal in a single active request. The initial run observed `bash` despite the parent `read,task` allowlist. The explicit `.omp/agents/read-only-child.md` profile now constrains one selected child path to `read`; unspecified/default child agents remain unrestricted. The adapter processes every in-window event; duplicate frames are forwarded and post-settlement frames ignored. Those local fixture behaviors do not establish upstream replay/deduplication guarantees. `--tools=read` limits the enabled tool set but is not an isolation boundary. Follow-up and abort were tested directly against OMP; they are not adapter capabilities.
+The sandbox checks require Bubblewrap; the resource check also requires an available delegated cgroup-v2 `pids` controller. These probes remain feasibility diagnostics. Current Runtime acceptance is defined by the PRD and `docs/design-docs/2026-10-27-02-agent-runtime.md`.

@@ -13,24 +13,62 @@ import tempfile
 import threading
 import time
 import uuid
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+from langchain_core.callbacks import BaseCallbackHandler
+
+from runtime import (
+    MAX_HTTP_RESPONSE_BYTES,
+    TOOL_NAMES,
+    build_agent,
+    build_workspace_tools,
+)
 
 
 LOG = logging.getLogger("agent_office.runner")
 MAX_FILE_BYTES = 1_048_576
-MAX_PROVIDER_RESPONSE_BYTES = 1_048_576
+MAX_RUNNER_RESPONSE_BYTES = 8 * MAX_FILE_BYTES
 MAX_FILE_LIST = 200
+RUNNER_ACTIVITY_EVENT_TYPES = {
+    "run.started",
+    "run.cancellation_pending",
+    "run.succeeded",
+    "run.failed",
+    "run.canceled",
+    "run.unknown",
+    "run.tool_action",
+    "session.heartbeat",
+}
+WORKER_ACTIVITY_EVENT_TYPES = {"run.tool_action", "session.heartbeat"}
 LEASE_SECONDS = 120
-TOOL_NAMES = frozenset({"list_files", "read_file", "write_file"})
 
 
 class RunnerTransportError(RuntimeError):
+    pass
+
+
+class APIResponseError(RunnerTransportError):
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"API request failed with HTTP {status_code}")
+        self.status_code = status_code
+
+
+class PermanentAPIResponseError(APIResponseError):
+    pass
+
+
+class InvalidWorkerFrameError(RunnerTransportError):
+    pass
+
+
+class RunnerEventRejected(RunnerTransportError):
     pass
 
 
@@ -47,9 +85,10 @@ class RunnerSettings:
     api_url: str
     shared_token: str | None
     provider_key: str | None
-    provider_url: str | None
     workspace_root: Path
     state_root: Path
+    launcher_url: str = "http://runtime-launcher:8001"
+    launcher_token: str | None = None
 
     @classmethod
     def from_env(cls) -> RunnerSettings:
@@ -57,10 +96,15 @@ class RunnerSettings:
             api_url=os.environ.get("RUNNER_API_URL", "http://api:8000").rstrip("/"),
             shared_token=os.environ.get("RUNNER_SHARED_TOKEN", "").strip() or None,
             provider_key=os.environ.get("NINEROUTER_KEY", "").strip() or None,
-            provider_url=os.environ.get("NINEROUTER_URL", "").strip() or None,
             workspace_root=Path(os.environ.get("RUNNER_WORKSPACE_ROOT", "/workspaces")),
             state_root=Path(os.environ.get("RUNNER_STATE_ROOT", "/state")),
+            launcher_url=os.environ.get(
+                "RUNTIME_LAUNCHER_URL", "http://runtime-launcher:8001"
+            ).rstrip("/"),
+            launcher_token=os.environ.get("RUNTIME_LAUNCHER_TOKEN", "").strip()
+            or None,
         )
+
 
 
 class NoRedirectHandler(HTTPRedirectHandler):
@@ -74,26 +118,191 @@ class APIClient:
         self._token = token
         self._opener = build_opener(NoRedirectHandler())
 
-    def post(self, path: str, payload: dict[str, Any], *, timeout: float = 10) -> Any:
-        data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    def post(
+        self, path: str, payload: dict[str, Any], *, timeout: float = 10
+    ) -> Any:
+        return self.request("POST", path, payload, timeout=timeout)
+
+    def get(self, path: str, *, timeout: float = 10) -> Any:
+        return self.request("GET", path, timeout=timeout)
+
+    def delete(self, path: str, *, timeout: float = 10) -> Any:
+        return self.request("DELETE", path, timeout=timeout)
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        timeout: float = 10,
+    ) -> Any:
+        data = (
+            json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            if payload is not None
+            else None
+        )
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Accept": "application/json",
+        }
+        if data is not None:
+            headers["Content-Type"] = "application/json"
         request = Request(
             self._base_url + path,
             data=data,
-            headers={
-                "Authorization": f"Bearer {self._token}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-            method="POST",
+            headers=headers,
+            method=method,
         )
         try:
             with self._opener.open(request, timeout=timeout) as response:
-                body = response.read(MAX_PROVIDER_RESPONSE_BYTES + 1)
-                if len(body) > MAX_PROVIDER_RESPONSE_BYTES:
+                body = response.read(MAX_RUNNER_RESPONSE_BYTES + 1)
+                if len(body) > MAX_RUNNER_RESPONSE_BYTES:
                     raise RunnerTransportError("API response exceeded size limit")
                 return json.loads(body) if body else None
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as error:
+        except HTTPError as error:
+            if 400 <= error.code < 500:
+                raise PermanentAPIResponseError(error.code) from error
+            raise APIResponseError(error.code) from error
+        except (URLError, TimeoutError, json.JSONDecodeError) as error:
             raise RunnerTransportError("API request failed") from error
+
+
+class RuntimeLauncherClient:
+    def __init__(self, base_url: str, token: str) -> None:
+        self._client = APIClient(base_url, token)
+
+    def ready(self) -> dict[str, Any]:
+        response = self._client.get("/health/ready")
+        if not isinstance(response, dict) or not isinstance(
+            response.get("provider_ready"), bool
+        ):
+            raise RunnerTransportError("Runtime launcher readiness is invalid")
+        return response
+
+    def start(self, payload: dict[str, Any]) -> Any:
+        return self._client.post("/internal/runs", payload, timeout=30)
+
+    def list_runs(self) -> list[dict[str, Any]]:
+        response = self._client.get("/internal/runs")
+        runs = response.get("runs") if isinstance(response, dict) else None
+        if not isinstance(runs, list) or any(not isinstance(run, dict) for run in runs):
+            raise RunnerTransportError("Runtime launcher run list is invalid")
+        return runs
+
+    def events(self, run_id: str, after_sequence: int) -> dict[str, Any]:
+        path = (
+            f"/internal/runs/{quote(run_id, safe='')}/events?"
+            + urlencode({"after_sequence": after_sequence})
+        )
+        try:
+            response = self._client.get(path, timeout=30)
+        except APIResponseError as error:
+            if error.status_code == 502:
+                raise InvalidWorkerFrameError(
+                    "Runtime launcher rejected worker frames"
+                ) from error
+            raise
+        if not isinstance(response, dict) or not isinstance(
+            response.get("events"), list
+        ):
+            raise RunnerTransportError("Runtime launcher event stream is invalid")
+        return response
+
+    def stop(self, run_id: str) -> dict[str, Any]:
+        response = self._client.post(
+            f"/internal/runs/{quote(run_id, safe='')}/stop", {}, timeout=20
+        )
+        if not isinstance(response, dict) or not isinstance(
+            response.get("verified"), bool
+        ):
+            raise RunnerTransportError("Runtime launcher stop response is invalid")
+        return response
+
+    def remove(self, run_id: str) -> None:
+        self._client.delete(f"/internal/runs/{quote(run_id, safe='')}", timeout=20)
+
+
+class WorkerStreamAPI:
+    """Translate the worker's narrow API contract into bounded stdout frames."""
+
+    _EVENT_TYPES = {"run.tool_action", "session.heartbeat"}
+
+    def __init__(self, runner_id: str, run_id: str, stream: Any) -> None:
+        self._runner_id = runner_id
+        self._run_id = run_id
+        self._stream = stream
+        self._sequence = 0
+        self._started_written = False
+        self._result_written = False
+        self._lock = threading.Lock()
+
+    def started(self) -> None:
+        with self._lock:
+            if self._started_written:
+                raise RunnerTransportError("Worker startup was already acknowledged")
+            self._started_written = True
+        self._write_frame("started", {})
+
+    def post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if (
+            payload.get("runner_id") != self._runner_id
+            or payload.get("run_id") != self._run_id
+        ):
+            raise RunnerTransportError("Worker protocol identity mismatch")
+        with self._lock:
+            if not self._started_written:
+                raise RunnerTransportError(
+                    "Worker activity preceded startup acknowledgement"
+                )
+        if path == "/internal/runner/events":
+            event_type = payload.get("event_type")
+            tool_name = payload.get("tool_name")
+            if (
+                event_type not in self._EVENT_TYPES
+                or (event_type == "run.tool_action" and not isinstance(tool_name, str))
+                or (event_type == "session.heartbeat" and tool_name is not None)
+            ):
+                raise RunnerTransportError("Worker event is not allowed")
+            frame_payload: dict[str, Any] = {
+                "event_type": event_type,
+                "event_id": payload["event_id"],
+                "occurred_at": payload["occurred_at"],
+                "source_sequence": payload["source_sequence"],
+            }
+            if tool_name is not None:
+                frame_payload["tool_name"] = tool_name
+            self._write_frame("event", frame_payload)
+            return {
+                "acknowledged": True,
+                "event_id": payload["event_id"],
+                "cursor": payload["source_sequence"],
+            }
+        if path == "/internal/runner/results":
+            text = payload.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise RunnerTransportError("Worker result is invalid")
+            if len(text.encode("utf-8")) > MAX_FILE_BYTES:
+                raise RunnerTransportError("Worker result exceeded size limit")
+            if self._result_written:
+                raise RunnerTransportError("Worker result was already written")
+            self._write_frame("result", {"text": text})
+            self._result_written = True
+            return {"accepted": True}
+        raise RunnerTransportError("Worker protocol path is not allowed")
+
+    def _write_frame(self, kind: str, payload: dict[str, Any]) -> None:
+        with self._lock:
+            self._sequence += 1
+            self._stream.write(
+                json.dumps(
+                    {"sequence": self._sequence, "kind": kind, "payload": payload},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+            self._stream.flush()
 
 
 class EventOutbox:
@@ -101,7 +310,10 @@ class EventOutbox:
 
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(path, timeout=10, isolation_level=None)
+        self._lock = threading.RLock()
+        self._connection = sqlite3.connect(
+            path, timeout=10, isolation_level=None, check_same_thread=False
+        )
         self._connection.execute("PRAGMA journal_mode=WAL")
         self._connection.execute("PRAGMA synchronous=FULL")
         self._connection.execute(
@@ -116,6 +328,16 @@ class EventOutbox:
             "INSERT INTO runner_state (key, value) VALUES ('sequence', 0) "
             "ON CONFLICT (key) DO NOTHING"
         )
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS runner_event_map "
+            "(event_id TEXT PRIMARY KEY, payload TEXT NOT NULL)"
+        )
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS runner_rejected_events "
+            "(event_id TEXT PRIMARY KEY, payload TEXT NOT NULL, "
+            "status_code INTEGER NOT NULL, rejected_at TEXT NOT NULL)"
+        )
+
 
     def enqueue(
         self,
@@ -124,52 +346,242 @@ class EventOutbox:
         event_type: str,
         tool_name: str | None = None,
     ) -> dict[str, Any]:
-        self._connection.execute("BEGIN IMMEDIATE")
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._connection.execute(
+                    "SELECT value FROM runner_state WHERE key = 'sequence'"
+                ).fetchone()
+                sequence = int(row[0]) + 1
+                self._connection.execute(
+                    "UPDATE runner_state SET value = ? WHERE key = 'sequence'",
+                    (sequence,),
+                )
+                event_id = str(uuid.uuid4())
+                payload: dict[str, Any] = {
+                    "runner_id": runner_id,
+                    "run_id": run_id,
+                    "event_id": event_id,
+                    "event_type": event_type,
+                    "occurred_at": datetime.now(UTC).isoformat(),
+                    "source_sequence": sequence,
+                }
+                if tool_name is not None:
+                    payload["tool_name"] = tool_name
+                self._connection.execute(
+                    "INSERT INTO runner_events (event_id, payload, created_at) "
+                    "VALUES (?, ?, ?)",
+                    (
+                        event_id,
+                        json.dumps(payload, separators=(",", ":")),
+                        datetime.now(UTC).isoformat(),
+                    ),
+                )
+                self._connection.execute("COMMIT")
+                return payload
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
+
+    def enqueue_external(
+        self, runner_id: str, run_id: str, frame: dict[str, Any]
+    ) -> dict[str, Any]:
+        event_id = frame.get("event_id")
+        event_type = frame.get("event_type")
+        occurred_at = frame.get("occurred_at")
+        tool_name = frame.get("tool_name")
+        source_sequence = frame.get("source_sequence")
+        is_worker_event = (
+            isinstance(event_type, str) and event_type in WORKER_ACTIVITY_EVENT_TYPES
+        )
+        if (
+            not isinstance(event_id, str)
+            or not isinstance(event_type, str)
+            or event_type not in RUNNER_ACTIVITY_EVENT_TYPES
+            or not isinstance(occurred_at, str)
+            or (
+                event_type == "run.tool_action"
+                and (
+                    not isinstance(tool_name, str)
+                    or tool_name not in TOOL_NAMES
+                )
+            )
+            or (event_type != "run.tool_action" and tool_name is not None)
+            or not isinstance(source_sequence, int)
+            or isinstance(source_sequence, bool)
+            or (is_worker_event and source_sequence < 1)
+            or (not is_worker_event and source_sequence != 0)
+        ):
+            raise InvalidWorkerFrameError("Worker event frame is invalid")
         try:
-            row = self._connection.execute(
-                "SELECT value FROM runner_state WHERE key = 'sequence'"
+            uuid.UUID(event_id)
+            datetime.fromisoformat(occurred_at)
+        except ValueError as error:
+            raise InvalidWorkerFrameError("Worker event identity is invalid") from error
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                mapped = self._connection.execute(
+                    "SELECT payload FROM runner_event_map WHERE event_id = ?",
+                    (event_id,),
+                ).fetchone()
+                if mapped is None:
+                    row = self._connection.execute(
+                        "SELECT value FROM runner_state WHERE key = 'sequence'"
+                    ).fetchone()
+                    sequence = int(row[0]) + 1
+                    payload: dict[str, Any] = {
+                        "runner_id": runner_id,
+                        "run_id": run_id,
+                        "event_id": event_id,
+                        "event_type": event_type,
+                        "occurred_at": occurred_at,
+                        "source_sequence": sequence,
+                    }
+                    if tool_name is not None:
+                        payload["tool_name"] = tool_name
+                    serialized = json.dumps(payload, separators=(",", ":"))
+                    self._connection.execute(
+                        "UPDATE runner_state SET value = ? WHERE key = 'sequence'",
+                        (sequence,),
+                    )
+                    self._connection.execute(
+                        "INSERT INTO runner_event_map (event_id, payload) VALUES (?, ?)",
+                        (event_id, serialized),
+                    )
+                else:
+                    payload = json.loads(mapped[0])
+                    if (
+                        payload.get("runner_id") != runner_id
+                        or payload.get("run_id") != run_id
+                        or payload.get("event_type") != event_type
+                        or payload.get("occurred_at") != occurred_at
+                        or payload.get("tool_name") != tool_name
+                    ):
+                        raise RunnerTransportError("Worker event identity conflicts")
+                    serialized = mapped[0]
+                self._connection.execute(
+                    "INSERT INTO runner_events (event_id, payload, created_at) "
+                    "VALUES (?, ?, ?) ON CONFLICT (event_id) DO NOTHING",
+                    (event_id, serialized, datetime.now(UTC).isoformat()),
+                )
+                self._connection.execute("COMMIT")
+                return payload
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
+
+    def enqueue_stable(
+        self,
+        runner_id: str,
+        run_id: str,
+        event_type: str,
+        *,
+        tool_name: str | None = None,
+    ) -> dict[str, Any]:
+        if event_type not in RUNNER_ACTIVITY_EVENT_TYPES or event_type == "run.tool_action":
+            raise RunnerTransportError("Stable event type is not allowed")
+        event_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"agent-office:{runner_id}:{run_id}:{event_type}",
+            )
+        )
+        with self._lock:
+            mapped = self._connection.execute(
+                "SELECT payload FROM runner_event_map WHERE event_id = ?",
+                (event_id,),
             ).fetchone()
-            sequence = int(row[0]) + 1
-            self._connection.execute(
-                "UPDATE runner_state SET value = ? WHERE key = 'sequence'", (sequence,)
+            if mapped is not None:
+                payload = json.loads(mapped[0])
+                self._connection.execute(
+                    "INSERT INTO runner_events (event_id, payload, created_at) "
+                    "VALUES (?, ?, ?) ON CONFLICT (event_id) DO NOTHING",
+                    (event_id, mapped[0], datetime.now(UTC).isoformat()),
+                )
+                return payload
+            return self.enqueue_external(
+                runner_id,
+                run_id,
+                {
+                    "event_id": event_id,
+                    "event_type": event_type,
+                    "occurred_at": datetime.now(UTC).isoformat(),
+                    "source_sequence": 0,
+                    **({"tool_name": tool_name} if tool_name is not None else {}),
+                },
             )
-            event_id = str(uuid.uuid4())
-            payload: dict[str, Any] = {
-                "runner_id": runner_id,
-                "run_id": run_id,
-                "event_id": event_id,
-                "event_type": event_type,
-                "occurred_at": datetime.now(UTC).isoformat(),
-                "source_sequence": sequence,
-            }
-            if tool_name is not None:
-                payload["tool_name"] = tool_name
-            self._connection.execute(
-                "INSERT INTO runner_events (event_id, payload, created_at) VALUES (?, ?, ?)",
-                (event_id, json.dumps(payload, separators=(",", ":")), datetime.now(UTC).isoformat()),
-            )
-            self._connection.execute("COMMIT")
-            return payload
-        except Exception:
-            self._connection.execute("ROLLBACK")
-            raise
 
     def pending(self) -> list[dict[str, Any]]:
-        rows = self._connection.execute(
-            "SELECT payload FROM runner_events ORDER BY created_at, event_id"
-        ).fetchall()
-        return [json.loads(row[0]) for row in rows]
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT payload FROM runner_events ORDER BY created_at, event_id"
+            ).fetchall()
+            return [json.loads(row[0]) for row in rows]
 
+
+    def quarantine(self, event_id: str, status_code: int) -> None:
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._connection.execute(
+                    "SELECT payload FROM runner_events WHERE event_id = ?",
+                    (event_id,),
+                ).fetchone()
+                if row is None:
+                    self._connection.execute("COMMIT")
+                    return
+                self._connection.execute(
+                    "INSERT INTO runner_rejected_events "
+                    "(event_id, payload, status_code, rejected_at) "
+                    "VALUES (?, ?, ?, ?) ON CONFLICT (event_id) DO NOTHING",
+                    (event_id, row[0], status_code, datetime.now(UTC).isoformat()),
+                )
+                self._connection.execute(
+                    "DELETE FROM runner_events WHERE event_id = ?", (event_id,)
+                )
+                self._connection.execute("COMMIT")
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
+
+    def rejected(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT event_id, payload, status_code, rejected_at "
+                "FROM runner_rejected_events ORDER BY rejected_at, event_id"
+            ).fetchall()
+        return [
+            {
+                "event_id": row[0],
+                "payload": json.loads(row[1]),
+                "status_code": row[2],
+                "rejected_at": row[3],
+            }
+            for row in rows
+        ]
     def acknowledge(self, event_id: str) -> None:
-        self._connection.execute("DELETE FROM runner_events WHERE event_id = ?", (event_id,))
+        with self._lock:
+            self._connection.execute(
+                "DELETE FROM runner_events WHERE event_id = ?", (event_id,)
+            )
 
     def close(self) -> None:
-        self._connection.close()
+        with self._lock:
+            self._connection.close()
 
 
 def flush_events(api: APIClient, outbox: EventOutbox) -> None:
+    rejected: RunnerEventRejected | None = None
     for payload in outbox.pending():
-        result = api.post("/internal/runner/events", payload)
+        try:
+            result = api.post("/internal/runner/events", payload)
+        except PermanentAPIResponseError as error:
+            outbox.quarantine(payload["event_id"], error.status_code)
+            rejected = RunnerEventRejected(
+                f"API rejected Runner event with HTTP {error.status_code}"
+            )
+            continue
         if (
             not isinstance(result, dict)
             or result.get("acknowledged") is not True
@@ -178,6 +590,8 @@ def flush_events(api: APIClient, outbox: EventOutbox) -> None:
         ):
             raise RunnerTransportError("API did not acknowledge the event")
         outbox.acknowledge(payload["event_id"])
+    if rejected is not None:
+        raise rejected
 
 
 def emit_event(
@@ -190,6 +604,430 @@ def emit_event(
 ) -> None:
     outbox.enqueue(runner_id, run_id, event_type, tool_name)
     flush_events(api, outbox)
+
+
+def emit_stable_event(
+    api: APIClient,
+    outbox: EventOutbox,
+    runner_id: str,
+    run_id: str,
+    event_type: str,
+) -> None:
+    outbox.enqueue_stable(runner_id, run_id, event_type)
+    flush_events(api, outbox)
+
+
+
+class RunnerSupervisor:
+    def __init__(
+        self,
+        runner_id: str,
+        api: APIClient,
+        launcher: RuntimeLauncherClient,
+        outbox: EventOutbox,
+    ) -> None:
+        self._runner_id = runner_id
+        self._api = api
+        self._launcher = launcher
+        self._outbox = outbox
+
+    def reconcile(self) -> None:
+        containers = self._launcher.list_runs()
+        if not containers:
+            return
+        run_ids = [container.get("run_id") for container in containers]
+        if (
+            any(not isinstance(run_id, str) for run_id in run_ids)
+            or len(set(run_ids)) != len(run_ids)
+        ):
+            raise RunnerTransportError("Runtime launcher returned invalid Run IDs")
+        by_id: dict[str, dict[str, Any]] = {}
+        for offset in range(0, len(run_ids), 2):
+            response = self._api.post(
+                "/internal/runner/lease-status",
+                {
+                    "runner_id": self._runner_id,
+                    "run_ids": run_ids[offset : offset + 2],
+                },
+            )
+            rows = response.get("runs") if isinstance(response, dict) else None
+            if not isinstance(rows, list):
+                raise RunnerTransportError("Runner lease status response is invalid")
+            by_id.update(
+                {
+                    row.get("run_id"): row
+                    for row in rows
+                    if isinstance(row, dict) and isinstance(row.get("run_id"), str)
+                }
+            )
+        for container in containers:
+            run_id = container["run_id"]
+            lease = by_id.get(run_id)
+            if lease is None:
+                stop = self._launcher.stop(run_id)
+                if stop["verified"]:
+                    self._launcher.remove(run_id)
+                continue
+            state = lease.get("state")
+            if state in {"succeeded", "failed", "canceled"}:
+                if container.get("status") != "exited":
+                    stop = self._launcher.stop(run_id)
+                    if not stop["verified"]:
+                        continue
+                self._launcher.remove(run_id)
+                continue
+            if lease.get("active_lease") is True:
+                if lease.get("runner_id") != self._runner_id:
+                    continue
+                max_duration = lease.get("max_duration_seconds")
+                if not isinstance(max_duration, int):
+                    stop = self._launcher.stop(run_id)
+                    self._terminal(run_id, "run.unknown", cleanup=stop["verified"])
+                    continue
+                self._monitor(
+                    run_id,
+                    max_duration,
+                    container.get("started_at"),
+                )
+                continue
+            stop = self._launcher.stop(run_id)
+            self._terminal(run_id, "run.unknown", cleanup=stop["verified"])
+
+    def run_job(self, job: dict[str, Any]) -> None:
+        run_id = job.get("run_id")
+        if not isinstance(run_id, str):
+            raise RunnerTransportError("Claimed Run ID is invalid")
+        payload = {
+            "runner_id": self._runner_id,
+            "run_id": run_id,
+            "configuration_snapshot": job.get("configuration_snapshot"),
+            "workspace_path": job.get("workspace_path"),
+            "allowed_tools": job.get("allowed_tools"),
+            "max_duration_seconds": job.get("max_duration_seconds"),
+            "max_inference_turns": job.get("max_inference_turns"),
+            "max_tool_calls": job.get("max_tool_calls"),
+        }
+        try:
+            started = self._launcher.start(payload)
+        except RunnerTransportError:
+            self._recover_start(run_id, job.get("max_duration_seconds"))
+            return
+        if (
+            not isinstance(started, dict)
+            or started.get("run_id") != run_id
+            or started.get("status") != "running"
+            or _parse_started_at(started.get("started_at")) is None
+        ):
+            self._recover_start(run_id, job.get("max_duration_seconds"))
+            return
+        self._monitor_started(run_id, int(job["max_duration_seconds"]), started["started_at"])
+
+    def _recover_start(self, run_id: str, max_duration: Any) -> None:
+        try:
+            containers = self._launcher.list_runs()
+        except RunnerTransportError:
+            emit_stable_event(
+                self._api, self._outbox, self._runner_id, run_id, "run.unknown"
+            )
+            return
+        container = next(
+            (row for row in containers if row.get("run_id") == run_id), None
+        )
+        if container is None:
+            emit_stable_event(
+                self._api, self._outbox, self._runner_id, run_id, "run.failed"
+            )
+            return
+        if container.get("runner_id") != self._runner_id:
+            return
+        started_at = container.get("started_at")
+        status = container.get("status")
+        if (
+            status not in {"running", "exited"}
+            or _parse_started_at(started_at) is None
+            or not isinstance(max_duration, int)
+            or isinstance(max_duration, bool)
+            or not 1 <= max_duration <= 3600
+        ):
+            stop = self._launcher.stop(run_id)
+            self._terminal(run_id, "run.unknown", cleanup=stop["verified"])
+            return
+        self._monitor_started(run_id, max_duration, started_at)
+
+    def _monitor_started(self, run_id: str, max_duration: int, started_at: Any) -> None:
+        self._monitor(run_id, max_duration, started_at)
+
+    def _monitor(
+        self, run_id: str, max_duration_seconds: int, started_at: Any
+    ) -> None:
+        if not 1 <= max_duration_seconds <= 3600:
+            raise RunnerTransportError("Run timeout is outside the host policy")
+        started_wall = _parse_started_at(started_at)
+        started_monotonic = time.monotonic()
+        cursor = 0
+        result_saved = False
+        last_cancel_check = 0.0
+        last_heartbeat = started_monotonic
+        started = False
+        while True:
+            try:
+                stream = self._launcher.events(run_id, cursor)
+            except InvalidWorkerFrameError:
+                stop = self._launcher.stop(run_id)
+                self._terminal(
+                    run_id, "run.unknown", cleanup=stop["verified"]
+                )
+                return
+            frames = stream["events"]
+            for frame in frames:
+                if (
+                    not isinstance(frame, dict)
+                    or set(frame) != {"sequence", "kind", "payload"}
+                    or not isinstance(frame.get("sequence"), int)
+                    or isinstance(frame.get("sequence"), bool)
+                    or not isinstance(frame.get("kind"), str)
+                    or not isinstance(frame.get("payload"), dict)
+                ):
+                    stop = self._launcher.stop(run_id)
+                    self._terminal(
+                        run_id, "run.unknown", cleanup=stop["verified"]
+                    )
+                    return
+                sequence = frame["sequence"]
+                if sequence <= cursor:
+                    continue
+                payload = frame["payload"]
+                kind = frame.get("kind")
+                if kind == "started":
+                    if started or payload:
+                        stop = self._launcher.stop(run_id)
+                        self._terminal(
+                            run_id, "run.unknown", cleanup=stop["verified"]
+                        )
+                        return
+                    try:
+                        emit_stable_event(
+                            self._api,
+                            self._outbox,
+                            self._runner_id,
+                            run_id,
+                            "run.started",
+                        )
+                    except RunnerEventRejected:
+                        stop = self._launcher.stop(run_id)
+                        self._terminal(
+                            run_id, "run.unknown", cleanup=stop["verified"]
+                        )
+                        return
+                    started = True
+                elif kind in {"event", "result"}:
+                    if result_saved:
+                        stop = self._launcher.stop(run_id)
+                        self._terminal(
+                            run_id, "run.unknown", cleanup=stop["verified"]
+                        )
+                        return
+                    if not started:
+                        stop = self._launcher.stop(run_id)
+                        self._terminal(
+                            run_id, "run.unknown", cleanup=stop["verified"]
+                        )
+                        return
+                    if kind == "event":
+                        try:
+                            self._outbox.enqueue_external(
+                                self._runner_id, run_id, payload
+                            )
+                            flush_events(self._api, self._outbox)
+                        except (InvalidWorkerFrameError, RunnerEventRejected):
+                            stop = self._launcher.stop(run_id)
+                            self._terminal(
+                                run_id,
+                                "run.unknown",
+                                cleanup=stop["verified"],
+                            )
+                            return
+                    else:
+                        text = payload.get("text")
+                        if (
+                            set(payload) != {"text"}
+                            or not isinstance(text, str)
+                            or not text.strip()
+                            or len(text.encode("utf-8")) > MAX_FILE_BYTES
+                        ):
+                            stop = self._launcher.stop(run_id)
+                            self._terminal(
+                                run_id, "run.unknown", cleanup=stop["verified"]
+                            )
+                            return
+                        result = self._api.post(
+                            "/internal/runner/results",
+                            {
+                                "runner_id": self._runner_id,
+                                "run_id": run_id,
+                                "text": text,
+                            },
+                        )
+                        if (
+                            not isinstance(result, dict)
+                            or result.get("accepted") is not True
+                        ):
+                            raise RunnerTransportError(
+                                "Run Result was not acknowledged"
+                            )
+                        result_saved = True
+                else:
+                    stop = self._launcher.stop(run_id)
+                    self._terminal(
+                        run_id, "run.unknown", cleanup=stop["verified"]
+                    )
+                    return
+                cursor = sequence
+
+            now = time.monotonic()
+            status = stream.get("status")
+            if status == "exited":
+                finished_wall = _parse_started_at(stream.get("finished_at"))
+                if finished_wall is None:
+                    self._terminal(run_id, "run.unknown", cleanup=False)
+                    return
+                if not started:
+                    self._terminal(run_id, "run.failed", cleanup=True)
+                    return
+                elapsed = max(0.0, (finished_wall - started_wall).total_seconds())
+                if elapsed >= max_duration_seconds:
+                    self._terminal(run_id, "run.failed", cleanup=True)
+                elif stream.get("exit_code") == 0 and result_saved:
+                    self._terminal(run_id, "run.succeeded", cleanup=True)
+                else:
+                    self._terminal(run_id, "run.failed", cleanup=True)
+                return
+            if status != "running":
+                raise RunnerTransportError("Runtime launcher status is invalid")
+
+            if now - last_cancel_check >= 0.5:
+                pending = self._api.post(
+                    "/internal/runner/cancel-requests",
+                    {"runner_id": self._runner_id},
+                )
+                run_ids = pending.get("run_ids") if isinstance(pending, dict) else None
+                if not isinstance(run_ids, list):
+                    raise RunnerTransportError("Runner cancellation response is invalid")
+                if run_id in run_ids:
+                    try:
+                        emit_stable_event(
+                            self._api,
+                            self._outbox,
+                            self._runner_id,
+                            run_id,
+                            "run.cancellation_pending",
+                        )
+                    except RunnerEventRejected:
+                        LOG.error(
+                            "runner_event_rejected",
+                            extra={
+                                "run_id": run_id,
+                                "event_type": "run.cancellation_pending",
+                            },
+                        )
+                    stop = self._launcher.stop(run_id)
+                    self._terminal(
+                        run_id,
+                        "run.canceled" if stop["verified"] else "run.unknown",
+                        cleanup=stop["verified"],
+                    )
+                    return
+                last_cancel_check = now
+
+            elapsed = (
+                max(0.0, (datetime.now(UTC) - started_wall).total_seconds())
+                if started_wall is not None
+                else now - started_monotonic
+            )
+            if elapsed >= max_duration_seconds:
+                stop = self._launcher.stop(run_id)
+                self._terminal(
+                    run_id,
+                    "run.failed" if stop["verified"] else "run.unknown",
+                    cleanup=stop["verified"],
+                )
+                return
+
+            if now - last_heartbeat >= 15:
+                lease = self._api.post(
+                    "/internal/runner/run-heartbeat",
+                    {"runner_id": self._runner_id, "run_id": run_id},
+                )
+                if not isinstance(lease, dict) or lease.get("active") is not True:
+                    stop = self._launcher.stop(run_id)
+                    self._terminal(
+                        run_id, "run.unknown", cleanup=stop["verified"]
+                    )
+                    return
+                try:
+                    emit_event(
+                        self._api,
+                        self._outbox,
+                        self._runner_id,
+                        run_id,
+                        "session.heartbeat",
+                    )
+                except RunnerEventRejected:
+                    stop = self._launcher.stop(run_id)
+                    self._terminal(
+                        run_id, "run.unknown", cleanup=stop["verified"]
+                    )
+                    return
+                last_heartbeat = now
+            time.sleep(0.25)
+
+
+    def _terminal(self, run_id: str, event_type: str, *, cleanup: bool) -> None:
+        try:
+            emit_stable_event(
+                self._api, self._outbox, self._runner_id, run_id, event_type
+            )
+        except RunnerEventRejected:
+            LOG.error(
+                "runner_event_rejected",
+                extra={"run_id": run_id, "event_type": event_type},
+            )
+        if cleanup:
+            self._launcher.remove(run_id)
+
+
+def _parse_started_at(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise RunnerTransportError("Runtime launcher start time is invalid")
+    try:
+        result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise RunnerTransportError("Runtime launcher start time is invalid") from error
+    if result.tzinfo is None:
+        raise RunnerTransportError("Runtime launcher start time is invalid")
+    return result.astimezone(UTC)
+
+class _RunnerHeartbeatHandler(BaseCallbackHandler):
+    raise_error = True
+
+    def __init__(
+        self, api: APIClient, outbox: EventOutbox, runner_id: str, run_id: str
+    ) -> None:
+        self._api = api
+        self._outbox = outbox
+        self._runner_id = runner_id
+        self._run_id = run_id
+
+    def on_llm_end(self, response: Any, **kwargs: Any) -> None:
+        emit_event(
+            self._api,
+            self._outbox,
+            self._runner_id,
+            self._run_id,
+            "session.heartbeat",
+        )
 
 
 def _sensitive_path(path: PurePosixPath) -> bool:
@@ -244,8 +1082,7 @@ class WorkspaceTools:
         self.root = root
         self.allowed_tools = frozenset(allowed_tools)
         if (
-            not self.allowed_tools
-            or len(self.allowed_tools) != len(allowed_tools)
+            len(self.allowed_tools) != len(allowed_tools)
             or not self.allowed_tools.issubset(TOOL_NAMES)
         ):
             raise TaskExecutionError("workspace tool allowlist is invalid")
@@ -254,51 +1091,6 @@ class WorkspaceTools:
             raise TaskExecutionError("workspace root cannot be a symlink")
         self.root = root.resolve(strict=True)
 
-    def schemas(self) -> list[dict[str, Any]]:
-        schemas = {
-            "list_files": {
-                "type": "function",
-                "function": {
-                    "name": "list_files",
-                    "description": "List non-sensitive files in the project workspace.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"path": {"type": "string"}},
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            "read_file": {
-                "type": "function",
-                "function": {
-                    "name": "read_file",
-                    "description": "Read one UTF-8 project file up to 1 MiB.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"path": {"type": "string"}},
-                        "required": ["path"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            "write_file": {
-                "type": "function",
-                "function": {
-                    "name": "write_file",
-                    "description": "Atomically write one UTF-8 project file up to 1 MiB.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "path": {"type": "string"},
-                            "content": {"type": "string"},
-                        },
-                        "required": ["path", "content"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-        }
-        return [schemas[name] for name in sorted(self.allowed_tools)]
 
     def _target(self, value: object, *, allow_root: bool = False) -> Path:
         relative = _relative_path(value, allow_root=allow_root)
@@ -395,7 +1187,7 @@ class WorkspaceTools:
         }[name](arguments)
 
 
-def _check_provider_endpoint(endpoint: str, network_endpoint: str | None) -> str:
+def _check_provider_endpoint(endpoint: str) -> str:
     parsed = urlsplit(endpoint)
     if (
         parsed.scheme not in {"https", "http"}
@@ -413,22 +1205,9 @@ def _check_provider_endpoint(endpoint: str, network_endpoint: str | None) -> str
         raise ProviderResponseError("invalid provider endpoint") from error
 
     if host in {"localhost", "127.0.0.1"} and port == 20128 and parsed.scheme == "http":
-        override = urlsplit(network_endpoint) if network_endpoint else parsed
-        if (
-            override.scheme != "http"
-            or not override.hostname
-            or override.port != 20128
-            or override.username
-            or override.password
-            or override.query
-            or override.fragment
-        ):
-            raise ProviderResponseError("invalid local provider endpoint")
-        override_host = override.hostname.lower()
-        if override_host in {"localhost", "127.0.0.1"}:
-            override_host = "host.docker.internal"
-        path = override.path.rstrip("/") or parsed.path.rstrip("/")
-        return urlunsplit(("http", f"{override_host}:20128", path, "", ""))
+        return urlunsplit(
+            ("http", "host.docker.internal:20128", parsed.path.rstrip("/"), "", "")
+        )
 
     if parsed.scheme != "https":
         raise ProviderResponseError("provider endpoint must use HTTPS")
@@ -439,7 +1218,9 @@ def _check_provider_endpoint(endpoint: str, network_endpoint: str | None) -> str
         try:
             addresses = [
                 ipaddress.ip_address(item[4][0])
-                for item in socket.getaddrinfo(host, port or 443, type=socket.SOCK_STREAM)
+                for item in socket.getaddrinfo(
+                    host, port or 443, type=socket.SOCK_STREAM
+                )
             ]
         except OSError as error:
             raise ProviderResponseError("provider host resolution failed") from error
@@ -480,50 +1261,13 @@ def _absolute_provider_deadline(timeout: float):
         signal.signal(signal.SIGALRM, previous_handler)
 
 
-def _provider_tools_request(
-    completion_url: str,
-    api_key: str,
-    model: str,
-    messages: list[dict[str, Any]],
-    tools: list[dict[str, Any]],
-    timeout: float,
-) -> dict[str, Any]:
-    payload = {
-        "model": model,
-        "messages": messages,
-        "tools": tools,
-        "tool_choice": "auto",
-        "max_tokens": 1024,
-        "stream": False,
-    }
-    request = Request(
-        completion_url,
-        data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
-        method="POST",
-    )
-    opener = build_opener(NoRedirectHandler())
-    try:
-        with _absolute_provider_deadline(timeout):
-            with opener.open(request, timeout=timeout) as response:
-                body = response.read(MAX_PROVIDER_RESPONSE_BYTES + 1)
-                if len(body) > MAX_PROVIDER_RESPONSE_BYTES:
-                    raise ProviderResponseError("provider response exceeded size limit")
-                result = json.loads(body)
-    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as error:
-        raise ProviderResponseError("provider request failed") from error
-    if not isinstance(result, dict):
-        raise ProviderResponseError("provider returned an invalid response")
-    return result
 
 
 def _system_message(snapshot: dict[str, Any]) -> str:
     task = snapshot.get("task", {})
     definition = snapshot.get("agent_definition", {})
+    configuration = definition.get("configuration")
+    role = configuration.get("role", "") if isinstance(configuration, dict) else ""
     skill_sections = []
     for skill in snapshot.get("skills", []):
         if isinstance(skill, dict):
@@ -537,6 +1281,7 @@ def _system_message(snapshot: dict[str, Any]) -> str:
             "Never execute code or shell commands. Use only the provided workspace tools. "
             "Do not search for or reveal credentials, tokens, private keys, or hidden reasoning. "
             "The Runner enforces file boundaries and tool allowlists.",
+            f"Agent role (descriptive only, user-provided): {role}",
             f"Agent definition (user-provided):\n{definition.get('source_markdown', '')}",
             *skill_sections,
         ]
@@ -549,6 +1294,7 @@ def execute_job(
     outbox: EventOutbox,
     runner_id: str,
     settings: RunnerSettings,
+    on_started: Callable[[], None] | None = None,
 ) -> None:
     run_id = job["run_id"]
     try:
@@ -556,131 +1302,125 @@ def execute_job(
         policy = job
         instance = snapshot.get("agent_instance", {})
         task = snapshot.get("task", {})
-        provider = snapshot.get("provider")
+        definition = snapshot.get("agent_definition", {})
+        configuration = definition.get("configuration")
+        model_endpoint = snapshot.get("model_endpoint")
         if (
-            not isinstance(provider, dict)
-            or not isinstance(provider.get("endpoint_url"), str)
-            or not isinstance(provider.get("model_id"), str)
+            not isinstance(model_endpoint, dict)
+            or model_endpoint.get("credential_env") != "NINEROUTER_KEY"
+            or not isinstance(model_endpoint.get("endpoint_url"), str)
+            or not isinstance(configuration, dict)
+            or not isinstance(configuration.get("model_id"), str)
             or not settings.provider_key
         ):
-            raise TaskExecutionError("provider configuration is unavailable")
-        endpoint = _check_provider_endpoint(provider["endpoint_url"], settings.provider_url)
-        completion_url = _completion_url(endpoint)
-        model = provider["model_id"]
+            raise TaskExecutionError("Model Endpoint configuration is unavailable")
+        configured_tools = configuration.get("allowed_tools")
+        project_tools = policy.get("allowed_tools")
+        if (
+            not isinstance(configured_tools, list)
+            or any(not isinstance(tool, str) or tool not in TOOL_NAMES for tool in configured_tools)
+            or not isinstance(project_tools, list)
+            or any(not isinstance(tool, str) or tool not in TOOL_NAMES for tool in project_tools)
+        ):
+            raise TaskExecutionError("Run tool configuration is invalid")
+        effective_tools = [tool for tool in project_tools if tool in configured_tools]
+        endpoint = _check_provider_endpoint(model_endpoint["endpoint_url"])
+        base_url = _completion_url(endpoint).removesuffix("/chat/completions")
+        model = configuration["model_id"]
+        temperature = configuration.get("temperature")
+        route = configuration.get("route")
+        if route is not None and not isinstance(route, str):
+            raise TaskExecutionError("Model parameters are invalid")
+        if temperature is not None and (
+            not isinstance(temperature, (int, float))
+            or isinstance(temperature, bool)
+            or not 0 <= temperature <= 2
+        ):
+            raise TaskExecutionError("Model parameters are invalid")
         workspace = WorkspaceTools(
             _resolve_workspace_path(settings.workspace_root, job["workspace_path"]),
-            policy["allowed_tools"],
+            effective_tools,
         )
-        messages = [
-            {"role": "system", "content": _system_message(snapshot)},
-            {
-                "role": "user",
-                "content": "\n".join(
-                    [
-                        f"Task: {task.get('title', '')}",
-                        f"Goal: {task.get('goal', '')}",
-                        f"Input: {task.get('input_text', '')}",
-                        "Acceptance criteria:",
-                        *[f"- {item}" for item in task.get("acceptance_criteria", [])],
-                        f"Agent Instance: {instance.get('display_name', '')}",
-                        "Complete the task in the project workspace and state concise results.",
-                    ]
-                ),
-            },
-        ]
         budget_seconds = min(
             int(policy["max_duration_seconds"]),
+            int(configuration["execution_timeout_seconds"]),
             max(1, int(task.get("max_duration_minutes") or 60) * 60),
         )
-        deadline = time.monotonic() + budget_seconds
-        max_turns = int(policy["max_inference_turns"])
+        max_model_calls = min(
+            int(policy["max_inference_turns"]), int(configuration["max_iterations"])
+        )
         max_tool_calls = int(policy["max_tool_calls"])
-        tool_calls_used = 0
+        tools = build_workspace_tools(
+            workspace,
+            effective_tools,
+            lambda name: emit_event(
+                api, outbox, runner_id, run_id, "run.tool_action", name
+            ),
+            max_tool_calls=max_tool_calls,
+        )
+        agent = build_agent(
+            runtime_id=configuration.get("runtime_id"),
+            model_id=model,
+            endpoint_url=base_url,
+            api_key=settings.provider_key,
+            route=route,
+            temperature=temperature,
+            system_prompt=_system_message(snapshot),
+            tools=tools,
+            max_model_calls=max_model_calls,
+            max_tool_calls=max_tool_calls,
+            timeout_seconds=min(30.0, budget_seconds),
+        )
+        callbacks = _RunnerHeartbeatHandler(api, outbox, runner_id, run_id)
+        user_message = "\n".join(
+            [
+                f"Task: {task.get('title', '')}",
+                f"Goal: {task.get('goal', '')}",
+                f"Input: {task.get('input_text', '')}",
+                "Acceptance criteria:",
+                *[f"- {item}" for item in task.get("acceptance_criteria", [])],
+                f"Agent Instance: {instance.get('display_name', '')}",
+                "Complete the task in the project workspace and state concise results.",
+            ]
+        )
     except RunnerTransportError:
         raise
     except Exception as error:
-        emit_event(api, outbox, runner_id, run_id, "run.failed")
         raise TaskExecutionError("Run setup failed") from error
-
-    emit_event(api, outbox, runner_id, run_id, "run.started")
     try:
-        for _ in range(max_turns):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TaskExecutionError("run duration limit reached")
-            response = _provider_tools_request(
-                completion_url,
-                settings.provider_key,
-                model,
-                messages,
-                workspace.schemas(),
-                min(30.0, remaining),
+        if on_started is not None:
+            on_started()
+        with _absolute_provider_deadline(budget_seconds):
+            result = agent.invoke(
+                {"messages": [{"role": "user", "content": user_message}]},
+                config={"callbacks": [callbacks]},
             )
-            emit_event(api, outbox, runner_id, run_id, "session.heartbeat")
-            choices = response.get("choices")
-            if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-                raise ProviderResponseError("provider response has no completion choice")
-            message = choices[0].get("message")
-            if not isinstance(message, dict):
-                raise ProviderResponseError("provider response has no message")
-            calls = message.get("tool_calls") or []
-            if not isinstance(calls, list):
-                raise ProviderResponseError("provider tool calls are invalid")
-            if not calls:
-                content = message.get("content")
-                if not isinstance(content, str) or not content.strip():
-                    raise ProviderResponseError("provider response is empty")
-                emit_event(api, outbox, runner_id, run_id, "run.succeeded")
-                return
-            messages.append(message)
-            for call in calls:
-                if time.monotonic() >= deadline:
-                    raise TaskExecutionError("run duration limit reached")
-                function = call.get("function") if isinstance(call, dict) else None
-                if not isinstance(function, dict):
-                    raise ProviderResponseError("provider returned an invalid tool call")
-                name = function.get("name")
-                call_id = call.get("id")
-                arguments_text = function.get("arguments", "")
-                if (
-                    not isinstance(name, str)
-                    or name not in workspace.allowed_tools
-                    or not isinstance(call_id, str)
-                    or not isinstance(arguments_text, str)
-                    or len(arguments_text) > MAX_FILE_BYTES
-                ):
-                    raise ProviderResponseError("provider returned a disallowed tool call")
-                tool_calls_used += 1
-                if tool_calls_used > max_tool_calls:
-                    raise TaskExecutionError("tool call limit reached")
-                try:
-                    arguments = json.loads(arguments_text)
-                    if not isinstance(arguments, dict):
-                        raise ValueError("arguments")
-                    result = workspace.call(name, arguments)
-                except (ValueError, OSError, UnicodeDecodeError):
-                    result = {"error": "Tool arguments or workspace operation were rejected."}
-                emit_event(
-                    api,
-                    outbox,
-                    runner_id,
-                    run_id,
-                    "run.tool_action",
-                    name,
-                )
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": json.dumps(result, ensure_ascii=False),
-                    }
-                )
-        raise TaskExecutionError("inference turn limit reached")
+        messages = result.get("messages") if isinstance(result, dict) else None
+        final_message = messages[-1] if isinstance(messages, list) and messages else None
+        content = getattr(final_message, "content", None)
+        if isinstance(content, list):
+            content = "".join(
+                block.get("text", "")
+                for block in content
+                if isinstance(block, dict) and isinstance(block.get("text"), str)
+            )
+        if not isinstance(content, str) or not content.strip():
+            raise ProviderResponseError("provider response is empty")
+        result_response = api.post(
+            "/internal/runner/results",
+            {"runner_id": runner_id, "run_id": run_id, "text": content},
+        )
+        if (
+            not isinstance(result_response, dict)
+            or result_response.get("accepted") is not True
+        ):
+            raise RunnerTransportError("Worker result was not acknowledged")
     except RunnerTransportError:
         raise
     except (ProviderResponseError, TaskExecutionError):
-        emit_event(api, outbox, runner_id, run_id, "run.failed")
         raise
+    except Exception as error:
+        raise TaskExecutionError("LangChain runtime failed") from error
 
 
 def _runner_id(state_root: Path) -> str:
@@ -700,32 +1440,52 @@ def _runner_id(state_root: Path) -> str:
 
 def run_forever(settings: RunnerSettings) -> None:
     settings.state_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    settings.workspace_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     runner_id = _runner_id(settings.state_root)
     outbox = EventOutbox(settings.state_root / "events.sqlite3")
     api = APIClient(settings.api_url, settings.shared_token) if settings.shared_token else None
+    launcher = (
+        RuntimeLauncherClient(settings.launcher_url, settings.launcher_token)
+        if settings.launcher_token
+        else None
+    )
     if api is None:
         LOG.error("runner_authentication_unconfigured")
+    if launcher is None:
+        LOG.error("runtime_launcher_authentication_unconfigured")
+    supervisor = (
+        RunnerSupervisor(runner_id, api, launcher, outbox)
+        if api is not None and launcher is not None
+        else None
+    )
+    last_heartbeat = 0.0
+    last_reconcile = 0.0
     try:
         while True:
-            if api is None:
+            if api is None or launcher is None or supervisor is None:
                 time.sleep(5)
                 continue
             try:
-                api.post(
-                    "/internal/runner/heartbeat",
-                    {
-                        "runner_id": runner_id,
-                        "provider_ready": bool(settings.provider_key),
-                    },
-                )
+                readiness = launcher.ready()
+                now = time.monotonic()
+                if now - last_heartbeat >= 30:
+                    api.post(
+                        "/internal/runner/heartbeat",
+                        {
+                            "runner_id": runner_id,
+                            "provider_ready": readiness["provider_ready"],
+                        },
+                    )
+                    last_heartbeat = now
                 flush_events(api, outbox)
-                if settings.provider_key:
+                if now - last_reconcile >= 15:
+                    supervisor.reconcile()
+                    last_reconcile = now
+                if readiness["provider_ready"]:
                     job = api.post(
                         "/internal/runner/claim", {"runner_id": runner_id}
                     )
                     if isinstance(job, dict):
-                        execute_job(job, api, outbox, runner_id, settings)
+                        supervisor.run_job(job)
                 time.sleep(0.5)
             except RunnerTransportError:
                 LOG.warning("runner_transport_failed")
@@ -740,8 +1500,59 @@ def run_forever(settings: RunnerSettings) -> None:
         outbox.close()
 
 
+def run_worker() -> int:
+    raw_job = os.environ.get("RUN_JOB_JSON", "")
+    runner_id = os.environ.get("RUNNER_ID", "")
+    run_id = os.environ.get("RUN_ID", "")
+    if (
+        not raw_job
+        or len(raw_job.encode("utf-8")) > 2 * MAX_RUNNER_RESPONSE_BYTES
+        or not runner_id
+        or not run_id
+        or not os.environ.get("RUNTIME_PROXY_URL")
+    ):
+        LOG.error("worker_configuration_invalid")
+        return 1
+    try:
+        job = json.loads(raw_job)
+        if (
+            not isinstance(job, dict)
+            or job.get("run_id") != run_id
+            or not isinstance(job.get("configuration_snapshot"), dict)
+        ):
+            raise ValueError("invalid worker job")
+    except (json.JSONDecodeError, ValueError):
+        LOG.error("worker_job_invalid")
+        return 1
+    settings = RunnerSettings.from_env()
+    if not settings.provider_key:
+        LOG.error("worker_model_endpoint_unavailable")
+        return 1
+    settings.state_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    outbox = EventOutbox(settings.state_root / "events.sqlite3")
+    stream_api = WorkerStreamAPI(runner_id, run_id, sys.stdout)
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            execute_job(
+                job,
+                stream_api,
+                outbox,
+                runner_id,
+                settings,
+                on_started=stream_api.started,
+            )
+        return 0
+    except (RunnerTransportError, TaskExecutionError, ProviderResponseError) as error:
+        LOG.error("worker_execution_failed", extra={"error_type": type(error).__name__})
+        return 1
+    finally:
+        outbox.close()
+
+
 def main() -> None:
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper())
+    if sys.argv[1:] == ["worker"]:
+        raise SystemExit(run_worker())
     run_forever(RunnerSettings.from_env())
 
 

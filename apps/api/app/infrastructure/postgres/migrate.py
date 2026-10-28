@@ -150,10 +150,10 @@ async def ensure_application_role(
                     'projects', 'agent_definitions', 'agent_definition_versions',
                     'skills', 'skill_versions', 'agent_definition_version_skills',
                     'agent_instances', 'tasks', 'task_revisions',
-                    'task_revision_dependencies', 'runs', 'provider_configs',
-                    'owner_event_cursors', 'activity_events', 'run_activity_projections',
-                    'approval_requests', 'approval_decisions', 'artifacts', 'office_scene_versions',
-                    'alembic_version'
+                    'task_revision_dependencies', 'runs', 'provider_configs', 'model_endpoints',
+                    'owner_event_cursors', 'activity_events', 'activity_event_outbox',
+                    'run_activity_projections', 'approval_requests', 'approval_decisions',
+                    'artifacts', 'office_scene_versions', 'run_results', 'alembic_version'
                 ]::text[])
                   AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
                   AND relowner = (SELECT oid FROM pg_roles WHERE rolname = $1)
@@ -242,12 +242,20 @@ async def ensure_application_role(
             "SELECT format('GRANT SELECT, INSERT, UPDATE ON TABLE provider_configs TO %I', $1::text)",
             role_name,
         )
+        grant_model_endpoints = await connection.fetchval(
+            "SELECT format('GRANT SELECT, INSERT, UPDATE ON TABLE model_endpoints TO %I', $1::text)",
+            role_name,
+        )
         grant_owner_event_cursors = await connection.fetchval(
             "SELECT format('GRANT SELECT, INSERT, UPDATE ON TABLE owner_event_cursors TO %I', $1::text)",
             role_name,
         )
         grant_activity_events = await connection.fetchval(
             "SELECT format('GRANT SELECT, INSERT ON TABLE activity_events TO %I', $1::text)",
+            role_name,
+        )
+        grant_activity_event_outbox = await connection.fetchval(
+            "SELECT format('GRANT SELECT, INSERT, UPDATE ON TABLE activity_event_outbox TO %I', $1::text)",
             role_name,
         )
         grant_run_activity_projections = await connection.fetchval(
@@ -282,6 +290,10 @@ async def ensure_application_role(
             "SELECT format('GRANT SELECT, INSERT, UPDATE ON TABLE run_dispatches TO %I', $1::text)",
             role_name,
         )
+        grant_run_results = await connection.fetchval(
+            "SELECT format('GRANT SELECT, INSERT ON TABLE run_results TO %I', $1::text)",
+            role_name,
+        )
         for statement in (
             revoke_public_create,
             revoke_app_schema,
@@ -302,8 +314,10 @@ async def ensure_application_role(
             grant_task_dependencies,
             grant_runs,
             grant_provider_configs,
+            grant_model_endpoints,
             grant_owner_event_cursors,
             grant_activity_events,
+            grant_activity_event_outbox,
             grant_run_activity_projections,
             grant_approval_requests,
             grant_approval_decisions,
@@ -311,6 +325,7 @@ async def ensure_application_role(
             grant_execution_policies,
             grant_runner_connections,
             grant_run_dispatches,
+            grant_run_results,
             grant_office_scene_versions,
         ):
             await connection.execute(statement)

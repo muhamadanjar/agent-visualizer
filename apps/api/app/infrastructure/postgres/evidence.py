@@ -169,6 +169,14 @@ class PostgresActivityEventRepository:
                 )
                 if row is None:
                     raise RuntimeError("activity event insert returned no row")
+                await connection.execute(
+                    """
+                    INSERT INTO activity_event_outbox (owner_id, cursor)
+                    VALUES ($1, $2)
+                    """,
+                    event.owner_id,
+                    cursor,
+                )
                 await self._project_event(connection, event, cursor)
                 return _activity_event(row), True
 
@@ -472,6 +480,91 @@ class PostgresActivityEventRepository:
             limit,
         )
         return [_activity_event(row) for row in rows]
+
+    async def claim_outbox_batch(
+        self, claim_id: UUID, *, limit: int, lease_seconds: int
+    ) -> list[ActivityEvent]:
+        async with self._pool.acquire() as connection, connection.transaction():
+            rows = await connection.fetch(
+                """
+                WITH candidates AS (
+                    SELECT pending.owner_id, pending.cursor
+                    FROM activity_event_outbox AS pending
+                    WHERE pending.published_at IS NULL
+                      AND (pending.lease_expires_at IS NULL
+                           OR pending.lease_expires_at <= now())
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM activity_event_outbox AS earlier
+                          WHERE earlier.owner_id = pending.owner_id
+                            AND earlier.cursor < pending.cursor
+                            AND earlier.published_at IS NULL
+                      )
+                    ORDER BY pending.created_at, pending.owner_id, pending.cursor
+                    FOR UPDATE OF pending SKIP LOCKED
+                    LIMIT $3
+                ),
+                claimed AS (
+                    UPDATE activity_event_outbox AS outbox
+                    SET claim_id = $1,
+                        lease_expires_at = now() + ($2 * interval '1 second'),
+                        attempt_count = outbox.attempt_count + 1
+                    FROM candidates
+                    WHERE outbox.owner_id = candidates.owner_id
+                      AND outbox.cursor = candidates.cursor
+                    RETURNING outbox.owner_id, outbox.cursor
+                )
+                SELECT event.owner_id, event.cursor, event.source_id, event.event_id,
+                       event.schema_version, event.source_session_id, event.workspace_id,
+                       event.project_id, event.task_id, event.task_revision,
+                       event.agent_instance_id, event.run_id, event.event_type,
+                       event.occurred_at, event.received_at, event.source_sequence,
+                       event.action_summary
+                FROM activity_events AS event
+                JOIN claimed
+                  ON claimed.owner_id = event.owner_id AND claimed.cursor = event.cursor
+                ORDER BY event.owner_id, event.cursor
+                """,
+                claim_id,
+                lease_seconds,
+                limit,
+            )
+        return [_activity_event(row) for row in rows]
+
+    async def mark_outbox_published(
+        self, owner_id: str, cursor: int, claim_id: UUID
+    ) -> bool:
+        async with self._pool.acquire() as connection, connection.transaction():
+            return bool(
+                await connection.fetchval(
+                    """
+                    UPDATE activity_event_outbox
+                    SET published_at = now(), claim_id = NULL, lease_expires_at = NULL
+                    WHERE owner_id = $1 AND cursor = $2 AND claim_id = $3
+                      AND published_at IS NULL
+                    RETURNING true
+                    """,
+                    owner_id,
+                    cursor,
+                    claim_id,
+                )
+            )
+
+    async def release_outbox_claim(
+        self, owner_id: str, cursor: int, claim_id: UUID
+    ) -> None:
+        async with self._pool.acquire() as connection, connection.transaction():
+            await connection.execute(
+                """
+                UPDATE activity_event_outbox
+                SET claim_id = NULL, lease_expires_at = NULL
+                WHERE owner_id = $1 AND cursor = $2 AND claim_id = $3
+                  AND published_at IS NULL
+                """,
+                owner_id,
+                cursor,
+                claim_id,
+            )
 
 
 

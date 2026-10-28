@@ -1,4 +1,5 @@
 from __future__ import annotations
+from dataclasses import replace
 
 from collections.abc import Mapping
 import json
@@ -8,6 +9,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.domain.agent_configuration import AgentDefinitionConfiguration
 from app.domain.runs import Run, RunInputError, RunRepository
 from app.infrastructure.postgres.models import RunTable, TaskTable
 from app.infrastructure.postgres.raw_sql import RawSQLExecutor
@@ -158,7 +160,8 @@ class PostgresRunRepository:
                            version.name AS definition_name,
                            version.description AS definition_description,
                            version.source_markdown AS definition_source,
-                           version.unmapped_metadata AS definition_metadata
+                           version.unmapped_metadata AS definition_metadata,
+                           version.configuration AS definition_configuration
                     FROM tasks AS task
                     JOIN task_revisions AS revision
                       ON revision.owner_id = task.owner_id
@@ -175,6 +178,7 @@ class PostgresRunRepository:
                       ON definition.owner_id = instance.owner_id
                      AND definition.id = instance.definition_id
                      AND definition.archived_at IS NULL
+                     AND definition.enabled IS TRUE
                     JOIN agent_definition_versions AS version
                       ON version.owner_id = definition.owner_id
                      AND version.definition_id = definition.id
@@ -241,14 +245,27 @@ class PostgresRunRepository:
                 if len(skill_rows) != pin_count:
                     raise RunInputError("skill")
 
-                provider_config = await connection.fetchrow(
+                definition_configuration = AgentDefinitionConfiguration.from_json(
+                    _json_value(context["definition_configuration"])
+                )
+                if definition_configuration is None:
+                    raise RunInputError("configuration")
+                model_endpoint = await connection.fetchrow(
                     """
-                    SELECT version, adapter, endpoint_url, model_id, route
-                    FROM provider_configs
-                    WHERE owner_id = $1
+                    SELECT id, adapter, endpoint_url, credential_env, default_route
+                    FROM model_endpoints
+                    WHERE owner_id = $1 AND id = $2 AND archived_at IS NULL
+                    FOR SHARE
                     """,
                     owner_id,
+                    definition_configuration.model_endpoint_id,
                 )
+                if model_endpoint is None:
+                    raise RunInputError("model_endpoint")
+                if definition_configuration.route is None and model_endpoint["default_route"] is not None:
+                    definition_configuration = replace(
+                        definition_configuration, route=model_endpoint["default_route"]
+                    )
                 snapshot = {
                     "task": {
                         "id": str(task_id),
@@ -275,6 +292,7 @@ class PostgresRunRepository:
                         "description": context["definition_description"],
                         "source_markdown": context["definition_source"],
                         "unmapped_metadata": _json_value(context["definition_metadata"]),
+                        "configuration": definition_configuration.to_json(),
                     },
                     "skills": [
                         {
@@ -288,18 +306,13 @@ class PostgresRunRepository:
                         }
                         for row in skill_rows
                     ],
-                    "provider": (
-                        None
-                        if provider_config is None
-                        else {
-                            "version": provider_config["version"],
-                            "adapter": provider_config["adapter"],
-                            "endpoint_url": provider_config["endpoint_url"],
-                            "model_id": provider_config["model_id"],
-                            "route": provider_config["route"],
-                        }
-                    ),
-                    "runtime": None,
+                    "model_endpoint": {
+                        "id": str(model_endpoint["id"]),
+                        "adapter": model_endpoint["adapter"],
+                        "endpoint_url": model_endpoint["endpoint_url"],
+                        "credential_env": model_endpoint["credential_env"],
+                    },
+                    "runtime": {"id": definition_configuration.runtime_id},
                 }
                 attempt_number = await connection.fetchval(
                     "SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM runs "

@@ -5,6 +5,26 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState, type FormEvent } from "react";
 import { PageHeader, StatusPill } from "./workspace-components";
 
+type AgentConfiguration = {
+  role: string;
+  model_endpoint_id: string;
+  model_id: string;
+  route: string | null;
+  runtime_id: "langchain";
+  temperature: number | null;
+  max_iterations: number;
+  concurrency_limit: number;
+  execution_timeout_seconds: number;
+  allowed_tools: string[];
+};
+type ModelEndpointOption = {
+  id: string;
+  name: string;
+  endpoint_url: string;
+  default_model_id: string;
+  default_route: string | null;
+  archived: boolean;
+};
 type Definition = {
   id: string;
   version: number;
@@ -12,6 +32,8 @@ type Definition = {
   description: string;
   source_markdown: string;
   unmapped_metadata: Record<string, unknown>;
+  configuration: AgentConfiguration | null;
+  enabled: boolean;
   archived: boolean;
   created_at: string;
   skills: DefinitionSkillReference[];
@@ -19,7 +41,96 @@ type Definition = {
 
 type DefinitionSkillReference = { skill_id: string; version: number; name: string };
 type SkillSummary = { id: string; version: number; name: string; archived: boolean };
-type DefinitionSummary = Omit<Definition, "source_markdown" | "unmapped_metadata" | "skills">;
+type DefinitionSummary = {
+  id: string;
+  version: number;
+  name: string;
+  description: string;
+  configured: boolean;
+  enabled: boolean;
+  archived: boolean;
+  created_at: string;
+};
+
+const registeredTools = ["list_files", "read_file", "write_file"];
+
+function configurationFromForm(form: FormData): AgentConfiguration {
+  const temperature = String(form.get("temperature") ?? "");
+  return {
+    role: String(form.get("role") ?? "").trim(),
+    model_endpoint_id: String(form.get("model_endpoint_id") ?? ""),
+    model_id: String(form.get("model_id") ?? "").trim(),
+    route: String(form.get("route") ?? "").trim() || null,
+    runtime_id: "langchain",
+    temperature: temperature === "" ? null : Number(temperature),
+    max_iterations: Number(form.get("max_iterations")),
+    concurrency_limit: Number(form.get("concurrency_limit")),
+    execution_timeout_seconds: Number(form.get("execution_timeout_seconds")),
+    allowed_tools: form.getAll("allowed_tools").map(String),
+  };
+}
+
+function ModelConfigurationFields({
+  endpoints,
+  configuration,
+  disabled = false,
+}: {
+  endpoints: ModelEndpointOption[];
+  configuration?: AgentConfiguration | null;
+  disabled?: boolean;
+}) {
+  const available = endpoints.filter((endpoint) => !endpoint.archived);
+  const configuredEndpoint = endpoints.find((endpoint) => endpoint.id === configuration?.model_endpoint_id);
+  const initialEndpointId = configuredEndpoint && !configuredEndpoint.archived
+    ? configuredEndpoint.id
+    : available[0]?.id ?? configuredEndpoint?.id ?? "";
+  const preserveConfiguration = initialEndpointId === configuration?.model_endpoint_id;
+  const [endpointId, setEndpointId] = useState(initialEndpointId);
+  const selectedEndpoint = endpoints.find((endpoint) => endpoint.id === endpointId);
+  const [modelId, setModelId] = useState(
+    preserveConfiguration ? configuration?.model_id ?? "" : selectedEndpoint?.default_model_id ?? "",
+  );
+  const [route, setRoute] = useState(
+    preserveConfiguration
+      ? configuration?.route ?? selectedEndpoint?.default_route ?? ""
+      : selectedEndpoint?.default_route ?? "",
+  );
+  const currentArchived = endpoints.find(
+    (endpoint) => endpoint.id === configuration?.model_endpoint_id && endpoint.archived,
+  );
+  return (
+    <section className="content-section draft-form">
+      <div className="section-heading"><h2>Agent configuration</h2><StatusPill>Immutable per version</StatusPill></div>
+      <label className="preview-field">Role<input name="role" defaultValue={configuration?.role ?? ""} maxLength={120} required disabled={disabled} /></label>
+      <label className="preview-field">Model Endpoint
+        <select name="model_endpoint_id" value={endpointId} required disabled={disabled} onChange={(event) => {
+          const nextId = event.currentTarget.value;
+          const nextEndpoint = available.find((endpoint) => endpoint.id === nextId);
+          setEndpointId(nextId);
+          if (nextEndpoint) {
+            setModelId(nextEndpoint.default_model_id);
+            setRoute(nextEndpoint.default_route ?? "");
+          }
+        }}>
+          {currentArchived ? <option value={currentArchived.id} disabled={currentArchived.id !== endpointId}>{currentArchived.name} · archived</option> : null}
+          {available.map((endpoint) => <option key={endpoint.id} value={endpoint.id}>{endpoint.name} · {endpoint.default_model_id}</option>)}
+        </select>
+      </label>
+      {available.length === 0 && !currentArchived ? <p className="field-note">Create a Model Endpoint before saving this Agent Definition.</p> : null}
+      <label className="preview-field">Model ID<input name="model_id" value={modelId} onChange={(event) => setModelId(event.target.value)} maxLength={200} required disabled={disabled} /></label>
+      <label className="preview-field">Route (optional)<input name="route" value={route} onChange={(event) => setRoute(event.target.value)} maxLength={120} disabled={disabled} /></label>
+      <label className="preview-field">Temperature (optional)<input name="temperature" type="number" min="0" max="2" step="0.1" defaultValue={configuration?.temperature ?? ""} disabled={disabled} /></label>
+      <label className="preview-field">Maximum iterations<input name="max_iterations" type="number" min="1" max="100" defaultValue={configuration?.max_iterations ?? 10} required disabled={disabled} /></label>
+      <label className="preview-field">Concurrency limit<input name="concurrency_limit" type="number" min="1" max="20" defaultValue={configuration?.concurrency_limit ?? 1} required disabled={disabled} /></label>
+      <label className="preview-field">Execution timeout (seconds)<input name="execution_timeout_seconds" type="number" min="1" max="86400" defaultValue={configuration?.execution_timeout_seconds ?? 3600} required disabled={disabled} /></label>
+      <fieldset className="preview-field" disabled={disabled}>
+        <legend>Allowed tools</legend>
+        {registeredTools.map((tool) => <label className="filter-field" key={tool}><input name="allowed_tools" type="checkbox" value={tool} defaultChecked={configuration?.allowed_tools.includes(tool) ?? false} /> {tool}</label>)}
+        <span className="field-note">Effective tools are intersected with project policy.</span>
+      </fieldset>
+    </section>
+  );
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
@@ -75,7 +186,8 @@ export function AgentDefinitionsView() {
         <article className="content-section definition-card" key={definition.id}>
           <div className="preview-card-heading">
             <div><p className="eyebrow">Version {definition.version}</p><h2><Link href={`/agents/definitions/${definition.id}`}>{definition.name}</Link></h2></div>
-            <StatusPill tone={definition.archived ? "amber" : "neutral"}>{definition.archived ? "Archived" : "Saved"}</StatusPill>
+            <StatusPill tone={definition.archived ? "amber" : definition.enabled ? "green" : "neutral"}>{definition.archived ? "Archived" : definition.enabled ? "Enabled" : "Disabled"}</StatusPill>
+            <StatusPill tone={definition.configured ? "green" : "amber"}>{definition.configured ? "Configured" : "Needs configuration"}</StatusPill>
           </div>
           <p>{definition.description || "No description."}</p>
           <div className="preview-actions"><Link className="text-link" href={`/agents/definitions/${definition.id}`}>Open definition</Link></div>
@@ -91,11 +203,21 @@ export function AgentDefinitionForm({ mode }: { mode: "import" | "new" }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [source, setSource] = useState("");
+  const [endpoints, setEndpoints] = useState<ModelEndpointOption[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    let active = true;
+    request<ModelEndpointOption[]>("/api/v1/model-endpoints?include_archived=false&limit=200&offset=0")
+      .then((data) => { if (active) setEndpoints(data); })
+      .catch((reason: unknown) => { if (active) setError(reason instanceof Error ? reason.message : "Could not load Model Endpoints."); });
+    return () => { active = false; };
+  }, []);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (saving || !endpoints?.some((endpoint) => !endpoint.archived)) return;
+    const form = new FormData(event.currentTarget);
     setSaving(true);
     setError(null);
     try {
@@ -103,6 +225,7 @@ export function AgentDefinitionForm({ mode }: { mode: "import" | "new" }) {
         method: "POST",
         body: JSON.stringify({
           source_markdown: source,
+          configuration: configurationFromForm(form),
           ...(name.trim() ? { name: name.trim() } : {}),
           ...(description.trim() ? { description: description.trim() } : {}),
         }),
@@ -114,6 +237,7 @@ export function AgentDefinitionForm({ mode }: { mode: "import" | "new" }) {
       setSaving(false);
     }
   }
+
 
   async function readFile(file?: File) {
     setError(null);
@@ -140,8 +264,9 @@ export function AgentDefinitionForm({ mode }: { mode: "import" | "new" }) {
         <label className="preview-field">Name override <span className="field-note">Required when Markdown has no `name` front matter.</span><input value={name} onChange={(event) => setName(event.target.value)} maxLength={120} /></label>
         <label className="preview-field">Description override<textarea value={description} onChange={(event) => setDescription(event.target.value)} rows={3} maxLength={500} /></label>
         <label className="preview-field">Original Markdown<textarea value={source} onChange={(event) => setSource(event.target.value)} rows={18} spellCheck={false} required /></label>
+        {endpoints ? <ModelConfigurationFields endpoints={endpoints} /> : <p className="workspace-gate" role="status">Loading Model Endpoints…</p>}
         {error ? <p className="inline-error" role="alert">{error}</p> : null}
-        <div className="form-actions"><button className="button button-primary" type="submit" disabled={saving || !source}>{saving ? "Saving…" : "Save version 1"}</button><span className="muted">Unknown front-matter fields are retained as metadata; scripts are not run.</span></div>
+        <div className="form-actions"><button className="button button-primary" type="submit" disabled={saving || !source || !endpoints?.some((endpoint) => !endpoint.archived)}>{saving ? "Saving…" : "Save version 1"}</button><span className="muted">Unknown front-matter fields are retained as metadata; scripts are not run.</span></div>
       </form>
     </div>
   );
@@ -151,6 +276,7 @@ export function AgentDefinitionDetailView({ definitionId }: { definitionId: stri
   const [definition, setDefinition] = useState<Definition | null>(null);
   const [version, setVersion] = useState<number | null>(null);
   const [latestVersion, setLatestVersion] = useState<number | null>(null);
+  const [endpoints, setEndpoints] = useState<ModelEndpointOption[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [skillsError, setSkillsError] = useState<string | null>(null);
   const [skills, setSkills] = useState<SkillSummary[] | null>(null);
@@ -172,6 +298,13 @@ export function AgentDefinitionDetailView({ definitionId }: { definitionId: stri
       .catch((reason: unknown) => { if (active) setError(reason instanceof Error ? reason.message : "Could not load this definition."); });
     return () => { active = false; };
   }, [definitionId, version]);
+  useEffect(() => {
+    let active = true;
+    request<ModelEndpointOption[]>("/api/v1/model-endpoints?include_archived=true&limit=200&offset=0")
+      .then((data) => { if (active) setEndpoints(data); })
+      .catch((reason: unknown) => { if (active) setError(reason instanceof Error ? reason.message : "Could not load Model Endpoints."); });
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -185,16 +318,18 @@ export function AgentDefinitionDetailView({ definitionId }: { definitionId: stri
     event.preventDefault();
     if (!definition) return;
     const form = new FormData(event.currentTarget);
+    const changes: Record<string, unknown> = {
+      name: String(form.get("name")),
+      description: String(form.get("description")),
+      source_markdown: String(form.get("source_markdown")),
+    };
+    if (form.get("model_endpoint_id")) changes.configuration = configurationFromForm(form);
     setSaving(true);
     setError(null);
     try {
       const updated = await request<Definition>(`/api/v1/agent-definitions/${definition.id}`, {
         method: "PUT",
-        body: JSON.stringify({
-          name: String(form.get("name")),
-          description: String(form.get("description")),
-          source_markdown: String(form.get("source_markdown")),
-        }),
+        body: JSON.stringify(changes),
       });
       setLatestVersion(updated.version);
       setDefinition(updated);
@@ -243,10 +378,31 @@ export function AgentDefinitionDetailView({ definitionId }: { definitionId: stri
       setSaving(false);
     }
   }
+  async function setEnabled(enabled: boolean) {
+    if (!definition || definition.archived || definition.version !== latestVersion || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const updated = await request<Definition>(`/api/v1/agent-definitions/${definition.id}/enabled`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled }),
+      });
+      setDefinition(updated);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not change the definition status.");
+    } finally {
+      setSaving(false);
+    }
+  }
 
   if (error && !definition) return <div className="page-stack"><PageHeader eyebrow="Agent definition" title="Definition unavailable" description={error} /><Link className="text-link" href="/agents/definitions">Back to definitions</Link></div>;
   if (!definition) return <main className="workspace-gate" role="status">Loading saved definition…</main>;
   const readOnly = definition.archived || definition.version !== latestVersion;
+  const activeEndpoints = endpoints?.filter((endpoint) => !endpoint.archived) ?? [];
+  const canEnable = Boolean(
+    definition.configuration
+      && activeEndpoints.some((endpoint) => endpoint.id === definition.configuration?.model_endpoint_id),
+  );
   const skillOptions = new Map<string, string>();
   for (const skill of skills ?? []) {
     for (let skillVersion = 1; skillVersion <= skill.version; skillVersion += 1) {
@@ -263,14 +419,19 @@ export function AgentDefinitionDetailView({ definitionId }: { definitionId: stri
       <PageHeader eyebrow="Agent definition" title={definition.name} description="Edits create immutable versions. Existing task/run snapshots are not rewritten.">
         <Link className="button button-secondary" href="/agents/definitions">Back to definitions</Link>
         <a className="button button-secondary" href={`/api/v1/agent-definitions/${definition.id}/export?version=${definition.version}`}>Export source</a>
+        {!definition.archived && definition.version === latestVersion ? <button className="button button-secondary" type="button" disabled={saving || (!definition.enabled && !canEnable)} onClick={() => void setEnabled(!definition.enabled)}>{definition.enabled ? "Disable" : "Enable"}</button> : null}
       </PageHeader>
-      <div className="list-toolbar"><StatusPill tone={definition.archived ? "amber" : "neutral"}>{definition.archived ? "Archived" : "Persisted definition"}</StatusPill><label className="filter-field">Version<select value={version ?? definition.version} onChange={(event) => setVersion(Number(event.target.value))}>{Array.from({ length: latestVersion ?? definition.version }, (_, index) => (latestVersion ?? definition.version) - index).map((item) => <option key={item} value={item}>Version {item}</option>)}</select></label></div>
+      <div className="list-toolbar"><StatusPill tone={definition.archived ? "amber" : definition.enabled ? "green" : "neutral"}>{definition.archived ? "Archived" : definition.enabled ? "Enabled" : "Disabled"}</StatusPill><StatusPill tone={definition.configuration ? "green" : "amber"}>{definition.configuration ? "Configured" : "Needs configuration"}</StatusPill><label className="filter-field">Version<select value={version ?? definition.version} onChange={(event) => setVersion(Number(event.target.value))}>{Array.from({ length: latestVersion ?? definition.version }, (_, index) => (latestVersion ?? definition.version) - index).map((item) => <option key={item} value={item}>Version {item}</option>)}</select></label></div>
       {error ? <p className="inline-error" role="alert">{error}</p> : null}
       <form className="content-section draft-form" key={`${definition.id}:${definition.version}`} onSubmit={(event) => void save(event)}>
         <label className="preview-field">Name<input name="name" defaultValue={definition.name} maxLength={120} required disabled={readOnly} /></label>
         <label className="preview-field">Description<textarea name="description" defaultValue={definition.description} rows={3} maxLength={500} disabled={readOnly} /></label>
         <label className="preview-field">Original Markdown<textarea name="source_markdown" defaultValue={definition.source_markdown} rows={18} spellCheck={false} required disabled={readOnly} /></label>
-        {!readOnly ? <div className="form-actions"><button className="button button-primary" type="submit" disabled={saving}>{saving ? "Saving…" : "Save new version"}<span className="visually-hidden"> Current version {definition.version}; the next saved version is immutable.</span></button><button className="button button-secondary" type="button" disabled={saving} onClick={() => void archive()}>Archive</button></div> : null}
+        {endpoints ? (activeEndpoints.length > 0 || definition.configuration
+          ? <ModelConfigurationFields endpoints={endpoints} configuration={definition.configuration} disabled={readOnly || (activeEndpoints.length === 0 && Boolean(definition.configuration))} />
+          : <p className="field-note">No active Model Endpoint exists. Save this definition unconfigured or create a Model Endpoint to configure it.</p>)
+          : <p className="workspace-gate" role="status">Loading Model Endpoints…</p>}
+        {!readOnly ? <div className="form-actions"><button className="button button-primary" type="submit" disabled={saving || !endpoints}>{saving ? "Saving…" : "Save new version"}<span className="visually-hidden"> Current version {definition.version}; the next saved version is immutable.</span></button><button className="button button-secondary" type="button" disabled={saving} onClick={() => void archive()}>Archive</button></div> : null}
       </form>
       {Object.keys(definition.unmapped_metadata).length ? <section className="content-section"><h2>Preserved unmapped metadata</h2><pre>{JSON.stringify(definition.unmapped_metadata, null, 2)}</pre></section> : null}
       <section className="content-section draft-form">

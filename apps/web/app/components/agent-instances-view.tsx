@@ -22,6 +22,7 @@ type Definition = {
   version: number;
   name: string;
   description: string;
+  enabled: boolean;
   archived: boolean;
   created_at: string;
 };
@@ -144,7 +145,7 @@ export function AgentInstanceEditor({ instanceId }: { instanceId?: string }) {
         setDefinitionId(loadedInstance.definition_id);
         setProjectId(loadedInstance.project_id ?? "");
       } else if (loadedDefinitions.length > 0) {
-        setDefinitionId(loadedDefinitions.find((definition) => !definition.archived)?.id ?? "");
+        setDefinitionId(loadedDefinitions.find((definition) => definition.enabled && !definition.archived)?.id ?? "");
       }
     }).catch((reason: unknown) => {
       if (active) setLoadError(reason instanceof Error ? reason.message : "Could not load instance form data.");
@@ -205,7 +206,7 @@ export function AgentInstanceEditor({ instanceId }: { instanceId?: string }) {
     return <main className="workspace-gate" role="status">Loading agent instance…</main>;
   }
 
-  const activeDefinitions = definitions.filter((definition) => !definition.archived);
+  const activeDefinitions = definitions.filter((definition) => definition.enabled && !definition.archived);
   const hasActiveDefinition = activeDefinitions.length > 0;
   const heading = instance ? instance.display_name : "New agent instance";
   return (
@@ -217,11 +218,11 @@ export function AgentInstanceEditor({ instanceId }: { instanceId?: string }) {
       <form className="content-section draft-form" onSubmit={(event) => void submit(event)}>
         <div className="section-heading"><h2>{instance ? "Instance configuration" : "Register identity"}</h2><StatusPill>Owner scoped · persisted</StatusPill></div>
         <label className="preview-field">Display name<input value={displayName} onChange={(event) => setDisplayName(event.target.value)} minLength={1} maxLength={120} autoComplete="off" required disabled={!canEdit} /></label>
-        <label className="preview-field">Agent definition<select value={definitionId} onChange={(event) => setDefinitionId(event.target.value)} required disabled={!canEdit || !hasActiveDefinition}><option value="" disabled>Select an active definition</option>{definitions.map((definition) => <option key={definition.id} value={definition.id} disabled={definition.archived}>{definition.name}{definition.archived ? " · Archived" : ` · v${definition.version}`}</option>)}</select></label>
+        <label className="preview-field">Agent definition<select value={definitionId} onChange={(event) => setDefinitionId(event.target.value)} required disabled={!canEdit || (!instance && !hasActiveDefinition)}><option value="" disabled>Select an enabled definition</option>{definitions.map((definition) => <option key={definition.id} value={definition.id} disabled={definition.archived || !definition.enabled}>{definition.name}{definition.archived ? " · Archived" : !definition.enabled ? " · Disabled" : ` · v${definition.version}`}</option>)}</select></label>
         <label className="preview-field">Project placement <span className="field-note">This associates the instance with project context only; it does not grant project permissions or place an avatar at a physical desk.</span><select value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={!canEdit}><option value="">No project</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
         {selectedDefinition ? <div className="connection-placeholder"><strong>{selectedDefinition.name} · version {selectedDefinition.version}</strong><span>{selectedDefinition.description || "No description provided."}</span></div> : null}
         {instance ? <dl className="preview-facts"><div><dt>Instance ID</dt><dd>{instance.id}</dd></div><div><dt>Office location</dt><dd>Not configured</dd></div><div><dt>Runtime session</dt><dd>Not attached</dd></div><div><dt>Created</dt><dd>{new Date(instance.created_at).toLocaleString()}</dd></div></dl> : null}
-        {!instance && !hasActiveDefinition ? <p className="inline-error" role="status">Create an active definition before registering an instance. <Link href="/agents/definitions/new">Create definition</Link></p> : null}
+        {!instance && !hasActiveDefinition ? <p className="inline-error" role="status">Create and enable a definition before registering an instance. <Link href="/agents/definitions/new">Create definition</Link></p> : null}
         {saveError ? <p className="inline-error" role="alert">{saveError}</p> : null}
         <div className="form-actions">
           {canEdit ? <button className="button button-primary" type="submit" disabled={saving || (!instance && !hasActiveDefinition) || !displayName.trim() || !definitionId}>{saving ? "Saving…" : instance ? "Save changes" : "Register instance"}</button> : null}

@@ -23,6 +23,18 @@ export type RunSnapshot = {
     description: string;
     source_markdown: string;
     unmapped_metadata: Record<string, unknown>;
+    configuration?: {
+      role: string;
+      model_endpoint_id: string;
+      model_id: string;
+      route: string | null;
+      runtime_id: string;
+      temperature: number | null;
+      max_iterations: number;
+      concurrency_limit: number;
+      execution_timeout_seconds: number;
+      allowed_tools: string[];
+    } | null;
   };
   skills: Array<{
     id: string;
@@ -33,8 +45,15 @@ export type RunSnapshot = {
     dependencies: unknown;
     resources: unknown;
   }>;
-  provider: unknown | null;
-  runtime: unknown | null;
+  model_endpoint?: {
+    id: string;
+    adapter: string;
+    endpoint_url: string;
+    credential_env: string;
+  } | null;
+  /** Historical snapshots created before Model Endpoints replaced Provider configuration. */
+  provider?: unknown | null;
+  runtime?: unknown | null;
 };
 
 export type RunRecord = {
@@ -90,4 +109,48 @@ export function requestRun(runId: string, signal?: AbortSignal): Promise<RunReco
     `/api/v1/runs/${encodeURIComponent(runId)}`,
     signal,
   );
+}
+
+export type RunResultRecord = {
+  run_id: string;
+  text: string;
+  byte_length: number;
+  created_at: string;
+};
+
+export function requestRunResult(
+  runId: string,
+  signal?: AbortSignal,
+): Promise<RunResultRecord> {
+  return requestRunData<RunResultRecord>(
+    `/api/v1/runs/${encodeURIComponent(runId)}/result`,
+    signal,
+  );
+}
+
+export async function requestRunCancellation(runId: string): Promise<void> {
+  const response = await fetch(
+    `/api/v1/runs/${encodeURIComponent(runId)}/cancel`,
+    {
+      method: "POST",
+      cache: "no-store",
+      credentials: "same-origin",
+      headers: { accept: "application/json" },
+    },
+  );
+  if (!response.ok) {
+    let detail: unknown;
+    try {
+      detail = (await response.json() as { detail?: unknown }).detail;
+    } catch {
+      detail = undefined;
+    }
+    throw new Error(typeof detail === "string"
+      ? detail
+      : `Could not request cancellation (HTTP ${response.status}).`);
+  }
+  const body = await response.json() as { status?: unknown };
+  if (response.status !== 202 || body.status !== "cancellation_pending") {
+    throw new Error("API did not confirm a pending Run cancellation.");
+  }
 }

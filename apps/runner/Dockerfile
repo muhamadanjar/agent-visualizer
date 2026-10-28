@@ -8,7 +8,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY runner.py /app/runner.py
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+COPY runner.py runtime.py /app/
 
 USER 10001:10001
 ENTRYPOINT ["python", "/app/runner.py"]

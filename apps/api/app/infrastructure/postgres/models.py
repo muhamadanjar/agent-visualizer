@@ -57,7 +57,6 @@ class AgentDefinitionTable(SQLModel, table=True):
         CheckConstraint("char_length(owner_id) BETWEEN 1 AND 128"),
         CheckConstraint("char_length(slug) BETWEEN 1 AND 120"),
         CheckConstraint("current_version > 0"),
-        UniqueConstraint("owner_id", "slug"),
         UniqueConstraint("owner_id", "id"),
         ForeignKeyConstraint(
             ["id", "current_version"],
@@ -74,6 +73,7 @@ class AgentDefinitionTable(SQLModel, table=True):
     owner_id: str = Field(sa_column=Column(Text, nullable=False))
     slug: str = Field(sa_column=Column(Text, nullable=False))
     current_version: int = Field(sa_column=Column(Integer, nullable=False, server_default=text("1")))
+    enabled: bool = Field(sa_column=Column(Boolean, nullable=False, server_default=text("true")))
     archived_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True)))
     created_at: datetime = Field(
         sa_column=Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
@@ -114,6 +114,10 @@ class AgentDefinitionVersionTable(SQLModel, table=True):
     source_markdown: str = Field(sa_column=Column(Text, nullable=False))
     unmapped_metadata: dict[str, Any] = Field(
         sa_column=Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    )
+    configuration: dict[str, Any] | None = Field(
+        default=None,
+        sa_column=Column(JSONB, nullable=True),
     )
     created_at: datetime = Field(
         sa_column=Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
@@ -400,6 +404,34 @@ class RunTable(SQLModel, table=True):
     )
 
 
+class ModelEndpointTable(SQLModel, table=True):
+    __tablename__ = "model_endpoints"
+    __table_args__ = (
+        CheckConstraint("char_length(owner_id) BETWEEN 1 AND 128"),
+        CheckConstraint("char_length(name) BETWEEN 1 AND 120"),
+        CheckConstraint("adapter = 'openai_compatible_chat_completions'"),
+        CheckConstraint("char_length(endpoint_url) BETWEEN 1 AND 2048"),
+        CheckConstraint("credential_env = 'NINEROUTER_KEY'"),
+        CheckConstraint("char_length(default_model_id) BETWEEN 1 AND 200"),
+        CheckConstraint("default_route IS NULL OR char_length(default_route) BETWEEN 1 AND 120"),
+        UniqueConstraint("owner_id", "id"),
+        Index("model_endpoints_owner_created_idx", "owner_id", "created_at", "id"),
+    )
+
+    id: UUID = Field(sa_column=Column(PGUUID(as_uuid=True), primary_key=True))
+    owner_id: str = Field(sa_column=Column(Text, nullable=False))
+    name: str = Field(sa_column=Column(Text, nullable=False))
+    adapter: str = Field(sa_column=Column(Text, nullable=False))
+    endpoint_url: str = Field(sa_column=Column(Text, nullable=False))
+    credential_env: str = Field(sa_column=Column(Text, nullable=False))
+    default_model_id: str = Field(sa_column=Column(Text, nullable=False))
+    default_route: str | None = Field(default=None, sa_column=Column(Text))
+    archived_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True)))
+    created_at: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    )
+
+
 class ProviderConfigTable(SQLModel, table=True):
     __tablename__ = "provider_configs"
     __table_args__ = (
@@ -443,8 +475,9 @@ class ActivityEventTable(SQLModel, table=True):
         CheckConstraint("task_revision >= 1"),
         CheckConstraint(
             "event_type IN ('run.started', 'run.waiting_input', 'run.waiting_approval', "
-            "'run.blocked', 'run.tool_action', 'run.succeeded', 'run.failed', "
-            "'run.canceled', 'session.heartbeat')",
+            "'run.blocked', 'run.tool_action', 'run.cancellation_pending', "
+            "'run.succeeded', 'run.failed', 'run.canceled', 'run.unknown', "
+            "'session.heartbeat')",
             name="activity_events_event_type_check",
         ),
         CheckConstraint(
@@ -493,6 +526,43 @@ class ActivityEventTable(SQLModel, table=True):
     )
     source_sequence: int | None = Field(default=None, sa_column=Column(BigInteger))
     action_summary: str | None = Field(default=None, sa_column=Column(Text))
+
+
+class ActivityEventOutboxTable(SQLModel, table=True):
+    __tablename__ = "activity_event_outbox"
+    __table_args__ = (
+        CheckConstraint("attempt_count >= 0", name="activity_event_outbox_attempt_count_check"),
+        CheckConstraint(
+            "(claim_id IS NULL AND lease_expires_at IS NULL) OR "
+            "(claim_id IS NOT NULL AND lease_expires_at IS NOT NULL)",
+            name="activity_event_outbox_claim_check",
+        ),
+        ForeignKeyConstraint(
+            ["owner_id", "cursor"],
+            ["activity_events.owner_id", "activity_events.cursor"],
+            name="activity_event_outbox_event_fk",
+            ondelete="RESTRICT",
+        ),
+        PrimaryKeyConstraint("owner_id", "cursor", name="activity_event_outbox_pkey"),
+        Index(
+            "activity_event_outbox_pending_idx",
+            "owner_id",
+            "cursor",
+            postgresql_where=text("published_at IS NULL"),
+        ),
+    )
+
+    owner_id: str = Field(sa_column=Column(Text, nullable=False))
+    cursor: int = Field(sa_column=Column(BigInteger, nullable=False))
+    created_at: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    )
+    published_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True)))
+    claim_id: UUID | None = Field(default=None, sa_column=Column(PGUUID(as_uuid=True)))
+    lease_expires_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True)))
+    attempt_count: int = Field(
+        sa_column=Column(Integer, nullable=False, server_default=text("0"))
+    )
 
 
 class RunActivityProjectionTable(SQLModel, table=True):
@@ -701,6 +771,29 @@ class RunnerConnectionTable(SQLModel, table=True):
     )
 
 
+class RunResultTable(SQLModel, table=True):
+    __tablename__ = "run_results"
+    __table_args__ = (
+        CheckConstraint("char_length(owner_id) BETWEEN 1 AND 128"),
+        CheckConstraint(
+            "byte_length BETWEEN 1 AND 1048576 AND byte_length = octet_length(result_text)"
+        ),
+        PrimaryKeyConstraint("owner_id", "run_id"),
+        ForeignKeyConstraint(
+            ["owner_id", "run_id"], ["runs.owner_id", "runs.id"], ondelete="RESTRICT"
+        ),
+    )
+
+    owner_id: str = Field(sa_column=Column(Text, nullable=False))
+    run_id: UUID = Field(sa_column=Column(PGUUID(as_uuid=True), nullable=False))
+    result_text: str = Field(sa_column=Column(Text, nullable=False))
+    byte_length: int = Field(sa_column=Column(Integer, nullable=False))
+    created_at: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    )
+
+
+
 class RunDispatchTable(SQLModel, table=True):
     __tablename__ = "run_dispatches"
     __table_args__ = (
@@ -708,6 +801,9 @@ class RunDispatchTable(SQLModel, table=True):
             "state IN ('queued', 'leased', 'succeeded', 'failed', 'canceled', 'unknown', 'blocked')"
         ),
         CheckConstraint("policy_revision >= 1"),
+        CheckConstraint(
+            "max_duration_seconds IS NULL OR max_duration_seconds BETWEEN 1 AND 3600"
+        ),
         PrimaryKeyConstraint("owner_id", "run_id"),
         ForeignKeyConstraint(
             ["owner_id", "run_id"], ["runs.owner_id", "runs.id"], ondelete="RESTRICT"
@@ -747,6 +843,10 @@ class RunDispatchTable(SQLModel, table=True):
     state: str = Field(sa_column=Column(Text, nullable=False, server_default=text("'queued'")))
     runner_id: UUID | None = Field(default=None, sa_column=Column(PGUUID(as_uuid=True)))
     lease_expires_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True))
+    )
+    max_duration_seconds: int | None = Field(default=None, sa_column=Column(Integer))
+    cancellation_requested_at: datetime | None = Field(
         default=None, sa_column=Column(DateTime(timezone=True))
     )
     created_at: datetime = Field(

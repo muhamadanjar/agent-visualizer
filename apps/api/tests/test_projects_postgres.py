@@ -24,6 +24,7 @@ from app.domain.evidence import (
     action_digest,
 )
 from app.domain.instances import AgentInstanceInputError
+from app.domain.registry import AgentRegistryConflictError
 from app.infrastructure.postgres.evidence import (
     PostgresActivityEventRepository,
     PostgresApprovalRepository,
@@ -33,8 +34,9 @@ from app.infrastructure.postgres.evidence import (
 from app.infrastructure.postgres.instances import PostgresAgentInstanceRepository
 from app.main import create_app
 from app.infrastructure.postgres.projects import PostgresProjectRepository
-from app.domain.provider_config import ProviderConfigDraft
-from app.infrastructure.postgres.provider_config import PostgresProviderConfigRepository
+from app.domain.agent_configuration import AgentDefinitionConfiguration
+from app.domain.model_endpoints import ModelEndpointDraft
+from app.infrastructure.postgres.model_endpoints import PostgresModelEndpointRepository
 from app.infrastructure.postgres.registry import PostgresAgentRegistryRepository
 from app.domain.execution import WorkspacePolicyDraft
 from app.infrastructure.postgres.execution import PostgresExecutionRepository
@@ -72,6 +74,8 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
         api_task_id: UUID | None = None
         api_definition_id: UUID | None = None
         api_instance_id: UUID | None = None
+        api_endpoint_id: UUID | None = None
+        api_archive_endpoint_id: UUID | None = None
         runner_ids: list[UUID] = []
         api_project_name = f"Task API restricted role {uuid4().hex}"
         restricted_pool: asyncpg.Pool | None = None
@@ -79,12 +83,61 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
         restricted_sessions = None
         try:
             await apply_migrations(connection)
+            await connection.execute(
+                """
+                INSERT INTO provider_configs (owner_id, version, adapter, endpoint_url, model_id, route)
+                VALUES ($1, 2, 'openai_compatible_chat_completions',
+                        'http://localhost:20128/v1', 'openrouter/migrated-model:free', 'free')
+                """,
+                restricted_owner_id,
+            )
+            legacy_definition_id = uuid4()
+            async with connection.transaction():
+                await connection.execute(
+                    """
+                    INSERT INTO agent_definitions (id, owner_id, slug, current_version)
+                    VALUES ($1, $2, 'legacy-unconfigured', 1)
+                    """,
+                    legacy_definition_id,
+                    restricted_owner_id,
+                )
+                await connection.execute(
+                    """
+                    INSERT INTO agent_definition_versions (
+                        definition_id, owner_id, version, name, description,
+                        source_markdown, unmapped_metadata
+                    ) VALUES ($1, $2, 1, 'Legacy unconfigured', '', '# Legacy', '{}'::jsonb)
+                    """,
+                    legacy_definition_id,
+                    restricted_owner_id,
+                )
             assert await apply_migrations(connection) == []
             await apply_alembic_migrations(dsn)
             await apply_alembic_migrations(dsn)
             assert await connection.fetchval(
                 "SELECT version_num FROM alembic_version"
-            ) == "execution_0010"
+            ) == "events_0014"
+            migrated_endpoint = await connection.fetchrow(
+                "SELECT name, credential_env, default_model_id, default_route "
+                "FROM model_endpoints WHERE owner_id = $1",
+                restricted_owner_id,
+            )
+            assert migrated_endpoint is not None
+            assert migrated_endpoint["name"] == "Migrated endpoint"
+            assert migrated_endpoint["credential_env"] == "NINEROUTER_KEY"
+            assert migrated_endpoint["default_model_id"] == "openrouter/migrated-model:free"
+            assert migrated_endpoint["default_route"] == "free"
+            assert await connection.fetchval(
+                "SELECT enabled FROM agent_definitions WHERE owner_id = $1 AND id = $2",
+                restricted_owner_id,
+                legacy_definition_id,
+            ) is False
+            assert await connection.fetchval(
+                "SELECT configuration IS NULL FROM agent_definition_versions "
+                "WHERE owner_id = $1 AND definition_id = $2 AND version = 1",
+                restricted_owner_id,
+                legacy_definition_id,
+            )
             await ensure_application_role(
                 connection,
                 app_role_name,
@@ -225,13 +278,14 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                 ("task_revision_dependencies", ("SELECT", "INSERT")),
                 ("runs", ("SELECT", "INSERT")),
                 ("provider_configs", ("SELECT", "INSERT", "UPDATE")),
+                ("model_endpoints", ("SELECT", "INSERT", "UPDATE")),
             ):
                 for privilege in privileges:
                     assert await connection.fetchval(
                         "SELECT has_table_privilege($1, $2, $3)",
                         app_role_name, f"public.{table}", privilege,
                     )
-                update_allowed = table in {"tasks", "provider_configs"}
+                update_allowed = table in {"tasks", "provider_configs", "model_endpoints"}
                 assert await connection.fetchval(
                     "SELECT has_table_privilege($1, $2, 'UPDATE')",
                     app_role_name, f"public.{table}",
@@ -263,13 +317,321 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
             )
             restricted_projects = PostgresProjectRepository(restricted_sessions)
             restricted_definitions = PostgresAgentRegistryRepository(restricted_sessions)
+            restricted_endpoints = PostgresModelEndpointRepository(restricted_sessions)
             restricted_instances = PostgresAgentInstanceRepository(restricted_sessions)
             restricted_project = await restricted_projects.create(
                 restricted_owner_id, "restricted project", "grant smoke"
             )
-            restricted_definition = await restricted_definitions.create(
-                restricted_owner_id, "Restricted", "", "# Restricted", {}
+            restricted_endpoint = await restricted_endpoints.create(
+                restricted_owner_id,
+                ModelEndpointDraft.create(
+                    "Restricted endpoint",
+                    "http://localhost:20128/v1",
+                    "NINEROUTER_KEY",
+                    "openrouter/cohere/north-mini-code:free",
+                    "free",
+                ),
             )
+            assert await restricted_endpoints.get_for_owner("another-owner", restricted_endpoint.id) is None
+            restricted_configuration = AgentDefinitionConfiguration.create(
+                role="Restricted worker",
+                model_endpoint_id=restricted_endpoint.id,
+                model_id="openrouter/cohere/north-mini-code:free",
+                route="free",
+                allowed_tools=["list_files", "read_file", "write_file"],
+                concurrency_limit=1,
+            )
+            restricted_definition = await restricted_definitions.create(
+                restricted_owner_id, "Restricted", "", "# Restricted", {}, restricted_configuration
+            )
+            duplicate_definition = await restricted_definitions.create(
+                restricted_owner_id, "Restricted", "", "# Another Restricted", {}, restricted_configuration
+            )
+            assert duplicate_definition.id != restricted_definition.id
+            enable_race_endpoint = await restricted_endpoints.create(
+                restricted_owner_id,
+                ModelEndpointDraft.create(
+                    "Enable race endpoint",
+                    "http://localhost:20128/v1",
+                    "NINEROUTER_KEY",
+                    "openrouter/cohere/north-mini-code:free",
+                    "free",
+                ),
+            )
+            enable_race_configuration = AgentDefinitionConfiguration.create(
+                role="Enable race worker",
+                model_endpoint_id=enable_race_endpoint.id,
+                model_id=enable_race_endpoint.default_model_id,
+                route=enable_race_endpoint.default_route,
+            )
+            enable_race_definition = await restricted_definitions.create(
+                restricted_owner_id,
+                "Enable race",
+                "",
+                "# Enable race",
+                {},
+                enable_race_configuration,
+            )
+            disabled_enable_definition = (
+                await restricted_definitions.set_enabled_for_owner(
+                    restricted_owner_id, enable_race_definition.id, False
+                )
+            )
+            assert disabled_enable_definition is not None
+            assert disabled_enable_definition.enabled is False
+            enable_attempt: asyncio.Task[object] | None = None
+            endpoint_lock_observed = False
+            async with restricted_pool.acquire() as archive_connection:
+                async with archive_connection.transaction():
+                    await archive_connection.execute(
+                        """
+                        UPDATE model_endpoints SET archived_at = now()
+                        WHERE owner_id = $1 AND id = $2
+                        """,
+                        restricted_owner_id,
+                        enable_race_endpoint.id,
+                    )
+                    enable_attempt = asyncio.create_task(
+                        restricted_definitions.set_enabled_for_owner(
+                            restricted_owner_id, enable_race_definition.id, True
+                        )
+                    )
+                    for _ in range(100):
+                        wait_event = await connection.fetchval(
+                            """
+                            SELECT wait_event_type
+                            FROM pg_stat_activity
+                            WHERE usename = $1 AND datname = current_database()
+                              AND state = 'active' AND query ILIKE '%model_endpoints%'
+                              AND query ILIKE '%FOR SHARE%'
+                              AND wait_event_type = 'Lock'
+                            LIMIT 1
+                            """,
+                            app_role_name,
+                        )
+                        if wait_event == "Lock":
+                            endpoint_lock_observed = True
+                            break
+                        await asyncio.sleep(0.01)
+            assert enable_attempt is not None
+            if not endpoint_lock_observed:
+                await asyncio.wait_for(enable_attempt, timeout=5)
+                raise AssertionError(
+                    "Definition enable did not wait for Model Endpoint archive"
+                )
+            try:
+                await asyncio.wait_for(enable_attempt, timeout=5)
+            except AgentRegistryConflictError as error:
+                assert "active Model Endpoint" in str(error)
+            else:
+                raise AssertionError(
+                    "Definition was enabled against an archived Model Endpoint"
+                )
+            current_enable_race_definition = await restricted_definitions.get_for_owner(
+                restricted_owner_id, enable_race_definition.id
+            )
+            assert current_enable_race_definition is not None
+            assert current_enable_race_definition.enabled is False
+            create_race_endpoint = await restricted_endpoints.create(
+                restricted_owner_id,
+                ModelEndpointDraft.create(
+                    "Create race endpoint",
+                    "http://localhost:20128/v1",
+                    "NINEROUTER_KEY",
+                    "openrouter/cohere/north-mini-code:free",
+                    "free",
+                ),
+            )
+            create_race_configuration = AgentDefinitionConfiguration.create(
+                role="Create race worker",
+                model_endpoint_id=create_race_endpoint.id,
+                model_id=create_race_endpoint.default_model_id,
+                route=create_race_endpoint.default_route,
+            )
+            create_attempt: asyncio.Task[object] | None = None
+            create_lock_observed = False
+            async with restricted_pool.acquire() as archive_connection:
+                async with archive_connection.transaction():
+                    await archive_connection.execute(
+                        "UPDATE model_endpoints SET archived_at = now() "
+                        "WHERE owner_id = $1 AND id = $2",
+                        restricted_owner_id,
+                        create_race_endpoint.id,
+                    )
+                    create_attempt = asyncio.create_task(
+                        restricted_definitions.create(
+                            restricted_owner_id,
+                            "Create race",
+                            "",
+                            "# Create race",
+                            {},
+                            create_race_configuration,
+                        )
+                    )
+                    for _ in range(100):
+                        wait_event = await connection.fetchval(
+                            """
+                            SELECT wait_event_type FROM pg_stat_activity
+                            WHERE usename = $1 AND datname = current_database()
+                              AND state = 'active' AND query ILIKE '%model_endpoints%'
+                              AND query ILIKE '%FOR SHARE%' AND wait_event_type = 'Lock'
+                            LIMIT 1
+                            """,
+                            app_role_name,
+                        )
+                        if wait_event == "Lock":
+                            create_lock_observed = True
+                            break
+                        await asyncio.sleep(0.01)
+            assert create_attempt is not None
+            if not create_lock_observed:
+                await asyncio.wait_for(create_attempt, timeout=5)
+                raise AssertionError("Definition create did not wait for Endpoint archive")
+            try:
+                await asyncio.wait_for(create_attempt, timeout=5)
+            except AgentRegistryConflictError as error:
+                assert "active Model Endpoint" in str(error)
+            else:
+                raise AssertionError("Definition was created with an archived Endpoint")
+            assert not any(
+                definition.name == "Create race"
+                for definition in await restricted_definitions.list_for_owner(
+                    restricted_owner_id,
+                    include_archived=True,
+                    limit=100,
+                    offset=0,
+                )
+            )
+
+            update_race_endpoint = await restricted_endpoints.create(
+                restricted_owner_id,
+                ModelEndpointDraft.create(
+                    "Update race endpoint",
+                    "http://localhost:20128/v1",
+                    "NINEROUTER_KEY",
+                    "openrouter/cohere/north-mini-code:free",
+                    "free",
+                ),
+            )
+            update_race_configuration = AgentDefinitionConfiguration.create(
+                role="Update race worker",
+                model_endpoint_id=update_race_endpoint.id,
+                model_id=update_race_endpoint.default_model_id,
+                route=update_race_endpoint.default_route,
+            )
+            update_race_definition = await restricted_definitions.create(
+                restricted_owner_id,
+                "Update race",
+                "",
+                "# Update race",
+                {},
+                restricted_configuration,
+            )
+            update_attempt: asyncio.Task[object] | None = None
+            update_lock_observed = False
+            async with restricted_pool.acquire() as archive_connection:
+                async with archive_connection.transaction():
+                    await archive_connection.execute(
+                        "UPDATE model_endpoints SET archived_at = now() "
+                        "WHERE owner_id = $1 AND id = $2",
+                        restricted_owner_id,
+                        update_race_endpoint.id,
+                    )
+                    update_attempt = asyncio.create_task(
+                        restricted_definitions.update_for_owner(
+                            restricted_owner_id,
+                            update_race_definition.id,
+                            {"configuration": update_race_configuration},
+                        )
+                    )
+                    for _ in range(100):
+                        wait_event = await connection.fetchval(
+                            """
+                            SELECT wait_event_type FROM pg_stat_activity
+                            WHERE usename = $1 AND datname = current_database()
+                              AND state = 'active' AND query ILIKE '%model_endpoints%'
+                              AND query ILIKE '%FOR SHARE%' AND wait_event_type = 'Lock'
+                            LIMIT 1
+                            """,
+                            app_role_name,
+                        )
+                        if wait_event == "Lock":
+                            update_lock_observed = True
+                            break
+                        await asyncio.sleep(0.01)
+            assert update_attempt is not None
+            if not update_lock_observed:
+                await asyncio.wait_for(update_attempt, timeout=5)
+                raise AssertionError("Definition update did not wait for Endpoint archive")
+            try:
+                await asyncio.wait_for(update_attempt, timeout=5)
+            except AgentRegistryConflictError as error:
+                assert "active Model Endpoint" in str(error)
+            else:
+                raise AssertionError("Definition version used an archived Endpoint")
+            current_update_race_definition = await restricted_definitions.get_for_owner(
+                restricted_owner_id, update_race_definition.id
+            )
+            assert current_update_race_definition is not None
+            assert current_update_race_definition.version == update_race_definition.version
+            assert current_update_race_definition.configuration == restricted_configuration
+
+
+            race_definition = await restricted_definitions.create(
+                restricted_owner_id,
+                "Disable race",
+                "",
+                "# Disable race",
+                {},
+                restricted_configuration,
+            )
+            assignment_attempt: asyncio.Task[object] | None = None
+            definition_lock_observed = False
+            async with restricted_pool.acquire() as disable_connection:
+                async with disable_connection.transaction():
+                    await disable_connection.execute(
+                        """
+                        UPDATE agent_definitions
+                        SET enabled = false, updated_at = now()
+                        WHERE owner_id = $1 AND id = $2
+                        """,
+                        restricted_owner_id,
+                        race_definition.id,
+                    )
+                    assignment_attempt = asyncio.create_task(
+                        restricted_instances.create(
+                            restricted_owner_id,
+                            "Racing disabled assignment",
+                            race_definition.id,
+                            None,
+                        )
+                    )
+                    for _ in range(100):
+                        wait_event = await connection.fetchval(
+                            """
+                            SELECT wait_event_type
+                            FROM pg_stat_activity
+                            WHERE usename = $1 AND datname = current_database()
+                              AND state = 'active' AND query ILIKE '%FOR SHARE%'
+                              AND wait_event_type = 'Lock'
+                            LIMIT 1
+                            """,
+                            app_role_name,
+                        )
+                        if wait_event == "Lock":
+                            definition_lock_observed = True
+                            break
+                        await asyncio.sleep(0.01)
+            assert assignment_attempt is not None
+            if not definition_lock_observed:
+                await asyncio.wait_for(assignment_attempt, timeout=5)
+                raise AssertionError("Instance assignment did not wait for Definition disable")
+            try:
+                await asyncio.wait_for(assignment_attempt, timeout=5)
+            except AgentInstanceInputError:
+                pass
+            else:
+                raise AssertionError("Instance assignment accepted a concurrently disabled Definition")
             restricted_skills = PostgresSkillRepository(restricted_sessions)
             restricted_skill = await restricted_skills.create(
                 restricted_owner_id,
@@ -366,16 +728,6 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                 ),
             )
             assert execution_policy is not None and execution_policy.revision == 1
-            provider_configs = PostgresProviderConfigRepository(restricted_sessions)
-            saved_provider = await provider_configs.upsert_for_owner(
-                restricted_owner_id,
-                ProviderConfigDraft.create(
-                    "http://localhost:20128/v1",
-                    "openrouter/cohere/north-mini-code:free",
-                    "free",
-                ),
-            )
-            assert saved_provider.version == 1
             run_request_id = uuid4()
             first_run, created = await run_repository.create_for_task(
                 restricted_owner_id,
@@ -394,14 +746,14 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                 first_run.configuration_snapshot["skills"][0]["instructions"]
                 == "Use the captured skill version."
             )
-            assert first_run.configuration_snapshot["provider"] == {
-                "version": 1,
+            assert first_run.configuration_snapshot["agent_definition"]["configuration"] == restricted_configuration.to_json()
+            assert first_run.configuration_snapshot["model_endpoint"] == {
+                "id": str(restricted_endpoint.id),
                 "adapter": "openai_compatible_chat_completions",
                 "endpoint_url": "http://localhost:20128/v1",
-                "model_id": "openrouter/cohere/north-mini-code:free",
-                "route": "free",
+                "credential_env": "NINEROUTER_KEY",
             }
-            assert first_run.configuration_snapshot["runtime"] is None
+            assert first_run.configuration_snapshot["runtime"] == {"id": "langchain"}
             replayed_run, created = await run_repository.create_for_task(
                 restricted_owner_id,
                 first_task.id,
@@ -479,6 +831,43 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                 restricted_owner_id,
                 first_run.id,
             ) == "restricted-project"
+            parallel_project = await restricted_projects.create(
+                restricted_owner_id, "parallel project", "Concurrency boundary"
+            )
+            parallel_policy = await execution_repository.save_policy(
+                restricted_owner_id,
+                parallel_project.id,
+                WorkspacePolicyDraft.create(
+                    workspace_path="parallel-project",
+                    allowed_tools=["list_files", "read_file", "write_file"],
+                    max_duration_seconds=300,
+                    max_inference_turns=6,
+                    max_tool_calls=15,
+                ),
+            )
+            assert parallel_policy is not None
+            parallel_instance = await restricted_instances.create(
+                restricted_owner_id,
+                "Parallel instance",
+                restricted_definition.id,
+                parallel_project.id,
+            )
+            parallel_task = await task_repository.create(
+                restricted_owner_id,
+                replace(
+                    first_spec,
+                    project_id=parallel_project.id,
+                    agent_instance_id=parallel_instance.id,
+                    title="Definition concurrency limit across workspaces",
+                ),
+            )
+            parallel_run, parallel_created = await run_repository.create_for_task(
+                restricted_owner_id,
+                parallel_task.id,
+                uuid4(),
+                execution_policy_revision=parallel_policy.revision,
+            )
+            assert parallel_created is True
             assert await execution_repository.claim_next(runner_id, lease_seconds=60) is None
             assert await execution_repository.heartbeat_run(
                 runner_id, first_run.id, lease_seconds=60
@@ -504,6 +893,16 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
             )
             started_event, inserted = await evidence_repository.append_event(event_draft)
             assert inserted is True
+            outbox_claim_id = uuid4()
+            claimed_events = await evidence_repository.claim_outbox_batch(
+                outbox_claim_id, limit=100, lease_seconds=30
+            )
+            claimed_start = next(
+                item for item in claimed_events if item.event_id == started_event.event_id
+            )
+            assert await evidence_repository.mark_outbox_published(
+                restricted_owner_id, claimed_start.cursor, outbox_claim_id
+            )
             assert await evidence_repository.has_event_for_runner(
                 restricted_owner_id,
                 str(runner_id),
@@ -594,7 +993,18 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
             assert not await execution_repository.heartbeat_run(
                 runner_id, second_run.id, lease_seconds=60
             )
+            parallel_job = await execution_repository.claim_next(runner_id, lease_seconds=1)
+            assert parallel_job is not None and parallel_job.run_id == parallel_run.id
+            await asyncio.sleep(1.1)
+            assert not await execution_repository.heartbeat_run(
+                runner_id, parallel_run.id, lease_seconds=60
+            )
             assert await execution_repository.claim_next(runner_id, lease_seconds=60) is None
+            assert await connection.fetchval(
+                "SELECT state FROM run_dispatches WHERE owner_id = $1 AND run_id = $2",
+                restricted_owner_id,
+                parallel_run.id,
+            ) == "unknown"
             assert await connection.fetchval(
                 "SELECT state FROM run_dispatches WHERE owner_id = $1 AND run_id = $2",
                 restricted_owner_id,
@@ -820,10 +1230,16 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                 ),
             )
             assert updated_skill is not None and updated_skill.version == 2
+            second_configuration = AgentDefinitionConfiguration.create(
+                role="Restricted worker",
+                model_endpoint_id=restricted_endpoint.id,
+                model_id="openrouter/another-model:free",
+                allowed_tools=["list_files", "read_file", "write_file"],
+            )
             next_definition = await restricted_definitions.update_for_owner(
                 restricted_owner_id,
                 restricted_definition.id,
-                {"name": "Restricted v2"},
+                {"name": "Restricted v2", "configuration": second_configuration},
             )
             assert next_definition is not None and next_definition.version == 3
             pinned_definition = await restricted_definitions.set_skills_for_owner(
@@ -832,14 +1248,6 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                 [SkillPin(restricted_skill.id, updated_skill.version)],
             )
             assert pinned_definition is not None and pinned_definition.version == 4
-            updated_provider = await provider_configs.upsert_for_owner(
-                restricted_owner_id,
-                ProviderConfigDraft.create(
-                    "http://localhost:20128/v1",
-                    "openrouter/another-model:free",
-                ),
-            )
-            assert updated_provider.version == 2
             second_run, created = await run_repository.create_for_task(
                 restricted_owner_id, first_task.id, uuid4()
             )
@@ -847,13 +1255,10 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
             assert second_run.attempt_number == 2
             assert second_run.configuration_snapshot["task"]["revision"] == 3
             assert second_run.configuration_snapshot["agent_definition"]["version"] == 4
-            assert second_run.configuration_snapshot["provider"] == {
-                "version": 2,
-                "adapter": "openai_compatible_chat_completions",
-                "endpoint_url": "http://localhost:20128/v1",
-                "model_id": "openrouter/another-model:free",
-                "route": None,
-            }
+            second_snapshot_configuration = second_run.configuration_snapshot["agent_definition"]["configuration"]
+            assert second_snapshot_configuration["model_id"] == "openrouter/another-model:free"
+            assert second_snapshot_configuration["route"] == "free"
+            assert second_run.configuration_snapshot["model_endpoint"]["id"] == str(restricted_endpoint.id)
             assert second_run.configuration_snapshot["skills"][0]["version"] == 2
             assert (
                 second_run.configuration_snapshot["skills"][0]["instructions"]
@@ -914,16 +1319,34 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                 assert error.reason == "reference"
             else:
                 raise AssertionError("task assignment to the archived instance was accepted")
+            api_endpoint = await restricted_endpoints.create(
+                "owner",
+                ModelEndpointDraft.create(
+                    "Public API endpoint",
+                    "http://localhost:20128/v1",
+                    "NINEROUTER_KEY",
+                    "openrouter/cohere/north-mini-code:free",
+                    "free",
+                ),
+            )
+            api_endpoint_id = api_endpoint.id
+            api_configuration = AgentDefinitionConfiguration.create(
+                role="API task worker",
+                model_endpoint_id=api_endpoint.id,
+                model_id="openrouter/cohere/north-mini-code:free",
+                route="free",
+                allowed_tools=["list_files", "read_file", "write_file"],
+            )
             api_runner_token = "phase6-terminal-test-token-0123456789"
             api_app = create_app(
                 replace(settings(), runner_shared_token=api_runner_token),
                 database_check=database_ready,
                 project_repository=restricted_projects,
                 agent_registry_repository=restricted_definitions,
+                model_endpoint_repository=restricted_endpoints,
                 agent_instance_repository=restricted_instances,
                 task_repository=task_repository,
                 run_repository=run_repository,
-                provider_config_repository=PostgresProviderConfigRepository(restricted_sessions),
                 execution_repository=PostgresExecutionRepository(restricted_sessions),
                 activity_event_repository=PostgresActivityEventRepository(restricted_sessions),
             )
@@ -938,6 +1361,24 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                         headers={"origin": ORIGIN},
                     )
                     assert login_response.status_code == 200
+                    api_archive_endpoint = await restricted_endpoints.create(
+                        "owner",
+                        ModelEndpointDraft.create(
+                            "API archive regression",
+                            "http://localhost:20128/v1",
+                            "NINEROUTER_KEY",
+                            "openrouter/cohere/north-mini-code:free",
+                            "free",
+                        ),
+                    )
+                    api_archive_endpoint_id = api_archive_endpoint.id
+                    archive_response = await client.post(
+                        f"/api/v1/model-endpoints/{api_archive_endpoint.id}/archive",
+                        json={},
+                        headers={"origin": ORIGIN},
+                    )
+                    assert archive_response.status_code == 200
+                    assert archive_response.json()["archived"] is True
                     project_response = await client.post(
                         "/api/v1/projects",
                         json={"name": api_project_name, "summary": "Integration"},
@@ -958,19 +1399,11 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                         ),
                     )
                     assert api_policy is not None
-                    await PostgresProviderConfigRepository(restricted_sessions).upsert_for_owner(
-                        "owner",
-                        ProviderConfigDraft.create(
-                            "http://localhost:20128/v1",
-                            "openrouter/cohere/north-mini-code:free",
-                            "free",
-                        ),
-                    )
                     api_runner_id = uuid4()
                     runner_ids.append(api_runner_id)
                     await execution_repository.register_runner(api_runner_id, provider_ready=True)
                     api_definition = await restricted_definitions.create(
-                        "owner", f"Public API Agent {uuid4().hex}", "", "# API Agent", {}
+                        "owner", f"Public API Agent {uuid4().hex}", "", "# API Agent", {}, api_configuration
                     )
                     api_definition_id = api_definition.id
                     api_instance = await restricted_instances.create(
@@ -1074,7 +1507,7 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                     ) == "succeeded"
                     assert api_run["attempt_number"] == 1
                     assert api_run["configuration_snapshot"]["task"]["revision"] == 2
-                    assert api_run["configuration_snapshot"]["provider"]["endpoint_url"] == "http://localhost:20128/v1"
+                    assert api_run["configuration_snapshot"]["model_endpoint"]["endpoint_url"] == "http://localhost:20128/v1"
                     assert "owner_id" not in api_run
                     replay_response = await client.post(
                         f"/api/v1/tasks/{api_task_id}/runs",
@@ -1095,6 +1528,61 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                     assert (
                         await client.get(f"/api/v1/runs/{first_run.id}")
                     ).status_code == 404
+            queued_legacy_instance = await restricted_instances.create(
+                restricted_owner_id,
+                "Legacy queue instance",
+                duplicate_definition.id,
+                restricted_project.id,
+            )
+            queued_legacy_task = await task_repository.create(
+                restricted_owner_id,
+                replace(
+                    first_spec,
+                    agent_instance_id=queued_legacy_instance.id,
+                    title="Legacy queued Registry snapshot",
+                ),
+            )
+            queued_legacy_run, queued_legacy_created = await run_repository.create_for_task(
+                restricted_owner_id,
+                queued_legacy_task.id,
+                uuid4(),
+                execution_policy_revision=execution_policy.revision,
+            )
+            assert queued_legacy_created is True
+            malformed_legacy_task = await task_repository.create(
+                restricted_owner_id,
+                replace(
+                    first_spec,
+                    agent_instance_id=queued_legacy_instance.id,
+                    title="Malformed queued Registry snapshot",
+                ),
+            )
+            malformed_legacy_run, malformed_legacy_created = (
+                await run_repository.create_for_task(
+                    restricted_owner_id,
+                    malformed_legacy_task.id,
+                    uuid4(),
+                    execution_policy_revision=execution_policy.revision,
+                )
+            )
+            assert malformed_legacy_created is True
+            valid_registry_task = await task_repository.create(
+                restricted_owner_id,
+                replace(
+                    first_spec,
+                    agent_instance_id=queued_legacy_instance.id,
+                    title="Valid queued Registry snapshot",
+                ),
+            )
+            valid_registry_run, valid_registry_created = (
+                await run_repository.create_for_task(
+                    restricted_owner_id,
+                    valid_registry_task.id,
+                    uuid4(),
+                    execution_policy_revision=execution_policy.revision,
+                )
+            )
+            assert valid_registry_created is True
             archived_instance = await restricted_instances.archive_for_owner(
                 restricted_owner_id, restricted_instance.id
             )
@@ -1106,11 +1594,53 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
             if restricted_engine is not None:
                 await restricted_engine.dispose()
 
+            await connection.execute(
+                """
+                UPDATE runs
+                SET configuration_snapshot =
+                    configuration_snapshot #- '{agent_definition,configuration}'
+                                             #- '{model_endpoint}'
+                WHERE owner_id = $1 AND id = $2
+                """,
+                restricted_owner_id,
+                queued_legacy_run.id,
+            )
+            await connection.execute(
+                """
+                UPDATE runs
+                SET configuration_snapshot = jsonb_set(
+                    jsonb_set(
+                        configuration_snapshot,
+                        '{agent_definition,configuration}',
+                        '{}'::jsonb
+                    ),
+                    '{model_endpoint}',
+                    '{}'::jsonb
+                )
+                WHERE owner_id = $1 AND id = $2
+                """,
+                restricted_owner_id,
+                malformed_legacy_run.id,
+            )
+            assert await connection.fetchval(
+                "SELECT state FROM run_dispatches WHERE owner_id = $1 AND run_id = $2",
+                restricted_owner_id,
+                queued_legacy_run.id,
+            ) == "queued"
+
             first_lease_expiry = datetime.now(timezone.utc) + timedelta(minutes=2)
             second_lease_expiry = datetime.now(timezone.utc) + timedelta(minutes=1)
             async with connection.transaction():
                 await connection.execute("DROP INDEX run_dispatches_active_workspace_idx")
                 await connection.execute("ALTER TABLE run_dispatches DROP COLUMN workspace_path")
+                await connection.execute("DROP TABLE activity_event_outbox")
+                await connection.execute("DROP TABLE run_results")
+                await connection.execute(
+                    "ALTER TABLE run_dispatches "
+                    "DROP CONSTRAINT run_dispatches_max_duration_check, "
+                    "DROP COLUMN cancellation_requested_at, "
+                    "DROP COLUMN max_duration_seconds"
+                )
                 await connection.execute(
                     "CREATE UNIQUE INDEX run_dispatches_active_instance_idx "
                     "ON run_dispatches (owner_id, instance_id) WHERE state = 'leased'"
@@ -1159,6 +1689,63 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                 restricted_owner_id,
                 workspace_run_id,
             ) == "blocked"
+            assert await connection.fetchval(
+                "SELECT state FROM run_dispatches WHERE owner_id = $1 AND run_id = $2",
+                restricted_owner_id,
+                queued_legacy_run.id,
+            ) == "blocked"
+            assert await connection.fetchval(
+                """
+                SELECT event_type FROM activity_events
+                WHERE owner_id = $1 AND run_id = $2
+                  AND source_id = 'migration-agent-registry-0012'
+                """,
+                restricted_owner_id,
+                queued_legacy_run.id,
+            ) == "run.blocked"
+            assert await connection.fetchval(
+                "SELECT status FROM run_activity_projections WHERE owner_id = $1 AND run_id = $2",
+                restricted_owner_id,
+                queued_legacy_run.id,
+            ) == "blocked"
+            assert await connection.fetchval(
+                "SELECT state FROM run_dispatches WHERE owner_id = $1 AND run_id = $2",
+                restricted_owner_id,
+                valid_registry_run.id,
+            ) == "queued"
+            assert not await connection.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM activity_events
+                    WHERE owner_id = $1 AND run_id = $2
+                      AND source_id = 'migration-agent-registry-0012'
+                )
+                """,
+                restricted_owner_id,
+                valid_registry_run.id,
+            )
+            assert await connection.fetchval(
+                "SELECT state FROM run_dispatches WHERE owner_id = $1 AND run_id = $2",
+                restricted_owner_id,
+                malformed_legacy_run.id,
+            ) == "blocked"
+            assert await connection.fetchval(
+                """
+                SELECT event_type FROM activity_events
+                WHERE owner_id = $1 AND run_id = $2
+                  AND source_id = 'migration-agent-registry-0012'
+                """,
+                restricted_owner_id,
+                malformed_legacy_run.id,
+            ) == "run.blocked"
+            assert await connection.fetchval(
+                "SELECT status FROM run_activity_projections WHERE owner_id = $1 AND run_id = $2",
+                restricted_owner_id,
+                malformed_legacy_run.id,
+            ) == "blocked"
+            assert await connection.fetchval(
+                "SELECT version_num FROM alembic_version"
+            ) == "events_0014"
         finally:
             if restricted_pool is not None:
                 await restricted_pool.close()
@@ -1170,6 +1757,14 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                             await connection.execute(
                                 "DELETE FROM run_dispatches WHERE owner_id = 'owner' AND run_id IN "
                                 "(SELECT id FROM runs WHERE owner_id = 'owner' AND task_id = $1)",
+                                api_task_id,
+                            )
+                            await connection.execute(
+                                "DELETE FROM activity_event_outbox "
+                                "WHERE owner_id = 'owner' AND cursor IN "
+                                "(SELECT cursor FROM activity_events "
+                                "WHERE owner_id = 'owner' AND run_id IN "
+                                "(SELECT id FROM runs WHERE owner_id = 'owner' AND task_id = $1))",
                                 api_task_id,
                             )
                             for table in (
@@ -1212,6 +1807,16 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                                 "DELETE FROM agent_definitions WHERE owner_id = 'owner' AND id = $1",
                                 api_definition_id,
                             )
+                        if api_endpoint_id is not None:
+                            await connection.execute(
+                                "DELETE FROM model_endpoints WHERE owner_id = 'owner' AND id = $1",
+                                api_endpoint_id,
+                            )
+                        if api_archive_endpoint_id is not None:
+                            await connection.execute(
+                                "DELETE FROM model_endpoints WHERE owner_id = 'owner' AND id = $1",
+                                api_archive_endpoint_id,
+                            )
                         await connection.execute(
                             "DELETE FROM projects WHERE owner_id = 'owner' AND id = $1",
                             api_project_id,
@@ -1226,6 +1831,7 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                         "approval_requests",
                         "artifacts",
                         "run_activity_projections",
+                        "activity_event_outbox",
                         "activity_events",
                         "owner_event_cursors",
                     ):
@@ -1248,6 +1854,10 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                     )
                     await connection.execute(
                         "DELETE FROM provider_configs WHERE owner_id = $1",
+                        restricted_owner_id,
+                    )
+                    await connection.execute(
+                        "DELETE FROM model_endpoints WHERE owner_id = $1",
                         restricted_owner_id,
                     )
                     await connection.execute(
@@ -1333,11 +1943,75 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
             assert await project_repository.get_for_owner(owner_id, own.id) == own
             assert await project_repository.get_for_owner(owner_id, foreign.id) is None
 
+            endpoint_repository = PostgresModelEndpointRepository(sessions)
+            own_endpoint = await endpoint_repository.create(
+                owner_id,
+                ModelEndpointDraft.create(
+                    "Research endpoint",
+                    "https://provider.example/v1",
+                    "NINEROUTER_KEY",
+                    "openrouter/model:free",
+                ),
+            )
+            archivable_endpoint = await endpoint_repository.create(
+                owner_id,
+                ModelEndpointDraft.create(
+                    "Endpoint archive regression",
+                    "https://provider.example/v1",
+                    "NINEROUTER_KEY",
+                    "openrouter/model:free",
+                ),
+            )
+            archived_endpoint = await endpoint_repository.archive_for_owner(
+                owner_id, archivable_endpoint.id
+            )
+            assert archived_endpoint is not None
+            assert archived_endpoint.archived_at is not None
+            active_endpoint_ids = {
+                endpoint.id
+                for endpoint in await endpoint_repository.list_for_owner(
+                    owner_id, include_archived=False, limit=10, offset=0
+                )
+            }
+            all_endpoint_ids = {
+                endpoint.id
+                for endpoint in await endpoint_repository.list_for_owner(
+                    owner_id, include_archived=True, limit=10, offset=0
+                )
+            }
+            assert archivable_endpoint.id not in active_endpoint_ids
+            assert archivable_endpoint.id in all_endpoint_ids
+            foreign_endpoint = await endpoint_repository.create(
+                foreign_owner_id,
+                ModelEndpointDraft.create(
+                    "Private endpoint",
+                    "https://provider.example/v1",
+                    "NINEROUTER_KEY",
+                    "openrouter/model:free",
+                ),
+            )
+            own_configuration = AgentDefinitionConfiguration.create(
+                role="Researcher",
+                model_endpoint_id=own_endpoint.id,
+                model_id=own_endpoint.default_model_id,
+                allowed_tools=["read_file"],
+            )
+            foreign_configuration = AgentDefinitionConfiguration.create(
+                role="Private role",
+                model_endpoint_id=foreign_endpoint.id,
+                model_id=foreign_endpoint.default_model_id,
+                allowed_tools=["read_file"],
+            )
             own_definition = await definition_repository.create(
-                owner_id, "Researcher", "", "# Researcher", {}
+                owner_id, "Researcher", "", "# Researcher", {}, own_configuration
             )
             foreign_definition = await definition_repository.create(
-                foreign_owner_id, "Private role", "", "# Private", {}
+                foreign_owner_id,
+                "Private role",
+                "",
+                "# Private",
+                {},
+                foreign_configuration,
             )
             instance = await repository.create(
                 owner_id, "Mira", own_definition.id, own.id
@@ -1385,6 +2059,25 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                 owner_id, include_archived=True, limit=10, offset=0
             ) == [archived]
             assert await repository.get_for_owner(owner_id, foreign.id) is None
+            archived_definition = await definition_repository.archive_for_owner(
+                owner_id, own_definition.id
+            )
+            assert archived_definition is not None
+            assert archived_definition.archived_at is not None
+            assert await definition_repository.list_for_owner(
+                owner_id, include_archived=False, limit=10, offset=0
+            ) == []
+            archived_definitions = await definition_repository.list_for_owner(
+                owner_id, include_archived=True, limit=10, offset=0
+            )
+            assert [definition.id for definition in archived_definitions] == [
+                own_definition.id
+            ]
+            historical_definition = await definition_repository.get_for_owner(
+                owner_id, own_definition.id, version=1
+            )
+            assert historical_definition is not None
+            assert historical_definition.archived_at is not None
         finally:
             async with pool.acquire() as cleanup_connection:
                 async with cleanup_connection.transaction():
@@ -1402,6 +2095,10 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                     )
                     await cleanup_connection.execute(
                         "DELETE FROM agent_definitions WHERE owner_id = ANY($1::text[])",
+                        [owner_id, foreign_owner_id],
+                    )
+                    await cleanup_connection.execute(
+                        "DELETE FROM model_endpoints WHERE owner_id = ANY($1::text[])",
                         [owner_id, foreign_owner_id],
                     )
                     await cleanup_connection.execute(

@@ -12,7 +12,9 @@ import pytest
 from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
+from app.presentation.http.application import OwnerSessionStore
 
+from app.infrastructure.redis.activity_stream import ActivityEventHub
 from app.config import ConfigError, Settings
 from app.domain.evidence import (
     ActivityEvent,
@@ -45,6 +47,10 @@ def settings(*, attempts: int = 5) -> Settings:
         login_rate_limit_window_seconds=60,
     )
 
+
+def test_redis_url_rejects_non_redis_schemes() -> None:
+    with pytest.raises(ConfigError, match="REDIS_URL"):
+        replace(settings(), redis_url="http://redis:6379/0")
 
 def test_production_requires_https_and_secure_session_cookie() -> None:
     with pytest.raises(ConfigError):
@@ -86,6 +92,16 @@ class MemoryProjectRepository:
 
     def seed(self, project: Project) -> None:
         self.projects[project.id] = project
+
+class MemoryEmptyModelEndpointRepository:
+    async def get_for_owner(self, owner_id: str, endpoint_id: UUID):
+        return None
+
+    async def list_for_owner(
+        self, owner_id: str, *, include_archived: bool, limit: int, offset: int
+    ):
+        return []
+
 
 
 @pytest.fixture
@@ -293,30 +309,102 @@ def test_websocket_requires_exact_origin_and_owner_session(client: TestClient) -
             socket.receive_json()
 
 
+
+def test_websocket_closes_expired_session_before_live_fanout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expired = False
+    authenticate_session = OwnerSessionStore.authenticate
+
+    async def authenticate(self: OwnerSessionStore, token: str | None):
+        if expired:
+            return None
+        return await authenticate_session(self, token)
+
+    monkeypatch.setattr(OwnerSessionStore, "authenticate", authenticate)
+    hub = ActivityEventHub()
+
+    class EmptyEvents:
+        async def get_snapshot_for_owner(self, owner_id: str, *, limit: int):
+            return ActivitySnapshot(cursor=0, projections=())
+
+        async def list_events_after(self, owner_id: str, cursor: int, *, limit: int):
+            return []
+
+    app = create_app(
+        settings(),
+        database_check=database_ready,
+        project_repository=MemoryProjectRepository(),
+        activity_event_repository=EmptyEvents(),
+    )
+    with TestClient(app) as client:
+        client.app.state.activity_event_hub = hub
+        assert login(client).status_code == 200
+        with client.websocket_connect("/api/v1/ws", headers={"origin": ORIGIN}) as socket:
+            assert socket.receive_json()["type"] == "session_ready"
+            socket.send_json({"type": "subscribe"})
+            assert socket.receive_json()["type"] == "activity_snapshot"
+            expired = True
+            client.portal.call(
+                hub.publish,
+                {
+                    "event_id": str(uuid4()),
+                    "event_version": 1,
+                    "sequence": 1,
+                    "timestamp": datetime.now(UTC).isoformat(),
+                    "type": "run.started",
+                    "owner_id": "owner",
+                    "project_id": str(uuid4()),
+                    "agent_id": str(uuid4()),
+                    "run_id": str(uuid4()),
+                    "task_id": str(uuid4()),
+                    "payload": {
+                        "task_revision": 1,
+                        "source_sequence": 1,
+                        "safe_action_summary": None,
+                    },
+                },
+            )
+            with pytest.raises(WebSocketDisconnect):
+                socket.receive_json()
+
 def test_task_preflight_checks_active_assignment_and_fails_closed_without_runner() -> None:
     instance_id = uuid4()
+    definition_id = uuid4()
     task_id = uuid4()
     task = SimpleNamespace(agent_instance_id=instance_id)
-    instance = SimpleNamespace(archived_at=None)
+    instance = SimpleNamespace(archived_at=None, definition_id=definition_id)
 
     class MemoryTasks:
         async def get_for_owner(self, owner_id: str, requested_id: UUID):
             return task if owner_id == "owner" and requested_id == task_id else None
 
-    class MemoryProviders:
-        async def get_for_owner(self, owner_id: str):
-            return object() if owner_id == "owner" else None
+    class MemoryDefinitions:
+        async def get_for_owner(self, owner_id: str, requested_id: UUID, *, version: int | None = None):
+            if owner_id != "owner" or requested_id != definition_id:
+                return None
+            return SimpleNamespace(
+                id=definition_id,
+                version=1,
+                archived_at=None,
+                enabled=True,
+                configuration=None,
+            )
+
+    class MemoryEndpoints:
+        async def get_for_owner(self, owner_id: str, requested_id: UUID):
+            return None
 
     class MemoryInstances:
         async def get_for_owner(self, owner_id: str, requested_id: UUID):
             return instance if owner_id == "owner" and requested_id == instance_id else None
-
     with TestClient(
         create_app(
             settings(),
             database_check=database_ready,
             task_repository=MemoryTasks(),
-            provider_config_repository=MemoryProviders(),
+            agent_registry_repository=MemoryDefinitions(),
+            model_endpoint_repository=MemoryEndpoints(),
             agent_instance_repository=MemoryInstances(),
         )
     ) as client:
@@ -331,7 +419,7 @@ def test_task_preflight_checks_active_assignment_and_fails_closed_without_runner
         checks = {item["key"]: item["status"] for item in preflight["checks"]}
         assert checks == {
             "agent_assignment": "ready",
-            "provider_configuration": "ready",
+            "model_endpoint": "blocked",
             "workspace_policy": "unavailable",
             "tool_allowlist": "unavailable",
             "runner_connection": "unavailable",
@@ -451,10 +539,17 @@ def test_activity_reads_and_websocket_reconnect_are_owner_scoped() -> None:
         activity_response = client.get(f"/api/v1/runs/{run_id}/activity")
         assert activity_response.status_code == 200
         assert activity_response.json()["status"] == "running"
-        assert [item["event_type"] for item in activity_response.json()["events"]] == [
+        assert [item["type"] for item in activity_response.json()["events"]] == [
             "run.started",
             "run.waiting_input",
         ]
+        event = activity_response.json()["events"][0]
+        assert event["event_version"] == 1
+        assert event["sequence"] == 1
+        assert event["run_id"] == str(run_id)
+        assert event["task_id"] == str(task_id)
+        assert event["agent_id"] == str(instance_id)
+        assert event["payload"]["source_sequence"] == 1
         assert client.get(f"/api/v1/runs/{uuid4()}/activity").status_code == 404
         snapshot_response = client.get("/api/v1/activity/snapshot")
         assert snapshot_response.status_code == 200
@@ -468,4 +563,12 @@ def test_activity_reads_and_websocket_reconnect_are_owner_scoped() -> None:
             assert snapshot_message["cursor"] == 1
             event_message = socket.receive_json()
             assert event_message["type"] == "activity_events"
-            assert event_message["events"][0]["event_type"] == "run.waiting_input"
+            assert event_message["events"][0]["type"] == "run.waiting_input"
+        with client.websocket_connect("/api/v1/ws", headers={"origin": ORIGIN}) as socket:
+            assert socket.receive_json()["type"] == "session_ready"
+            socket.send_json({"type": "subscribe", "after_cursor": 1})
+            assert socket.receive_json()["type"] == "activity_snapshot"
+            replay = socket.receive_json()
+            assert replay["type"] == "activity_events"
+            assert replay["events"][0]["sequence"] == 2
+            assert replay["events"][0]["type"] == "run.waiting_input"

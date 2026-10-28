@@ -4,10 +4,12 @@ from dataclasses import dataclass
 from typing import Literal
 from uuid import UUID
 
+from app.application.agent_factory import AgentFactory, AgentFactoryError
 from app.domain.execution import ExecutionRepository
 from app.domain.instances import AgentInstanceRepository
+from app.domain.model_endpoints import ModelEndpointRepository
 from app.domain.projects import ProjectRepository
-from app.domain.provider_config import ProviderConfigRepository
+from app.domain.registry import AgentRegistryRepository
 from app.domain.tasks import TaskInputError, TaskRepository, TaskSpec
 
 
@@ -26,18 +28,23 @@ class TaskPreflight:
 
 
 class TaskWorkflow:
-    """Coordinates the read-only execution preflight for a task."""
+    """Coordinates read-only Agent Factory and workspace preflight for a Task."""
 
     def __init__(
         self,
         tasks: TaskRepository,
         instances: AgentInstanceRepository | None,
-        providers: ProviderConfigRepository,
+        definitions: AgentRegistryRepository | None,
+        endpoints: ModelEndpointRepository | None,
         execution: ExecutionRepository | None = None,
     ) -> None:
         self._tasks = tasks
         self._instances = instances
-        self._providers = providers
+        self._factory = (
+            None
+            if definitions is None or endpoints is None
+            else AgentFactory(definitions, endpoints)
+        )
         self._execution = execution
 
     async def preflight(self, owner_id: str, task_id: UUID) -> TaskPreflight | None:
@@ -45,6 +52,7 @@ class TaskWorkflow:
         if task is None:
             return None
 
+        instance = None
         if task.agent_instance_id is None:
             assignment = PreflightCheck(
                 "agent_assignment",
@@ -60,6 +68,7 @@ class TaskWorkflow:
         else:
             instance = await self._instances.get_for_owner(owner_id, task.agent_instance_id)
             if instance is None or instance.archived_at is not None:
+                instance = None
                 assignment = PreflightCheck(
                     "agent_assignment",
                     "blocked",
@@ -70,17 +79,6 @@ class TaskWorkflow:
                     "agent_assignment", "ready", "An active Agent Instance is assigned."
                 )
 
-        provider = await self._providers.get_for_owner(owner_id)
-        provider_check = PreflightCheck(
-            "provider_configuration",
-            "ready" if provider is not None else "blocked",
-            (
-                "A non-secret provider endpoint/model snapshot is configured."
-                if provider is not None
-                else "Configure a provider endpoint and model before execution."
-            ),
-        )
-
         policy = (
             None
             if self._execution is None
@@ -88,14 +86,10 @@ class TaskWorkflow:
         )
         if self._execution is None:
             workspace_check = PreflightCheck(
-                "workspace_policy",
-                "unavailable",
-                "Workspace policy storage is unavailable.",
+                "workspace_policy", "unavailable", "Workspace policy storage is unavailable."
             )
             tool_check = PreflightCheck(
-                "tool_allowlist",
-                "unavailable",
-                "Tool allowlist storage is unavailable.",
+                "tool_allowlist", "unavailable", "Tool allowlist storage is unavailable."
             )
         elif policy is None:
             workspace_check = PreflightCheck(
@@ -128,6 +122,57 @@ class TaskWorkflow:
                 ),
             )
 
+        resolved = None
+        if self._factory is None:
+            model_check = PreflightCheck(
+                "model_endpoint",
+                "unavailable",
+                "Agent Factory or Model Endpoint storage is unavailable.",
+            )
+        elif instance is None:
+            model_check = PreflightCheck(
+                "model_endpoint", "blocked", "An active Agent Instance is required."
+            )
+        else:
+            try:
+                resolved = await self._factory.resolve(
+                    owner_id,
+                    instance.definition_id,
+                    () if policy is None else policy.allowed_tools,
+                )
+            except AgentFactoryError as error:
+                detail = {
+                    "definition_inactive": "The Agent Definition is disabled or archived.",
+                    "configuration": "Configure a valid Agent Definition Version.",
+                    "model_endpoint": "Select an active Model Endpoint owned by this account.",
+                    "runtime": "The selected runtime is not registered.",
+                    "unknown_tool": "The Agent Definition selects an unregistered tool.",
+                    "unknown_project_tool": "The project policy contains an unregistered tool.",
+                }.get(error.reason, "Agent Factory configuration validation failed.")
+                model_check = PreflightCheck("model_endpoint", "blocked", detail)
+            else:
+                model_check = PreflightCheck(
+                    "model_endpoint",
+                    "ready",
+                    "The active Agent Definition Version and Model Endpoint are registered.",
+                )
+                if policy is not None and policy.allowed_tools:
+                    if (
+                        resolved.configuration.allowed_tools
+                        and not resolved.effective_tools
+                    ):
+                        tool_check = PreflightCheck(
+                            "tool_allowlist",
+                            "blocked",
+                            "No selected Agent Definition tools are permitted by the project policy.",
+                        )
+                    elif resolved.effective_tools:
+                        tool_check = PreflightCheck(
+                            "tool_allowlist",
+                            "ready",
+                            "Effective tools: " + ", ".join(resolved.effective_tools) + ".",
+                        )
+
         runner = (
             None
             if self._execution is None
@@ -152,7 +197,7 @@ class TaskWorkflow:
                 "provider_credentials",
                 "ready" if runner.provider_ready else "blocked",
                 (
-                    "Runner has the provider credential required for inference."
+                    "Runner has the configured provider credential required for inference."
                     if runner.provider_ready
                     else "Set NINEROUTER_KEY in the Runner environment before executing."
                 ),
@@ -160,7 +205,7 @@ class TaskWorkflow:
 
         checks = (
             assignment,
-            provider_check,
+            model_check,
             workspace_check,
             tool_check,
             runner_check,

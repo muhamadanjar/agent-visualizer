@@ -16,9 +16,11 @@ ACTIVITY_EVENT_TYPES = frozenset(
         "run.waiting_approval",
         "run.blocked",
         "run.tool_action",
+        "run.cancellation_pending",
         "run.succeeded",
         "run.failed",
         "run.canceled",
+        "run.unknown",
         "session.heartbeat",
     }
 )
@@ -27,11 +29,13 @@ EVENT_STATUS = {
     "run.waiting_input": "waiting_input",
     "run.waiting_approval": "waiting_approval",
     "run.blocked": "blocked",
+    "run.cancellation_pending": "running",
     "run.succeeded": "succeeded",
     "run.failed": "failed",
     "run.canceled": "canceled",
+    "run.unknown": "unknown",
 }
-TERMINAL_RUN_STATES = frozenset({"succeeded", "failed", "canceled"})
+TERMINAL_RUN_STATES = frozenset({"succeeded", "failed", "canceled", "unknown"})
 ACTION_DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 SCENE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,79}\Z")
 MAX_SCENE_CONTENT_BYTES = 262_144
@@ -159,6 +163,39 @@ class ActivityEventRepository(Protocol):
     async def list_events_after(
         self, owner_id: str, cursor: int, *, limit: int
     ) -> list[ActivityEvent]: ...
+
+    async def claim_outbox_batch(
+        self, claim_id: UUID, *, limit: int, lease_seconds: int
+    ) -> list[ActivityEvent]: ...
+
+    async def mark_outbox_published(
+        self, owner_id: str, cursor: int, claim_id: UUID
+    ) -> bool: ...
+
+    async def release_outbox_claim(
+        self, owner_id: str, cursor: int, claim_id: UUID
+    ) -> None: ...
+
+
+def activity_event_envelope(event: ActivityEvent) -> dict[str, object]:
+    """Convert persisted Activity Event data to the versioned PRD wire contract."""
+    return {
+        "event_id": str(event.event_id),
+        "event_version": event.schema_version,
+        "sequence": event.cursor,
+        "timestamp": event.occurred_at.isoformat(),
+        "type": event.event_type,
+        "owner_id": event.owner_id,
+        "project_id": str(event.project_id),
+        "agent_id": str(event.agent_instance_id),
+        "run_id": str(event.run_id),
+        "task_id": str(event.task_id),
+        "payload": {
+            "task_revision": event.task_revision,
+            "source_sequence": event.source_sequence,
+            "safe_action_summary": event.action_summary,
+        },
+    }
 
 
 def _same_event(row: Mapping[str, object], event: ActivityEventDraft) -> bool:

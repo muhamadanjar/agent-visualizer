@@ -25,7 +25,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, W
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt, StrictStr, field_validator
 from app.domain.execution import (
     ALLOWED_WORKSPACE_TOOLS,
     ExecutionPolicyInputError,
@@ -34,6 +34,10 @@ from app.domain.execution import (
     WorkspacePolicyDraft,
 )
 from app.application.tasks import TaskWorkflow, validate_task_references
+from app.domain.agent_configuration import (
+    AgentConfigurationInputError,
+    AgentDefinitionConfiguration,
+)
 from app.domain.common import NameConflictError, SkillPin
 from app.domain.evidence import (
     ActivityEvent,
@@ -48,18 +52,20 @@ from app.domain.evidence import (
     OfficeSceneRepository,
     OfficeSceneVersion,
     RunActivityProjection,
+    activity_event_envelope,
 )
 from app.domain.instances import AgentInstance, AgentInstanceInputError, AgentInstanceRepository
 from app.domain.projects import Project, ProjectRepository
-from app.domain.provider_config import (
-    ProviderConfig,
-    ProviderConfigDraft,
-    ProviderConfigInputError,
-    ProviderConfigRepository,
+from app.domain.model_endpoints import (
+    ModelEndpoint,
+    ModelEndpointDraft,
+    ModelEndpointInputError,
+    ModelEndpointRepository,
 )
 from app.domain.registry import (
     AgentDefinition,
     AgentDefinitionInputError,
+    AgentRegistryConflictError,
     AgentRegistryRepository,
     parse_agent_markdown,
 )
@@ -70,6 +76,10 @@ from app.domain.skills import (
     SkillRepository,
     SkillSummary,
     normalize_skill_content,
+)
+from app.domain.run_results import (
+    RunResultConflictError,
+    RunResultRepository,
 )
 from app.domain.tasks import Task, TaskInputError, TaskRepository, TaskSpec
 
@@ -334,15 +344,70 @@ class RunnerEventRequest(BaseModel):
         "run.waiting_approval",
         "run.blocked",
         "run.tool_action",
+        "run.cancellation_pending",
         "run.succeeded",
         "run.failed",
         "run.canceled",
+        "run.unknown",
         "session.heartbeat",
     ]
     occurred_at: datetime
     source_sequence: StrictInt = Field(ge=0)
     tool_name: Literal["list_files", "read_file", "write_file"] | None = None
 
+
+
+class RunnerRunHeartbeatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    runner_id: UUID
+    run_id: UUID
+
+
+class RunnerCancellationPollRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    runner_id: UUID
+
+
+class RunnerLeaseStatusRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    runner_id: UUID
+    run_ids: list[UUID] = Field(min_length=1, max_length=2)
+
+    @field_validator("run_ids")
+    @classmethod
+    def unique_run_ids(cls, values: list[UUID]) -> list[UUID]:
+        if len(values) != len(set(values)):
+            raise ValueError("Run IDs must be unique")
+        return values
+
+
+class RunnerResultRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    runner_id: UUID
+    run_id: UUID
+    text: StrictStr = Field(min_length=1)
+
+    @field_validator("text")
+    @classmethod
+    def validate_result_size(cls, value: str) -> str:
+        if not value.strip() or len(value.encode("utf-8")) > 1_048_576:
+            raise ValueError("Run Result must be non-empty and at most 1 MiB")
+        return value
+
+
+class RunResultResponse(BaseModel):
+    run_id: UUID
+    text: str
+    byte_length: int
+    created_at: datetime
+
+
+class RunCancellationResponse(BaseModel):
+    status: Literal["cancellation_pending"]
 
 class RunnerClaimResponse(BaseModel):
     owner_id: str
@@ -431,32 +496,69 @@ class RunCreate(BaseModel):
     request_id: UUID
 
 
-class ProviderConfigWrite(BaseModel):
+class ModelEndpointWrite(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    name: StrictStr = Field(min_length=1, max_length=120)
     endpoint_url: StrictStr = Field(min_length=1, max_length=2048)
-    model_id: StrictStr = Field(min_length=1, max_length=200)
-    route: StrictStr | None = Field(default=None, min_length=1, max_length=120)
+    credential_env: StrictStr
+    default_model_id: StrictStr = Field(min_length=1, max_length=200)
+    default_route: StrictStr | None = Field(default=None, max_length=120)
 
 
-class ProviderConfigResponse(BaseModel):
-    version: int
+class ModelEndpointResponse(BaseModel):
+    id: UUID
+    name: str
     adapter: str
     endpoint_url: str
-    model_id: str
-    route: str | None
-    updated_at: datetime
+    credential_env: str
+    default_model_id: str
+    default_route: str | None
+    archived: bool
+    created_at: datetime
 
 
-def _provider_config_response(config: ProviderConfig) -> ProviderConfigResponse:
-    return ProviderConfigResponse(
-        version=config.version,
-        adapter=config.adapter,
-        endpoint_url=config.endpoint_url,
-        model_id=config.model_id,
-        route=config.route,
-        updated_at=config.updated_at,
+def _model_endpoint_response(endpoint: ModelEndpoint) -> ModelEndpointResponse:
+    return ModelEndpointResponse(
+        id=endpoint.id,
+        name=endpoint.name,
+        adapter=endpoint.adapter,
+        endpoint_url=endpoint.endpoint_url,
+        credential_env=endpoint.credential_env,
+        default_model_id=endpoint.default_model_id,
+        default_route=endpoint.default_route,
+        archived=endpoint.archived_at is not None,
+        created_at=endpoint.created_at,
     )
+
+
+class AgentConfigurationWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: StrictStr = Field(min_length=1, max_length=120)
+    model_endpoint_id: UUID
+    model_id: StrictStr = Field(min_length=1, max_length=200)
+    route: StrictStr | None = Field(default=None, max_length=120)
+    runtime_id: Literal["langchain"] = "langchain"
+    temperature: StrictFloat | StrictInt | None = None
+    max_iterations: StrictInt = Field(ge=1, le=100)
+    concurrency_limit: StrictInt = Field(ge=1, le=20)
+    execution_timeout_seconds: StrictInt = Field(ge=1, le=86400)
+    allowed_tools: list[StrictStr] = Field(default_factory=list, max_length=3)
+
+    def to_domain(self) -> AgentDefinitionConfiguration:
+        return AgentDefinitionConfiguration.create(
+            role=self.role,
+            model_endpoint_id=self.model_endpoint_id,
+            model_id=self.model_id,
+            route=self.route,
+            runtime_id=self.runtime_id,
+            temperature=self.temperature,
+            max_iterations=self.max_iterations,
+            concurrency_limit=self.concurrency_limit,
+            execution_timeout_seconds=self.execution_timeout_seconds,
+            allowed_tools=self.allowed_tools,
+        )
 
 class RunResponse(BaseModel):
     id: UUID
@@ -481,14 +583,24 @@ def _run_response(run: Run) -> RunResponse:
         created_at=run.created_at,
     )
 
-class ActivityEventResponse(BaseModel):
-    cursor: int
-    run_id: UUID
-    event_id: UUID
-    event_type: str
-    occurred_at: datetime
+class ActivityEventPayloadResponse(BaseModel):
+    task_revision: int
     source_sequence: int | None
     safe_action_summary: str | None
+
+
+class ActivityEventResponse(BaseModel):
+    event_id: UUID
+    event_version: int
+    sequence: int
+    timestamp: datetime
+    type: str
+    owner_id: str
+    project_id: UUID
+    agent_id: UUID
+    run_id: UUID
+    task_id: UUID
+    payload: ActivityEventPayloadResponse
 
 
 class RunActivityResponse(BaseModel):
@@ -577,14 +689,22 @@ class TaskPreflightResponse(BaseModel):
 
 
 def _activity_event_response(event: ActivityEvent) -> ActivityEventResponse:
+    envelope = activity_event_envelope(event)
+    payload = envelope["payload"]
+    if not isinstance(payload, dict):
+        raise RuntimeError("Activity Event payload must be an object")
     return ActivityEventResponse(
-        cursor=event.cursor,
-        run_id=event.run_id,
         event_id=event.event_id,
-        event_type=event.event_type,
-        occurred_at=event.occurred_at,
-        source_sequence=event.source_sequence,
-        safe_action_summary=event.action_summary,
+        event_version=event.schema_version,
+        sequence=event.cursor,
+        timestamp=event.occurred_at,
+        type=event.event_type,
+        owner_id=event.owner_id,
+        project_id=event.project_id,
+        agent_id=event.agent_instance_id,
+        run_id=event.run_id,
+        task_id=event.task_id,
+        payload=ActivityEventPayloadResponse(**payload),
     )
 
 
@@ -752,12 +872,18 @@ def _agent_instance_response(instance: AgentInstance) -> AgentInstanceResponse:
     )
 
 
+class AgentEnabledWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: StrictBool
+
 class AgentDefinitionImport(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     source_markdown: StrictStr = Field(min_length=1)
     name: StrictStr | None = Field(default=None, max_length=120)
     description: StrictStr | None = Field(default=None, max_length=500)
+    configuration: AgentConfigurationWrite | None = None
 
 
 class AgentDefinitionUpdate(BaseModel):
@@ -766,6 +892,7 @@ class AgentDefinitionUpdate(BaseModel):
     source_markdown: StrictStr | None = Field(default=None, min_length=1)
     name: StrictStr | None = Field(default=None, max_length=120)
     description: StrictStr | None = Field(default=None, max_length=500)
+    configuration: AgentConfigurationWrite | None = None
 
 
 class SkillResourceRequest(BaseModel):
@@ -845,6 +972,8 @@ class AgentDefinitionResponse(BaseModel):
     description: str
     source_markdown: str
     unmapped_metadata: dict[str, object]
+    configuration: dict[str, object] | None
+    enabled: bool
     archived: bool
     created_at: datetime
     skills: list[DefinitionSkillReferenceResponse] = Field(default_factory=list)
@@ -855,6 +984,8 @@ class AgentDefinitionSummary(BaseModel):
     version: int
     name: str
     description: str
+    configured: bool
+    enabled: bool
     archived: bool
     created_at: datetime
 
@@ -865,6 +996,8 @@ def _agent_definition_summary(definition: AgentDefinition) -> AgentDefinitionSum
         version=definition.version,
         name=definition.name,
         description=definition.description,
+        configured=definition.configuration is not None,
+        enabled=definition.enabled,
         archived=definition.archived_at is not None,
         created_at=definition.created_at,
     )
@@ -878,6 +1011,10 @@ def _agent_definition_response(definition: AgentDefinition) -> AgentDefinitionRe
         description=definition.description,
         source_markdown=definition.source_markdown,
         unmapped_metadata=definition.unmapped_metadata,
+        configuration=(
+            None if definition.configuration is None else definition.configuration.to_json()
+        ),
+        enabled=definition.enabled,
         archived=definition.archived_at is not None,
         created_at=definition.created_at,
         skills=[
@@ -1027,10 +1164,16 @@ def create_http_app(
             raise HTTPException(status_code=503, detail="Run storage is not ready")
         return repository
 
-    def require_provider_config_repository(request: Request) -> ProviderConfigRepository:
-        repository = getattr(request.app.state, "provider_config_repository", None)
+    def require_run_result_repository(request: Request) -> RunResultRepository:
+        repository = getattr(request.app.state, "run_result_repository", None)
         if repository is None:
-            raise HTTPException(status_code=503, detail="Provider configuration storage is not ready")
+            raise HTTPException(status_code=503, detail="Run Result storage is not ready")
+        return repository
+
+    def require_model_endpoint_repository(request: Request) -> ModelEndpointRepository:
+        repository = getattr(request.app.state, "model_endpoint_repository", None)
+        if repository is None:
+            raise HTTPException(status_code=503, detail="Model Endpoint storage is not ready")
         return repository
     def optional_execution_repository(request: Request) -> ExecutionRepository | None:
         return getattr(request.app.state, "execution_repository", None)
@@ -1211,6 +1354,7 @@ def create_http_app(
             "run.succeeded",
             "run.failed",
             "run.canceled",
+            "run.unknown",
         }
         try:
             if terminal_event:
@@ -1243,6 +1387,84 @@ def create_http_app(
             "acknowledged": True,
             "replayed": not created,
         }
+
+    @application.post("/internal/runner/run-heartbeat")
+    async def runner_run_heartbeat(
+        body: RunnerRunHeartbeatRequest,
+        request: Request,
+        execution: ExecutionRepository = Depends(require_execution_repository),
+    ) -> dict[str, bool]:
+        authenticate_runner(request)
+        active = await execution.heartbeat_run(
+            body.runner_id, body.run_id, lease_seconds=120
+        )
+        return {"active": active}
+
+    @application.post("/internal/runner/cancel-requests")
+    async def runner_cancel_requests(
+        body: RunnerCancellationPollRequest,
+        request: Request,
+        execution: ExecutionRepository = Depends(require_execution_repository),
+    ) -> dict[str, list[str]]:
+        authenticate_runner(request)
+        run_ids = await execution.get_cancellation_requests(body.runner_id)
+        return {"run_ids": [str(run_id) for run_id in run_ids]}
+
+    @application.post("/internal/runner/lease-status")
+    async def runner_lease_status(
+        body: RunnerLeaseStatusRequest,
+        request: Request,
+        execution: ExecutionRepository = Depends(require_execution_repository),
+    ) -> dict[str, list[dict[str, object]]]:
+        authenticate_runner(request)
+        statuses = await execution.get_lease_statuses(
+            body.runner_id, body.run_ids
+        )
+        return {
+            "runs": [
+                {
+                    "run_id": str(status.run_id),
+                    "runner_id": (
+                        str(status.runner_id) if status.runner_id is not None else None
+                    ),
+                    "state": status.state,
+                    "active_lease": status.active_lease,
+                    "lease_expires_at": status.lease_expires_at,
+                    "max_duration_seconds": status.max_duration_seconds,
+                    "cancellation_requested": status.cancellation_requested,
+                }
+                for status in statuses
+            ]
+        }
+
+    @application.post("/internal/runner/results")
+    async def save_runner_result(
+        body: RunnerResultRequest,
+        request: Request,
+        execution: ExecutionRepository = Depends(require_execution_repository),
+        results: RunResultRepository = Depends(require_run_result_repository),
+    ) -> dict[str, bool]:
+        authenticate_runner(request)
+        context = await execution.get_run_context_for_runner(
+            body.runner_id, body.run_id
+        )
+        statuses = await execution.get_lease_statuses(body.runner_id, [body.run_id])
+        if (
+            context is None
+            or not statuses
+            or statuses[0].runner_id != body.runner_id
+            or not statuses[0].active_lease
+        ):
+            raise HTTPException(status_code=409, detail="Run lease is not active")
+        try:
+            await results.create_for_run(context.owner_id, body.run_id, body.text)
+        except RunResultConflictError as error:
+            raise HTTPException(
+                status_code=409, detail="Run Result conflicts with stored result"
+            ) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail="Run Result is invalid") from error
+        return {"accepted": True}
 
     @application.post(
         "/api/v1/projects",
@@ -1439,11 +1661,12 @@ def create_http_app(
         task_id: UUID,
         principal: OwnerPrincipal = Depends(require_owner),
         tasks: TaskRepository = Depends(require_task_repository),
-        providers: ProviderConfigRepository = Depends(require_provider_config_repository),
+        definitions: AgentRegistryRepository = Depends(require_agent_registry_repository),
+        endpoints: ModelEndpointRepository = Depends(require_model_endpoint_repository),
         instances: AgentInstanceRepository | None = Depends(optional_agent_instance_repository),
         execution: ExecutionRepository | None = Depends(optional_execution_repository),
     ) -> TaskPreflightResponse:
-        workflow = TaskWorkflow(tasks, instances, providers, execution)
+        workflow = TaskWorkflow(tasks, instances, definitions, endpoints, execution)
         preflight = await workflow.preflight(principal.owner_id, task_id)
         if preflight is None:
             raise HTTPException(status_code=404, detail="Resource not found")
@@ -1507,13 +1730,14 @@ def create_http_app(
         response: Response,
         principal: OwnerPrincipal = Depends(require_owner),
         tasks: TaskRepository = Depends(require_task_repository),
-        providers: ProviderConfigRepository = Depends(require_provider_config_repository),
+        definitions: AgentRegistryRepository = Depends(require_agent_registry_repository),
+        endpoints: ModelEndpointRepository = Depends(require_model_endpoint_repository),
         instances: AgentInstanceRepository | None = Depends(optional_agent_instance_repository),
         execution: ExecutionRepository = Depends(require_execution_repository),
         repository: RunRepository = Depends(require_run_repository),
     ) -> RunResponse:
         require_origin(request.headers.get("origin"))
-        workflow = TaskWorkflow(tasks, instances, providers, execution)
+        workflow = TaskWorkflow(tasks, instances, definitions, endpoints, execution)
         preflight = await workflow.preflight(principal.owner_id, task_id)
         if preflight is None:
             raise HTTPException(status_code=404, detail="Resource not found")
@@ -1560,6 +1784,11 @@ def create_http_app(
                     status_code=409,
                     detail="A pinned skill is unavailable for a new run",
                 ) from error
+            if error.reason in {"configuration", "model_endpoint"}:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Agent Definition configuration or Model Endpoint is unavailable",
+                ) from error
             if error.reason == "execution_policy":
                 raise HTTPException(
                     status_code=409,
@@ -1601,6 +1830,50 @@ def create_http_app(
         if run is None:
             raise HTTPException(status_code=404, detail="Resource not found")
         return _run_response(run)
+
+    @application.post(
+        "/api/v1/runs/{run_id}/cancel",
+        status_code=202,
+        response_model=RunCancellationResponse,
+    )
+    async def cancel_run(
+        run_id: UUID,
+        request: Request,
+        principal: OwnerPrincipal = Depends(require_owner),
+        runs: RunRepository = Depends(require_run_repository),
+        execution: ExecutionRepository = Depends(require_execution_repository),
+    ) -> RunCancellationResponse:
+        require_origin(request.headers.get("origin"))
+        if await runs.get_for_owner(principal.owner_id, run_id) is None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        state = await execution.request_cancellation(principal.owner_id, run_id)
+        if state == "cancellation_pending":
+            return RunCancellationResponse(status=state)
+        if state is None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        raise HTTPException(status_code=409, detail="Run is not active")
+
+    @application.get(
+        "/api/v1/runs/{run_id}/result",
+        response_model=RunResultResponse,
+    )
+    async def get_run_result(
+        run_id: UUID,
+        principal: OwnerPrincipal = Depends(require_owner),
+        runs: RunRepository = Depends(require_run_repository),
+        results: RunResultRepository = Depends(require_run_result_repository),
+    ) -> RunResultResponse:
+        if await runs.get_for_owner(principal.owner_id, run_id) is None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        result = await results.get_for_owner(principal.owner_id, run_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Run Result is not available")
+        return RunResultResponse(
+            run_id=result.run_id,
+            text=result.text,
+            byte_length=result.byte_length,
+            created_at=result.created_at,
+        )
 
 
     @application.get(
@@ -1776,44 +2049,65 @@ def create_http_app(
                 ) from error
             raise HTTPException(status_code=422, detail="Invalid office scene version") from error
         return _office_scene_response(scene)
-    @application.get(
-        "/api/v1/provider-config",
-        response_model=ProviderConfigResponse,
-    )
-    async def get_provider_config(
+    @application.get("/api/v1/model-endpoints", response_model=list[ModelEndpointResponse])
+    async def list_model_endpoints(
+        include_archived: bool = False,
+        limit: int = Query(default=100, ge=1, le=200),
+        offset: int = Query(default=0, ge=0, le=1_000_000),
         principal: OwnerPrincipal = Depends(require_owner),
-        repository: ProviderConfigRepository = Depends(require_provider_config_repository),
-    ) -> ProviderConfigResponse:
-        config = await repository.get_for_owner(principal.owner_id)
-        if config is None:
-            raise HTTPException(status_code=404, detail="Provider configuration not found")
-        return _provider_config_response(config)
+        repository: ModelEndpointRepository = Depends(require_model_endpoint_repository),
+    ) -> list[ModelEndpointResponse]:
+        endpoints = await repository.list_for_owner(
+            principal.owner_id,
+            include_archived=include_archived,
+            limit=limit,
+            offset=offset,
+        )
+        return [_model_endpoint_response(endpoint) for endpoint in endpoints]
 
-    @application.put(
-        "/api/v1/provider-config",
-        response_model=ProviderConfigResponse,
+    @application.post(
+        "/api/v1/model-endpoints",
+        status_code=201,
+        response_model=ModelEndpointResponse,
     )
-    async def set_provider_config(
-        body: ProviderConfigWrite,
+    async def create_model_endpoint(
+        body: ModelEndpointWrite,
         request: Request,
         principal: OwnerPrincipal = Depends(require_owner),
-        repository: ProviderConfigRepository = Depends(require_provider_config_repository),
-    ) -> ProviderConfigResponse:
+        repository: ModelEndpointRepository = Depends(require_model_endpoint_repository),
+    ) -> ModelEndpointResponse:
         require_origin(request.headers.get("origin"))
         try:
-            draft = ProviderConfigDraft.create(
+            draft = ModelEndpointDraft.create(
+                body.name,
                 body.endpoint_url,
-                body.model_id,
-                body.route,
+                body.credential_env,
+                body.default_model_id,
+                body.default_route,
             )
-        except ProviderConfigInputError as error:
+        except ModelEndpointInputError as error:
             raise HTTPException(
                 status_code=422,
-                detail=f"Invalid provider configuration field: {error.reason}",
+                detail=f"Invalid Model Endpoint field: {error.reason}",
             ) from error
-        config = await repository.upsert_for_owner(principal.owner_id, draft)
-        return _provider_config_response(config)
+        endpoint = await repository.create(principal.owner_id, draft)
+        return _model_endpoint_response(endpoint)
 
+    @application.post(
+        "/api/v1/model-endpoints/{endpoint_id}/archive",
+        response_model=ModelEndpointResponse,
+    )
+    async def archive_model_endpoint(
+        endpoint_id: UUID,
+        request: Request,
+        principal: OwnerPrincipal = Depends(require_owner),
+        repository: ModelEndpointRepository = Depends(require_model_endpoint_repository),
+    ) -> ModelEndpointResponse:
+        require_origin(request.headers.get("origin"))
+        endpoint = await repository.archive_for_owner(principal.owner_id, endpoint_id)
+        if endpoint is None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        return _model_endpoint_response(endpoint)
     @application.post(
         "/api/v1/agent-instances",
         status_code=201,
@@ -1837,6 +2131,11 @@ def create_http_app(
             raise HTTPException(
                 status_code=409,
                 detail="Archived definitions cannot be assigned to new instances",
+            )
+        if not definition.enabled:
+            raise HTTPException(
+                status_code=409,
+                detail="Disabled definitions cannot be assigned to new instances",
             )
         if body.project_id is not None:
             project = await project_repository.get_for_owner(
@@ -1929,6 +2228,11 @@ def create_http_app(
                     status_code=409,
                     detail="Archived definitions cannot be assigned to instances",
                 )
+            if not definition.enabled:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Disabled definitions cannot be assigned to instances",
+                )
         if body.project_id is not None:
             project = await project_repository.get_for_owner(
                 principal.owner_id, body.project_id
@@ -1973,6 +2277,7 @@ def create_http_app(
         request: Request,
         principal: OwnerPrincipal = Depends(require_owner),
         repository: AgentRegistryRepository = Depends(require_agent_registry_repository),
+        endpoints: ModelEndpointRepository = Depends(require_model_endpoint_repository),
     ) -> AgentDefinitionResponse:
         require_origin(request.headers.get("origin"))
         try:
@@ -1982,17 +2287,29 @@ def create_http_app(
                 name=body.name,
                 description=body.description,
             )
+            configuration = None if body.configuration is None else body.configuration.to_domain()
+            if configuration is not None:
+                endpoint = await endpoints.get_for_owner(
+                    principal.owner_id, configuration.model_endpoint_id
+                )
+                if endpoint is None or endpoint.archived_at is not None:
+                    raise AgentConfigurationInputError("model_endpoint_id")
             definition = await repository.create(
                 principal.owner_id,
                 name,
                 description,
                 body.source_markdown,
                 unmapped,
+                configuration,
             )
+        except AgentRegistryConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
         except AgentDefinitionInputError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
-        except NameConflictError as error:
-            raise HTTPException(status_code=409, detail="An agent definition with this name already exists") from error
+        except AgentConfigurationInputError as error:
+            raise HTTPException(
+                status_code=422, detail=f"Invalid agent configuration field: {error.reason}"
+            ) from error
         return _agent_definition_response(definition)
 
     @application.get(
@@ -2059,6 +2376,7 @@ def create_http_app(
         request: Request,
         principal: OwnerPrincipal = Depends(require_owner),
         repository: AgentRegistryRepository = Depends(require_agent_registry_repository),
+        endpoints: ModelEndpointRepository = Depends(require_model_endpoint_repository),
     ) -> AgentDefinitionResponse:
         require_origin(request.headers.get("origin"))
         if not body.model_fields_set:
@@ -2097,13 +2415,25 @@ def create_http_app(
             if "name" in changes and not changes["name"]:
                 raise HTTPException(status_code=422, detail="name must not be blank")
         try:
+            if body.configuration is not None:
+                configuration = body.configuration.to_domain()
+                endpoint = await endpoints.get_for_owner(
+                    principal.owner_id, configuration.model_endpoint_id
+                )
+                if endpoint is None or endpoint.archived_at is not None:
+                    raise AgentConfigurationInputError("model_endpoint_id")
+                changes["configuration"] = configuration
             definition = await repository.update_for_owner(
                 principal.owner_id, definition_id, changes
             )
+        except AgentRegistryConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
         except AgentDefinitionInputError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
-        except NameConflictError as error:
-            raise HTTPException(status_code=409, detail="An agent definition with this name already exists") from error
+        except AgentConfigurationInputError as error:
+            raise HTTPException(
+                status_code=422, detail=f"Invalid agent configuration field: {error.reason}"
+            ) from error
         if definition is None:
             raise HTTPException(status_code=404, detail="Resource not found")
         return _agent_definition_response(definition)
@@ -2123,6 +2453,40 @@ def create_http_app(
         if definition is None:
             raise HTTPException(status_code=404, detail="Resource not found")
         return _agent_definition_response(definition)
+    @application.put(
+        "/api/v1/agent-definitions/{definition_id}/enabled",
+        response_model=AgentDefinitionResponse,
+    )
+    async def set_agent_definition_enabled(
+        definition_id: UUID,
+        body: AgentEnabledWrite,
+        request: Request,
+        principal: OwnerPrincipal = Depends(require_owner),
+        repository: AgentRegistryRepository = Depends(require_agent_registry_repository),
+        endpoints: ModelEndpointRepository = Depends(require_model_endpoint_repository),
+    ) -> AgentDefinitionResponse:
+        require_origin(request.headers.get("origin"))
+        if body.enabled:
+            current = await repository.get_for_owner(principal.owner_id, definition_id)
+            if current is None or current.archived_at is not None:
+                raise HTTPException(status_code=404, detail="Resource not found")
+            if current.configuration is None:
+                raise HTTPException(status_code=409, detail="Configure the Agent Definition before enabling it")
+            endpoint = await endpoints.get_for_owner(
+                principal.owner_id, current.configuration.model_endpoint_id
+            )
+            if endpoint is None or endpoint.archived_at is not None:
+                raise HTTPException(status_code=409, detail="Configure an active Model Endpoint before enabling the definition")
+        try:
+            definition = await repository.set_enabled_for_owner(
+                principal.owner_id, definition_id, body.enabled
+            )
+        except (AgentRegistryConflictError, AgentDefinitionInputError) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        if definition is None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        return _agent_definition_response(definition)
+
 
     @application.put(
         "/api/v1/agent-definitions/{definition_id}/skills",
@@ -2349,90 +2713,161 @@ def create_http_app(
             await websocket.close(code=1008)
             return
 
+        queue: asyncio.Queue[dict[str, object]] | None = None
+        event_cursor = 0
+        receive_task = asyncio.create_task(websocket.receive_json())
+
+        async def send_persisted_events(
+            after_cursor: int,
+            through_cursor: int | None = None,
+            *,
+            message_type: str = "activity_events",
+        ) -> int:
+            cursor = after_cursor
+            while True:
+                events = await repository.list_events_after(
+                    principal.owner_id, cursor, limit=200
+                )
+                if through_cursor is not None:
+                    events = [event for event in events if event.cursor <= through_cursor]
+                if not events:
+                    return cursor
+                await websocket.send_json(
+                    {
+                        "type": message_type,
+                        "cursor": events[-1].cursor,
+                        "events": [
+                            _activity_event_response(event).model_dump(mode="json")
+                            for event in events
+                        ],
+                    }
+                )
+                cursor = events[-1].cursor
+                if len(events) < 200 or (
+                    through_cursor is not None and cursor >= through_cursor
+                ):
+                    return cursor
+
         try:
             await websocket.send_json({"type": "session_ready", "owner_id": principal.owner_id})
-            event_cursor: int | None = None
             while True:
                 timeout = max(0.0, expires_at - time.monotonic())
-                try:
-                    message = await asyncio.wait_for(
-                        websocket.receive_json(),
-                        timeout=min(timeout, 1.0),
-                    )
-                except asyncio.TimeoutError:
+                queue_task = asyncio.create_task(queue.get()) if queue is not None else None
+                waiters = {receive_task}
+                if queue_task is not None:
+                    waiters.add(queue_task)
+                done, pending = await asyncio.wait(
+                    waiters,
+                    timeout=min(timeout, 15.0),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if queue_task is not None and queue_task not in done:
+                    queue_task.cancel()
+                    await asyncio.gather(queue_task, return_exceptions=True)
+                if not done:
+                    if await sessions.authenticate(session_token) is None or timeout <= 15.0:
+                        await websocket.close(code=1008)
+                        return
+                    continue
+
+                if receive_task in done:
+                    message = receive_task.result()
+                    receive_task = asyncio.create_task(websocket.receive_json())
                     if await sessions.authenticate(session_token) is None:
                         await websocket.close(code=1008)
                         return
-                    if event_cursor is None:
-                        if timeout <= 1.0:
-                            await websocket.close(code=1008)
+                    if message == {"type": "ping"}:
+                        await websocket.send_json({"type": "pong"})
+                    elif (
+                        isinstance(message, dict)
+                        and message.get("type") == "subscribe"
+                        and set(message) in ({"type"}, {"type", "after_cursor"})
+                    ):
+                        after_cursor = message.get("after_cursor")
+                        if after_cursor is not None and (
+                            not isinstance(after_cursor, int)
+                            or isinstance(after_cursor, bool)
+                            or after_cursor < 0
+                        ):
+                            await websocket.close(code=1003)
                             return
-                        continue
-                    repository = getattr(
-                        websocket.app.state, "activity_event_repository", None
-                    )
-                    if repository is None:
-                        await websocket.send_json(
-                            {"type": "activity_unavailable", "cursor": event_cursor}
+                        if queue is not None:
+                            websocket.app.state.activity_event_hub.unsubscribe(
+                                principal.owner_id, queue
+                            )
+                        hub = getattr(websocket.app.state, "activity_event_hub", None)
+                        queue = hub.subscribe(principal.owner_id) if hub is not None else None
+                        repository = getattr(
+                            websocket.app.state, "activity_event_repository", None
                         )
-                        event_cursor = None
+                        if repository is None:
+                            await websocket.send_json(
+                                {"type": "activity_unavailable", "cursor": event_cursor}
+                            )
+                            continue
+                        snapshot = await repository.get_snapshot_for_owner(
+                            principal.owner_id, limit=200
+                        )
+                        if after_cursor is not None:
+                            await send_persisted_events(
+                                min(after_cursor, snapshot.cursor),
+                                snapshot.cursor,
+                                message_type="activity_replay",
+                            )
+                        projection_response = ActivitySnapshotResponse(
+                            cursor=snapshot.cursor,
+                            projections=[
+                                _activity_projection_response(item, datetime.now(UTC))
+                                for item in snapshot.projections
+                            ],
+                        )
+                        await websocket.send_json(
+                            {
+                                "type": "activity_snapshot",
+                                **projection_response.model_dump(mode="json"),
+                            }
+                        )
+                        event_cursor = snapshot.cursor
+                        event_cursor = await send_persisted_events(event_cursor)
+                    else:
+                        await websocket.close(code=1003)
+                        return
+
+                if queue_task is not None and queue_task in done:
+                    if await sessions.authenticate(session_token) is None:
+                        await websocket.close(code=1008)
+                        return
+                    raw_event = queue_task.result()
+                    event = ActivityEventResponse.model_validate(raw_event)
+                    if event.owner_id != principal.owner_id or event.sequence <= event_cursor:
                         continue
-                    events = await repository.list_events_after(
-                        principal.owner_id, event_cursor, limit=200
-                    )
-                    if events:
-                        event_cursor = events[-1].cursor
+                    if event.sequence > event_cursor + 1:
+                        event_cursor = await send_persisted_events(
+                            event_cursor,
+                            event.sequence,
+                            message_type="activity_replay",
+                        )
+                        await websocket.send_json({"type": "activity_replay_complete"})
+                    if event.sequence > event_cursor:
                         await websocket.send_json(
                             {
                                 "type": "activity_events",
-                                "cursor": event_cursor,
-                                "events": [
-                                    _activity_event_response(event).model_dump(mode="json")
-                                    for event in events
-                                ],
+                                "cursor": event.sequence,
+                                "events": [event.model_dump(mode="json")],
                             }
                         )
-                    continue
-                if await sessions.authenticate(session_token) is None:
-                    await websocket.close(code=1008)
-                    return
-                if message == {"type": "ping"}:
-                    await websocket.send_json({"type": "pong"})
-                    continue
-                if not isinstance(message, dict) or message != {"type": "subscribe"}:
-                    await websocket.close(code=1003)
-                    return
-                repository = getattr(
-                    websocket.app.state, "activity_event_repository", None
-                )
-                if repository is None:
-                    await websocket.send_json(
-                        {"type": "activity_unavailable", "cursor": 0}
-                    )
-                    event_cursor = None
-                    continue
-                snapshot = await repository.get_snapshot_for_owner(
-                    principal.owner_id, limit=200
-                )
-                event_cursor = snapshot.cursor
-                projection_response = ActivitySnapshotResponse(
-                    cursor=snapshot.cursor,
-                    projections=[
-                        _activity_projection_response(item, datetime.now(UTC))
-                        for item in snapshot.projections
-                    ],
-                )
-                await websocket.send_json(
-                    {
-                        "type": "activity_snapshot",
-                        **projection_response.model_dump(mode="json"),
-                    }
-                )
+                        event_cursor = event.sequence
         except (WebSocketDisconnect, RuntimeError):
             return
         except (ValueError, TypeError):
             await websocket.close(code=1003)
         finally:
+            receive_task.cancel()
+            await asyncio.gather(receive_task, return_exceptions=True)
+            if queue is not None:
+                hub = getattr(websocket.app.state, "activity_event_hub", None)
+                if hub is not None:
+                    hub.unsubscribe(principal.owner_id, queue)
             await sessions.unregister_socket(session_token, websocket)
     return application
 

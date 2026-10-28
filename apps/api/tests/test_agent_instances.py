@@ -17,6 +17,7 @@ class Definition:
     owner_id: str
     name: str
     archived_at: datetime | None = None
+    enabled: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,3 +283,37 @@ def test_archived_definition_cannot_create_new_instance() -> None:
         )
         assert response.status_code == 409
         assert response.json()["detail"] == "Archived definitions cannot be assigned to new instances"
+
+
+def test_disabled_definition_cannot_be_assigned_to_new_or_existing_instance() -> None:
+    repositories = Repositories()
+    active = Definition(uuid4(), "owner", "Available")
+    disabled = Definition(uuid4(), "owner", "Paused", enabled=False)
+    repositories.definitions.definitions[active.id] = active
+    repositories.definitions.definitions[disabled.id] = disabled
+
+    with make_client(repositories) as client:
+        authorized(client)
+        created = client.post(
+            "/api/v1/agent-instances",
+            headers={"origin": ORIGIN},
+            json={"display_name": "Mira", "definition_id": str(active.id)},
+        )
+        assert created.status_code == 201
+        instance_id = created.json()["id"]
+
+        rejected_create = client.post(
+            "/api/v1/agent-instances",
+            headers={"origin": ORIGIN},
+            json={"display_name": "Paused", "definition_id": str(disabled.id)},
+        )
+        assert rejected_create.status_code == 409
+        assert client.get("/api/v1/agent-instances").json() == [created.json()]
+
+        rejected_reassignment = client.put(
+            f"/api/v1/agent-instances/{instance_id}",
+            headers={"origin": ORIGIN},
+            json={"definition_id": str(disabled.id)},
+        )
+        assert rejected_reassignment.status_code == 409
+        assert client.get(f"/api/v1/agent-instances/{instance_id}").json() == created.json()

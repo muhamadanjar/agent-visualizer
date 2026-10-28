@@ -31,7 +31,7 @@ function RevisionContents({ task }: { task: Task }) {
 const REVISION_PAGE_SIZE = 100;
 const PREFLIGHT_LABELS: Record<string, string> = {
   agent_assignment: "Agent Instance assignment",
-  provider_configuration: "Provider configuration",
+  model_endpoint: "Model Endpoint",
   workspace_policy: "Workspace policy",
   tool_allowlist: "Tool allowlist",
   runner_connection: "Runner connection",

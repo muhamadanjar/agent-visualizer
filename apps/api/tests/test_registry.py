@@ -8,8 +8,22 @@ from uuid import UUID, uuid4
 from fastapi.testclient import TestClient
 
 from app.main import create_app
-from app.domain.registry import AgentDefinition
-from test_api import MemoryProjectRepository, ORIGIN, database_ready, login, settings
+from app.domain.agent_configuration import AgentDefinitionConfiguration
+from app.domain.model_endpoints import ADAPTER, ModelEndpoint
+from app.domain.registry import (
+    AgentDefinition,
+    AgentDefinitionInputError,
+    AgentRegistryConflictError,
+)
+
+from test_api import (
+    MemoryEmptyModelEndpointRepository,
+    MemoryProjectRepository,
+    ORIGIN,
+    database_ready,
+    login,
+    settings,
+)
 
 
 class MemoryAgentRegistryRepository:
@@ -18,10 +32,14 @@ class MemoryAgentRegistryRepository:
         self.archived_at: dict[UUID, datetime] = {}
 
     async def create(
-        self, owner_id: str, name: str, description: str, source_markdown: str, unmapped_metadata: dict[str, object]
+        self, owner_id: str, name: str, description: str, source_markdown: str,
+        unmapped_metadata: dict[str, object], configuration: AgentDefinitionConfiguration | None,
     ) -> AgentDefinition:
         now = datetime.now(UTC)
-        definition = AgentDefinition(uuid4(), owner_id, 1, name, description, source_markdown, unmapped_metadata, None, now)
+        definition = AgentDefinition(
+            uuid4(), owner_id, 1, name, description, source_markdown, unmapped_metadata,
+            configuration, configuration is not None, None, now,
+        )
         self.versions[definition.id] = [definition]
         return definition
 
@@ -35,7 +53,11 @@ class MemoryAgentRegistryRepository:
 
     async def get_for_owner(self, owner_id: str, definition_id: UUID, *, version: int | None = None) -> AgentDefinition | None:
         versions = self.versions.get(definition_id, [])
-        selected = next((item for item in versions if version is None or item.version == version), None)
+        selected = (
+            versions[-1]
+            if version is None and versions
+            else next((item for item in versions if item.version == version), None)
+        )
         if selected is None or selected.owner_id != owner_id:
             return None
         return replace(selected, archived_at=self.archived_at.get(definition_id))
@@ -56,6 +78,64 @@ class MemoryAgentRegistryRepository:
             return None
         self.archived_at.setdefault(definition_id, datetime.now(UTC))
         return await self.get_for_owner(owner_id, definition_id)
+    async def set_enabled_for_owner(
+        self, owner_id: str, definition_id: UUID, enabled: bool
+    ) -> AgentDefinition | None:
+        current = await self.get_for_owner(owner_id, definition_id)
+        if current is None or current.archived_at is not None:
+            return None
+        updated = replace(current, enabled=enabled)
+        self.versions[definition_id][-1] = updated
+        return updated
+
+
+class RacingEnableRegistryRepository(MemoryAgentRegistryRepository):
+    async def set_enabled_for_owner(
+        self, owner_id: str, definition_id: UUID, enabled: bool
+    ) -> AgentDefinition | None:
+        if enabled:
+            raise AgentRegistryConflictError(
+                "Configure an active Model Endpoint before enabling the definition"
+            )
+        return await super().set_enabled_for_owner(owner_id, definition_id, enabled)
+
+class RegistryWriteConflictRepository(MemoryAgentRegistryRepository):
+    conflict_operation: str | None = None
+
+    async def create(
+        self, owner_id: str, name: str, description: str, source_markdown: str,
+        unmapped_metadata: dict[str, object], configuration: AgentDefinitionConfiguration | None,
+    ) -> AgentDefinition:
+        if self.conflict_operation == "create" and configuration is not None:
+            raise AgentRegistryConflictError(
+                "Configure an active Model Endpoint before saving this Definition"
+            )
+        return await super().create(
+            owner_id, name, description, source_markdown, unmapped_metadata, configuration
+        )
+
+    async def update_for_owner(
+        self, owner_id: str, definition_id: UUID, changes: dict[str, object]
+    ) -> AgentDefinition | None:
+        if self.conflict_operation == "update" and "configuration" in changes:
+            raise AgentRegistryConflictError(
+                "Configure an active Model Endpoint before saving this Definition"
+            )
+        return await super().update_for_owner(owner_id, definition_id, changes)
+
+
+
+
+
+class MemoryRegistryEndpointRepository:
+    def __init__(self, endpoint: ModelEndpoint) -> None:
+        self.endpoint = endpoint
+
+    async def get_for_owner(self, owner_id: str, endpoint_id: UUID) -> ModelEndpoint | None:
+        if owner_id != self.endpoint.owner_id or endpoint_id != self.endpoint.id:
+            return None
+        return self.endpoint
+
 
 
 def test_imported_definition_keeps_source_and_immutable_versions() -> None:
@@ -66,6 +146,7 @@ def test_imported_definition_keeps_source_and_immutable_versions() -> None:
             database_check=database_ready,
             project_repository=MemoryProjectRepository(),
             agent_registry_repository=registry,
+            model_endpoint_repository=MemoryEmptyModelEndpointRepository(),
         )
     ) as client:
         assert client.get("/api/v1/agent-definitions").status_code == 401
@@ -125,6 +206,7 @@ def test_free_prompt_requires_metadata_and_rejects_unsafe_or_oversized_source() 
             database_check=database_ready,
             project_repository=MemoryProjectRepository(),
             agent_registry_repository=registry,
+            model_endpoint_repository=MemoryEmptyModelEndpointRepository(),
         )
     ) as client:
         assert login(client).status_code == 200
@@ -161,6 +243,7 @@ def test_front_matter_uses_safe_yaml_and_rejects_cross_owner_access(tmp_path: Pa
             database_check=database_ready,
             project_repository=MemoryProjectRepository(),
             agent_registry_repository=registry,
+            model_endpoint_repository=MemoryEmptyModelEndpointRepository(),
         )
     ) as client:
         assert login(client).status_code == 200
@@ -210,6 +293,8 @@ def test_front_matter_uses_safe_yaml_and_rejects_cross_owner_access(tmp_path: Pa
                 "# private",
                 {},
                 None,
+                False,
+                None,
                 datetime.now(UTC),
             )
         ]
@@ -250,3 +335,225 @@ def test_front_matter_uses_safe_yaml_and_rejects_cross_owner_access(tmp_path: Pa
             headers={"origin": ORIGIN},
         )
         assert too_many_nodes.status_code == 422
+
+
+def test_definition_configuration_is_versioned_and_enabled_status_is_separate() -> None:
+    registry = MemoryAgentRegistryRepository()
+    endpoint = ModelEndpoint(
+        id=uuid4(),
+        owner_id="owner",
+        name="Free model endpoint",
+        adapter=ADAPTER,
+        endpoint_url="https://provider.example/v1",
+        credential_env="NINEROUTER_KEY",
+        default_model_id="openrouter/model:free",
+        default_route="free",
+        archived_at=None,
+        created_at=datetime.now(UTC),
+    )
+    endpoints = MemoryRegistryEndpointRepository(endpoint)
+    with TestClient(
+        create_app(
+            settings(),
+            database_check=database_ready,
+            project_repository=MemoryProjectRepository(),
+            agent_registry_repository=registry,
+            model_endpoint_repository=endpoints,
+        )
+    ) as client:
+        assert login(client).status_code == 200
+        configuration = {
+            "role": "Research worker",
+            "model_endpoint_id": str(endpoint.id),
+            "model_id": "openrouter/model:free",
+            "route": None,
+            "runtime_id": "langchain",
+            "temperature": 0.3,
+            "max_iterations": 5,
+            "concurrency_limit": 2,
+            "execution_timeout_seconds": 300,
+            "allowed_tools": ["read_file"],
+        }
+        foreign_endpoint = client.post(
+            "/api/v1/agent-definitions/import",
+            json={
+                "source_markdown": "---\nname: Foreign endpoint use\n---\n",
+                "configuration": {**configuration, "model_endpoint_id": str(uuid4())},
+            },
+            headers={"origin": ORIGIN},
+        )
+        assert foreign_endpoint.status_code == 422
+        created = client.post(
+            "/api/v1/agent-definitions/import",
+            json={
+                "source_markdown": "---\nname: Research worker\n---\nUse evidence.\n",
+                "configuration": configuration,
+            },
+            headers={"origin": ORIGIN},
+        )
+        assert created.status_code == 201
+        version_one = created.json()
+        definition_id = version_one["id"]
+        assert version_one["enabled"] is True
+        assert version_one["configuration"]["role"] == "Research worker"
+        assert version_one["configuration"]["model_endpoint_id"] == str(endpoint.id)
+        duplicate_name = client.post(
+            "/api/v1/agent-definitions/import",
+            json={
+                "source_markdown": "---\nname: Research worker\n---\nSecond UUID.\n",
+                "configuration": configuration,
+            },
+            headers={"origin": ORIGIN},
+        )
+        assert duplicate_name.status_code == 201
+        assert duplicate_name.json()["name"] == version_one["name"]
+        assert duplicate_name.json()["id"] != version_one["id"]
+
+        next_configuration = {**configuration, "model_id": "openrouter/second-model:free"}
+        updated = client.put(
+            f"/api/v1/agent-definitions/{definition_id}",
+            json={"configuration": next_configuration},
+            headers={"origin": ORIGIN},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["version"] == 2
+        assert updated.json()["configuration"]["model_id"] == "openrouter/second-model:free"
+        assert client.get(f"/api/v1/agent-definitions/{definition_id}?version=1").json()[
+            "configuration"
+        ]["model_id"] == "openrouter/model:free"
+
+        disabled = client.put(
+            f"/api/v1/agent-definitions/{definition_id}/enabled",
+            json={"enabled": False},
+            headers={"origin": ORIGIN},
+        )
+        assert disabled.status_code == 200
+        assert disabled.json()["enabled"] is False
+        endpoints.endpoint = replace(endpoint, archived_at=datetime.now(UTC))
+        rejected_enable = client.put(
+            f"/api/v1/agent-definitions/{definition_id}/enabled",
+            json={"enabled": True},
+            headers={"origin": ORIGIN},
+        )
+        assert rejected_enable.status_code == 409
+        assert client.get(f"/api/v1/agent-definitions/{definition_id}").json()["enabled"] is False
+
+
+def test_definition_create_and_update_conflicts_return_http_409() -> None:
+    registry = RegistryWriteConflictRepository()
+    endpoint = ModelEndpoint(
+        id=uuid4(),
+        owner_id="owner",
+        name="Free model endpoint",
+        adapter=ADAPTER,
+        endpoint_url="https://provider.example/v1",
+        credential_env="NINEROUTER_KEY",
+        default_model_id="openrouter/model:free",
+        default_route="free",
+        archived_at=None,
+        created_at=datetime.now(UTC),
+    )
+    configuration = {
+        "role": "Research worker",
+        "model_endpoint_id": str(endpoint.id),
+        "model_id": endpoint.default_model_id,
+        "max_iterations": 5,
+        "concurrency_limit": 1,
+        "execution_timeout_seconds": 300,
+        "allowed_tools": [],
+    }
+    with TestClient(
+        create_app(
+            settings(),
+            database_check=database_ready,
+            project_repository=MemoryProjectRepository(),
+            agent_registry_repository=registry,
+            model_endpoint_repository=MemoryRegistryEndpointRepository(endpoint),
+        )
+    ) as client:
+        assert login(client).status_code == 200
+        base = client.post(
+            "/api/v1/agent-definitions/import",
+            json={
+                "source_markdown": "---\nname: Base worker\n---\n",
+                "configuration": configuration,
+            },
+            headers={"origin": ORIGIN},
+        )
+        assert base.status_code == 201
+
+        registry.conflict_operation = "update"
+        updated = client.put(
+            f"/api/v1/agent-definitions/{base.json()['id']}",
+            json={
+                "configuration": {
+                    **configuration,
+                    "model_id": "openrouter/updated-model:free",
+                }
+            },
+            headers={"origin": ORIGIN},
+        )
+        assert updated.status_code == 409
+        assert "active Model Endpoint" in updated.json()["detail"]
+
+        registry.conflict_operation = "create"
+        created = client.post(
+            "/api/v1/agent-definitions/import",
+            json={
+                "source_markdown": "---\nname: Concurrent worker\n---\n",
+                "configuration": configuration,
+            },
+            headers={"origin": ORIGIN},
+        )
+        assert created.status_code == 409
+        assert "active Model Endpoint" in created.json()["detail"]
+
+
+def test_enable_conflict_is_reported_when_endpoint_is_archived_during_enable() -> None:
+    registry = RacingEnableRegistryRepository()
+    endpoint = ModelEndpoint(
+        id=uuid4(),
+        owner_id="owner",
+        name="Free model endpoint",
+        adapter=ADAPTER,
+        endpoint_url="https://provider.example/v1",
+        credential_env="NINEROUTER_KEY",
+        default_model_id="openrouter/model:free",
+        default_route="free",
+        archived_at=None,
+        created_at=datetime.now(UTC),
+    )
+    with TestClient(
+        create_app(
+            settings(),
+            database_check=database_ready,
+            project_repository=MemoryProjectRepository(),
+            agent_registry_repository=registry,
+            model_endpoint_repository=MemoryRegistryEndpointRepository(endpoint),
+        )
+    ) as client:
+        assert login(client).status_code == 200
+        created = client.post(
+            "/api/v1/agent-definitions/import",
+            json={
+                "source_markdown": "---\nname: Race-safe worker\n---\n",
+                "configuration": {
+                    "role": "Research worker",
+                    "model_endpoint_id": str(endpoint.id),
+                    "model_id": endpoint.default_model_id,
+                    "max_iterations": 5,
+                    "concurrency_limit": 1,
+                    "execution_timeout_seconds": 300,
+                    "allowed_tools": [],
+                },
+            },
+            headers={"origin": ORIGIN},
+        )
+        assert created.status_code == 201
+        response = client.put(
+            f"/api/v1/agent-definitions/{created.json()['id']}/enabled",
+            json={"enabled": True},
+            headers={"origin": ORIGIN},
+        )
+        assert response.status_code == 409
+        assert "active Model Endpoint" in response.json()["detail"]

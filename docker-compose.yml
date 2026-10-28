@@ -26,6 +26,21 @@ services:
     networks:
       - data
 
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+    logging: *default-logging
+    networks:
+      - data
+
   migrate:
     build:
       context: ./apps/api
@@ -52,6 +67,7 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-production}
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       OWNER_USERNAME: ${OWNER_USERNAME:?set OWNER_USERNAME in .env}
       OWNER_PASSWORD_HASH: ${OWNER_PASSWORD_HASH:?set OWNER_PASSWORD_HASH in .env}
       SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
@@ -68,6 +84,8 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      redis:
+        condition: service_started
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
       interval: 10s
@@ -83,25 +101,63 @@ services:
       - app
       - data
 
+  runtime-launcher:
+    image: agent-office-runtime-launcher:local
+    build:
+      context: ./apps/launcher
+    environment:
+      RUNTIME_LAUNCHER_TOKEN: ${RUNTIME_LAUNCHER_TOKEN:?set RUNTIME_LAUNCHER_TOKEN in .env}
+      RUN_WORKER_IMAGE: agent-office-runner:local
+      RUNTIME_PROXY_IMAGE: agent-office-runtime-launcher:local
+      RUNTIME_EGRESS_NETWORK: agent-office-runtime-egress
+      RUN_WORKER_UID: ${RUNNER_UID:-1000}
+      RUN_WORKER_GID: ${RUNNER_GID:-1000}
+      WORKSPACE_ROOT: /workspace-root
+      NINEROUTER_KEY: ${NINEROUTER_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    expose:
+      - "8001"
+    volumes:
+      - ./workspaces:/workspace-root:rw
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health/ready', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    logging: *default-logging
+    networks:
+      - app
+      - runtime-egress
+
   runner:
+    image: agent-office-runner:local
     build:
       context: ./apps/runner
     user: "${RUNNER_UID:-1000}:${RUNNER_GID:-1000}"
     environment:
       RUNNER_API_URL: http://api:8000
-      RUNNER_SHARED_TOKEN: ${RUNNER_SHARED_TOKEN:-}
-      RUNNER_WORKSPACE_ROOT: /workspaces
+      RUNNER_SHARED_TOKEN: ${RUNNER_SHARED_TOKEN:?set RUNNER_SHARED_TOKEN in .env}
       RUNNER_STATE_ROOT: /state
-      NINEROUTER_URL: ${NINEROUTER_URL:-}
-      NINEROUTER_KEY: ${NINEROUTER_KEY:-}
+      RUNTIME_LAUNCHER_URL: http://runtime-launcher:8001
+      RUNTIME_LAUNCHER_TOKEN: ${RUNTIME_LAUNCHER_TOKEN:?set RUNTIME_LAUNCHER_TOKEN in .env}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
-      - ./workspaces:/workspaces:rw
       - ./.runner-state:/state:rw
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     depends_on:
       api:
+        condition: service_healthy
+      runtime-launcher:
         condition: service_healthy
     read_only: true
     tmpfs:
@@ -114,6 +170,28 @@ services:
     logging: *default-logging
     networks:
       - app
+
+  api-postgres-test:
+    profiles: ["test"]
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile.test
+    environment:
+      TEST_DATABASE_URL: ${TEST_DATABASE_URL:-}
+    depends_on:
+      db:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+    logging: *default-logging
+    networks:
+      - data
 
   web:
     build:
@@ -163,9 +241,12 @@ services:
       - app
 
 volumes:
+  redis_data:
   db_data:
 
 networks:
   app: {}
   data:
     internal: true
+  runtime-egress:
+    name: agent-office-runtime-egress

@@ -2,7 +2,14 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { requestRun, requestTaskRunPage, type RunRecord } from "../lib/runs";
+import {
+  requestRun,
+  requestRunCancellation,
+  requestRunResult,
+  requestTaskRunPage,
+  type RunRecord,
+  type RunResultRecord,
+} from "../lib/runs";
 import { requestTaskData, type Task } from "../lib/tasks";
 import {
   requestRunActivity,
@@ -173,6 +180,11 @@ function RunEvidenceView({ runId }: { runId: string }) {
   const [approvalError, setApprovalError] = useState<string | null>(null);
   const [artifacts, setArtifacts] = useState<ArtifactMetadata[] | null>(null);
   const [artifactError, setArtifactError] = useState<string | null>(null);
+  const [result, setResult] = useState<RunResultRecord | null>(null);
+  const [resultError, setResultError] = useState<string | null>(null);
+  const [cancelRequested, setCancelRequested] = useState(false);
+  const [cancelLoading, setCancelLoading] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
   const [connection, setConnection] = useState<ActivityConnection>("connecting");
   const [reloadKey, setReloadKey] = useState(0);
 
@@ -184,15 +196,40 @@ function RunEvidenceView({ runId }: { runId: string }) {
     setApprovalError(null);
     setArtifacts(null);
     setArtifactError(null);
+    setResult(null);
+    setResultError(null);
+    setCancelError(null);
+    setCancelRequested(false);
     setConnection("connecting");
     let active = true;
+
+    let resultRequested = false;
 
     function loadActivity() {
       void requestRunActivity(runId, controller.signal)
         .then((record) => {
-          if (!controller.signal.aborted) {
-            setActivity(record);
-            setActivityError(null);
+          if (controller.signal.aborted) return;
+          setActivity(record);
+          setActivityError(null);
+          if (record.status === "succeeded" && !resultRequested) {
+            resultRequested = true;
+            void requestRunResult(runId, controller.signal)
+              .then((savedResult) => {
+                if (!controller.signal.aborted) {
+                  setResult(savedResult);
+                  setResultError(null);
+                }
+              })
+              .catch((reason: unknown) => {
+                resultRequested = false;
+                if (!controller.signal.aborted) {
+                  setResultError(
+                    reason instanceof Error
+                      ? reason.message
+                      : "Could not load the Run Result.",
+                  );
+                }
+              });
           }
         })
         .catch((reason: unknown) => {
@@ -256,11 +293,26 @@ function RunEvidenceView({ runId }: { runId: string }) {
     };
   }, [reloadKey, runId]);
 
+  async function cancelRun() {
+    setCancelLoading(true);
+    setCancelError(null);
+    try {
+      await requestRunCancellation(runId);
+      setCancelRequested(true);
+    } catch (reason) {
+      setCancelError(
+        reason instanceof Error ? reason.message : "Could not request Run cancellation.",
+      );
+    } finally {
+      setCancelLoading(false);
+    }
+  }
+
   function renderEvent(event: ActivityEvent) {
     return (
-      <li className="run-event-row" key={event.cursor}>
-        <span><strong>{event.event_type.replaceAll(".", " · ")}</strong><small>Event {event.cursor}</small></span>
-        <time dateTime={event.occurred_at}>{formatDate(event.occurred_at)}</time>
+      <li className="run-event-row" key={event.sequence}>
+        <span><strong>{event.type.replaceAll(".", " · ")}</strong><small>Event {event.sequence}</small></span>
+        <time dateTime={event.timestamp}>{formatDate(event.timestamp)}</time>
       </li>
     );
   }
@@ -279,6 +331,34 @@ function RunEvidenceView({ runId }: { runId: string }) {
           <div className="settings-row"><span>Runtime status</span><strong>{activity.freshness === "stale" ? `Stale · ${activity.status}` : `${activity.freshness} · ${activity.status}`}</strong></div>
           <div className="settings-row"><span>Last event</span><strong>{activity.last_event_at ? formatDate(activity.last_event_at) : "Unavailable"}</strong></div>
           <div className="settings-row"><span>Safe action summary</span><strong>{activity.safe_action_summary ?? "Unavailable"}</strong></div>
+          {activity.status !== null
+            && !["succeeded", "failed", "canceled", "unknown"].includes(activity.status) ? (
+              <div className="run-actions">
+                <button
+                  className="button button-secondary"
+                  type="button"
+                  onClick={() => void cancelRun()}
+                  disabled={cancelLoading || cancelRequested}
+                >
+                  {cancelLoading ? "Requesting…" : cancelRequested ? "Cancellation requested" : "Cancel Run"}
+                </button>
+                {cancelRequested ? <span className="muted" role="status">Waiting for the Runner to verify the container has stopped.</span> : null}
+                {cancelError ? <span className="inline-error" role="alert">{cancelError}</span> : null}
+              </div>
+            ) : null}
+          {activity.status === "succeeded" ? (
+            <section className="run-evidence-section" aria-labelledby="run-result-heading">
+              <h4 id="run-result-heading">Final assistant result</h4>
+              {resultError ? <p className="inline-error" role="alert">{resultError}</p> : null}
+              {!result && !resultError ? <p className="muted" role="status">Loading persisted Run Result…</p> : null}
+              {result ? (
+                <>
+                  <pre className="run-result-content">{result.text}</pre>
+                  <p className="field-note">{result.byte_length} UTF-8 bytes · persisted {formatDate(result.created_at)}</p>
+                </>
+              ) : null}
+            </section>
+          ) : null}
           {activity.events.length ? <ol className="run-event-list" aria-label="Persisted runtime events">{activity.events.map(renderEvent)}</ol> : <p className="muted">No lifecycle events are available for this Run.</p>}
         </>
       ) : null}
@@ -352,8 +432,9 @@ export function RunDetailView({ runId }: { runId: string }) {
             <div className="settings-row"><span>Assigned Agent Instance</span><strong>{snapshot.agent_instance.display_name}</strong></div>
             <div className="settings-row"><span>Agent Definition version</span><strong>{snapshot.agent_definition.name} · v{snapshot.agent_definition.version}</strong></div>
             <div className="settings-row"><span>Pinned Skills</span><strong>{snapshot.skills.length ? snapshot.skills.map((skill) => `${skill.name} · v${skill.version}`).join(", ") : "None"}</strong></div>
-            <div className="settings-row"><span>Provider configuration</span><strong>{snapshot.provider === null ? "Not configured" : "Present in snapshot"}</strong></div>
-            <div className="settings-row"><span>Runtime configuration</span><strong>{snapshot.runtime === null ? "Not configured" : "Present in snapshot"}</strong></div>
+            <div className="settings-row"><span>Model</span><strong>{snapshot.agent_definition.configuration?.model_id ?? "Not configured"}</strong></div>
+            <div className="settings-row"><span>Model Endpoint</span><strong>{snapshot.model_endpoint?.endpoint_url ?? (snapshot.provider === null || snapshot.provider === undefined ? "Not configured" : "Historical provider snapshot")}</strong></div>
+            <div className="settings-row"><span>Runtime configuration</span><strong>{snapshot.runtime == null ? "Not configured" : "Present in snapshot"}</strong></div>
           </section>
           <RunEvidenceView runId={run.id} />
         </section>

@@ -9,6 +9,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.domain.execution import (
     RunExecutionJob,
+    RunnerLeaseStatus,
     RunnerRunContext,
     RunnerStatus,
     WorkspacePolicy,
@@ -149,8 +150,8 @@ class PostgresExecutionRepository:
         now = datetime.now(UTC)
         lease_expires_at = now + timedelta(seconds=lease_seconds)
         async with self._sessions.begin() as session:
-            # Keep claim transactions short and serialized: two workers must not
-            # select different queued Runs for one workspace before either leases it.
+            # Serialize admission so concurrent claims cannot bypass workspace or
+            # immutable Definition Version concurrency limits.
             await session.execute(
                 select(
                     func.pg_advisory_xact_lock(
@@ -166,21 +167,51 @@ class PostgresExecutionRepository:
                 )
                 .values(state="unknown", updated_at=now)
             )
-            active = aliased(RunDispatchTable)
+            active_workspace = aliased(RunDispatchTable)
+            leased = aliased(RunDispatchTable)
+            leased_run = aliased(RunTable)
+            queued_run = aliased(RunTable)
+            active_definition_runs = (
+                select(func.count(leased.run_id))
+                .select_from(leased)
+                .join(
+                    leased_run,
+                    (leased_run.owner_id == leased.owner_id)
+                    & (leased_run.id == leased.run_id),
+                )
+                .where(
+                    leased.owner_id == RunDispatchTable.owner_id,
+                    leased.state == "leased",
+                    leased.lease_expires_at >= now,
+                    leased_run.definition_id == queued_run.definition_id,
+                    leased_run.definition_version == queued_run.definition_version,
+                )
+                .correlate(RunDispatchTable, queued_run)
+                .scalar_subquery()
+            )
+            concurrency_limit = queued_run.configuration_snapshot[
+                "agent_definition"
+            ]["configuration"]["concurrency_limit"].as_integer()
             dispatch = await session.scalar(
                 select(RunDispatchTable)
+                .join(
+                    queued_run,
+                    (queued_run.owner_id == RunDispatchTable.owner_id)
+                    & (queued_run.id == RunDispatchTable.run_id),
+                )
                 .where(
                     RunDispatchTable.state == "queued",
-                    ~select(active.run_id)
+                    ~select(active_workspace.run_id)
                     .where(
-                        active.owner_id == RunDispatchTable.owner_id,
-                        active.workspace_path == RunDispatchTable.workspace_path,
-                        active.state == "leased",
+                        active_workspace.owner_id == RunDispatchTable.owner_id,
+                        active_workspace.workspace_path == RunDispatchTable.workspace_path,
+                        active_workspace.state == "leased",
                     )
                     .exists(),
+                    concurrency_limit > active_definition_runs,
                 )
                 .order_by(RunDispatchTable.created_at, RunDispatchTable.run_id)
-                .with_for_update(skip_locked=True)
+                .with_for_update(of=RunDispatchTable, skip_locked=True)
                 .limit(1)
             )
             if dispatch is None:
@@ -210,6 +241,7 @@ class PostgresExecutionRepository:
                 dispatch.state = "blocked"
                 dispatch.updated_at = now
                 return None
+            dispatch.max_duration_seconds = policy.max_duration_seconds
             dispatch.state = "leased"
             dispatch.runner_id = runner_id
             dispatch.lease_expires_at = lease_expires_at
@@ -291,3 +323,73 @@ class PostgresExecutionRepository:
                 instance_id=dispatch.instance_id,
                 task_revision=task_revision,
             )
+
+    async def request_cancellation(self, owner_id: str, run_id: UUID) -> str | None:
+        now = datetime.now(UTC)
+        async with self._sessions.begin() as session:
+            dispatch = await session.scalar(
+                select(RunDispatchTable)
+                .where(
+                    RunDispatchTable.owner_id == owner_id,
+                    RunDispatchTable.run_id == run_id,
+                )
+                .with_for_update()
+            )
+            if dispatch is None:
+                return None
+            if (
+                dispatch.state != "leased"
+                or dispatch.lease_expires_at is None
+                or dispatch.lease_expires_at < now
+            ):
+                return dispatch.state
+            if dispatch.cancellation_requested_at is None:
+                dispatch.cancellation_requested_at = now
+                dispatch.updated_at = now
+            return "cancellation_pending"
+
+    async def get_cancellation_requests(self, runner_id: UUID) -> list[UUID]:
+        now = datetime.now(UTC)
+        async with self._sessions() as session:
+            rows = await session.scalars(
+                select(RunDispatchTable.run_id)
+                .where(
+                    RunDispatchTable.runner_id == runner_id,
+                    RunDispatchTable.state == "leased",
+                    RunDispatchTable.lease_expires_at >= now,
+                    RunDispatchTable.cancellation_requested_at.is_not(None),
+                )
+                .order_by(RunDispatchTable.updated_at, RunDispatchTable.run_id)
+                .limit(2)
+            )
+            return list(rows)
+
+    async def get_lease_statuses(
+        self, runner_id: UUID, run_ids: list[UUID]
+    ) -> list[RunnerLeaseStatus]:
+        if not run_ids or len(run_ids) > 2 or len(set(run_ids)) != len(run_ids):
+            return []
+        now = datetime.now(UTC)
+        async with self._sessions() as session:
+            rows = await session.scalars(
+                select(RunDispatchTable).where(
+                    RunDispatchTable.runner_id == runner_id,
+                    RunDispatchTable.run_id.in_(run_ids),
+                )
+            )
+            return [
+                RunnerLeaseStatus(
+                    run_id=row.run_id,
+                    runner_id=row.runner_id,
+                    state=row.state,
+                    active_lease=(
+                        row.state == "leased"
+                        and row.lease_expires_at is not None
+                        and row.lease_expires_at >= now
+                    ),
+                    lease_expires_at=row.lease_expires_at,
+                    max_duration_seconds=row.max_duration_seconds,
+                    cancellation_requested=row.cancellation_requested_at is not None,
+                )
+                for row in rows
+            ]

@@ -89,8 +89,8 @@ argon2id_re='^\$argon2id\$[A-Za-z0-9./+,=$-]{20,}$'
 
 postgres_password="$(openssl rand -hex 32)"
 app_db_password="$(openssl rand -hex 32)"
-session_secret="$(openssl rand -hex 32)"
 runner_shared_token="$(openssl rand -hex 32)"
+runtime_launcher_token="$(openssl rand -hex 32)"
 tmp="$(mktemp "$ROOT_DIR/.env.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT
 
@@ -113,6 +113,7 @@ trap 'rm -f "$tmp"' EXIT
     printf "OWNER_PASSWORD_HASH='%s'\n" "$owner_hash"
     printf 'SESSION_SECRET=%s\n' "$session_secret"
     printf 'RUNNER_SHARED_TOKEN=%s\n' "$runner_shared_token"
+    printf 'RUNTIME_LAUNCHER_TOKEN=%s\n' "$runtime_launcher_token"
     printf 'RUNNER_UID=%s\n' "$runner_uid"
     printf 'RUNNER_GID=%s\n' "$runner_gid"
     printf 'SESSION_TTL_SECONDS=28800\n'

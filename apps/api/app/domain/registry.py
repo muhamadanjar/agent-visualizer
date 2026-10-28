@@ -9,6 +9,7 @@ from uuid import UUID
 
 import yaml
 
+from app.domain.agent_configuration import AgentDefinitionConfiguration
 from app.domain.common import SkillPin, SkillReference
 
 MAX_SOURCE_BYTES = 1_048_576
@@ -49,16 +50,21 @@ class AgentDefinition:
     owner_id: str
     version: int
     name: str
-
     description: str
     source_markdown: str
     unmapped_metadata: dict[str, object]
+    configuration: AgentDefinitionConfiguration | None
+    enabled: bool
     archived_at: datetime | None
     created_at: datetime
     skills: tuple[SkillReference, ...] = ()
 
 class AgentDefinitionInputError(ValueError):
     """Definition source or metadata is unsafe or invalid."""
+
+class AgentRegistryConflictError(ValueError):
+    """A concurrent or archived Registry resource invalidated a write."""
+
 
 
 def _json_value(value: object, active: set[int] | None = None, depth: int = 0) -> object:
@@ -165,6 +171,7 @@ class AgentRegistryRepository(Protocol):
         description: str,
         source_markdown: str,
         unmapped_metadata: dict[str, object],
+        configuration: AgentDefinitionConfiguration | None = None,
     ) -> AgentDefinition: ...
 
     async def list_for_owner(
@@ -182,6 +189,10 @@ class AgentRegistryRepository(Protocol):
 
     async def update_for_owner(
         self, owner_id: str, definition_id: UUID, changes: dict[str, object]
+    ) -> AgentDefinition | None: ...
+
+    async def set_enabled_for_owner(
+        self, owner_id: str, definition_id: UUID, enabled: bool
     ) -> AgentDefinition | None: ...
 
     async def archive_for_owner(

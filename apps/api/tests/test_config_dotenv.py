@@ -26,6 +26,7 @@ def test_load_settings_reads_repo_dotenv_and_prefers_process_environment(
         "SESSION_SECRET",
         "PUBLIC_ORIGIN",
         "DATABASE_URL",
+        "REDIS_URL",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -35,6 +36,7 @@ def test_load_settings_reads_repo_dotenv_and_prefers_process_environment(
     assert settings.owner_username == "process-owner"
     assert settings.public_origin == "http://localhost:8080"
     assert settings.database_url == "postgresql://office:password@localhost:5432/office"
+    assert settings.redis_url == "redis://localhost:6379/0"
 
 
 def test_dotenv_path_handles_container_image_layout() -> None:

@@ -7,7 +7,14 @@ from uuid import UUID, uuid4
 from fastapi.testclient import TestClient
 
 from app.main import create_app
-from test_api import MemoryProjectRepository, ORIGIN, database_ready, login, settings
+from test_api import (
+    MemoryEmptyModelEndpointRepository,
+    MemoryProjectRepository,
+    ORIGIN,
+    database_ready,
+    login,
+    settings,
+)
 from app.domain.registry import AgentDefinitionInputError
 from app.domain.skills import TextResource
 
@@ -42,6 +49,8 @@ class MemoryDefinition:
     description: str
     source_markdown: str
     unmapped_metadata: dict[str, object]
+    configuration: object | None
+    enabled: bool
     archived_at: datetime | None
     created_at: datetime
     skills: tuple[MemorySkillReference, ...] = ()
@@ -129,10 +138,11 @@ class MemoryAgentRegistryRepository:
     async def create(
         self, owner_id: str, name: str, description: str,
         source_markdown: str, unmapped_metadata: dict[str, object],
+        configuration: object | None = None,
     ) -> MemoryDefinition:
         item = MemoryDefinition(
             uuid4(), owner_id, 1, name, description, source_markdown,
-            unmapped_metadata, None, datetime.now(UTC),
+            unmapped_metadata, configuration, configuration is not None, None, datetime.now(UTC),
         )
         self.versions[item.id] = [item]
         return item
@@ -194,6 +204,7 @@ def make_client() -> tuple[TestClient, MemorySkillRepository, MemoryAgentRegistr
         database_check=database_ready,
         project_repository=MemoryProjectRepository(),
         agent_registry_repository=definitions,
+        model_endpoint_repository=MemoryEmptyModelEndpointRepository(),
         skill_repository=skills,
     ))
     return client, skills, definitions

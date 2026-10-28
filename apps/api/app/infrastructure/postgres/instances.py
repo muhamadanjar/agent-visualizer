@@ -91,7 +91,11 @@ class PostgresAgentInstanceRepository:
             AgentDefinitionTable.id == definition_id,
         ).with_for_update(read=True)
         definition = await session.scalar(query)
-        if definition is None or definition.archived_at is not None:
+        if (
+            definition is None
+            or not definition.enabled
+            or definition.archived_at is not None
+        ):
             raise AgentInstanceInputError("definition is unavailable")
 
     async def _check_project(

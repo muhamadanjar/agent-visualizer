@@ -128,6 +128,18 @@ class RunnerRunContext:
     task_revision: int
 
 
+@dataclass(frozen=True, slots=True)
+class RunnerLeaseStatus:
+    run_id: UUID
+    runner_id: UUID | None
+    state: str
+    active_lease: bool
+    lease_expires_at: datetime | None
+    max_duration_seconds: int | None
+    cancellation_requested: bool
+
+
+
 class ExecutionRepository(Protocol):
     async def get_policy_for_project(
         self, owner_id: str, project_id: UUID
@@ -155,4 +167,11 @@ class ExecutionRepository(Protocol):
     async def get_run_context_for_runner(
         self, runner_id: UUID, run_id: UUID
     ) -> RunnerRunContext | None: ...
+    async def request_cancellation(self, owner_id: str, run_id: UUID) -> str | None: ...
+
+    async def get_cancellation_requests(self, runner_id: UUID) -> list[UUID]: ...
+
+    async def get_lease_statuses(
+        self, runner_id: UUID, run_ids: list[UUID]
+    ) -> list[RunnerLeaseStatus]: ...
 

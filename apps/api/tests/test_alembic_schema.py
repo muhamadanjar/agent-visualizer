@@ -29,8 +29,10 @@ EXPECTED_APPLICATION_TABLES = {
     "task_revision_dependencies",
     "runs",
     "provider_configs",
+    "model_endpoints",
     "owner_event_cursors",
     "activity_events",
+    "activity_event_outbox",
     "run_activity_projections",
     "approval_requests",
     "approval_decisions",
@@ -39,6 +41,7 @@ EXPECTED_APPLICATION_TABLES = {
     "project_execution_policies",
     "runner_connections",
     "run_dispatches",
+    "run_results",
 }
 
 

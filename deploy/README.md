@@ -1,46 +1,48 @@
 # Private pilot operations
 
-This directory documents the local deployment boundary. Phase 1/M0 is complete
-only for bounded provider/3D feasibility probes; it does not prove managed
-execution. Phase 2 foundation is complete. Phase 3 policy/dispatch and Phase 4
-Runner event paths have implementation and isolated PostgreSQL/component test
-evidence. Phase 6 Runner execution is in progress, not operationally qualified.
-Backup/restore evidence is recorded in `docs/progress.md`; it does not prove a
-live provider task or 3D runtime readiness.
+This directory documents the local deployment boundary. Roadmap Phase 2
+(Agent Runtime) remains in progress. The per-Run launcher/worker boundary,
+cancellation/result contracts, and persistence are implemented, with unit,
+schema, migration, image-build, and browser-fixture evidence. No API-created
+Run has been observed through the real provider and 3D path. See
+`docs/progress.md` for the exact evidence and remaining gates.
 
 ## Topology and exposure boundary
 
-Docker Compose runs PostgreSQL, the FastAPI API, the Next.js web app, an isolated
-Runner, a one-shot migration service, and an Nginx reverse proxy on one private
-Linux host:
+Docker Compose runs PostgreSQL, private Redis Streams, the FastAPI API, the Next.js web app, a
+host-side Runner supervisor, a separate Runtime Launcher, a one-shot migration
+service, and an Nginx reverse proxy on one private Linux host:
 
 - Nginx is the only published service: `127.0.0.1:${APP_PORT:-8080}:80`.
-- Web (`3000`), API (`8000`), and Runner have no published ports. Web/API are
-  reachable only on the Compose app network; Runner is app-network-only and
-  has no direct database network access.
+- Web (`3000`), API (`8000`), Runner, and Runtime Launcher have no published
+  ports. Runner and Launcher are attached to private Compose networks; the
+  Launcher has a dedicated external-egress network for proxy connectivity.
 - PostgreSQL (`5432`) has no host-published port. The one-shot `migrate`
-  service applies checksummed SQL migrations, applies Alembic revisions, and
-  provisions the restricted API role before API startup; it is not a worker.
-- Runner claims persisted dispatches from the API and mounts `./workspaces`
-  plus `./.runner-state`. It runs non-root, with a read-only root filesystem,
-  dropped Linux capabilities, and no-new-privileges. Its configured provider
-  endpoint still needs OS/container egress enforcement; application URL checks
-  alone are not a network firewall.
+  service applies checksummed SQL migrations, Alembic revisions, and
+  restricted-role grants before API startup.
+- Redis (`6379`) has no host-published port and is reachable only on the private
+  `data` network. AOF and a dedicated volume preserve the fan-out stream across
+  container restarts; Redis is transport only, not canonical event history.
+- Runner has no Docker socket, provider key, or workspace bind. It holds only
+  API/Launcher credentials and its durable event outbox state.
+- Runtime Launcher is the only service with Docker socket access and the
+  workspace-root bind mount. It is trusted host-control software; compromise
+  can affect the Docker host. It accepts fixed authenticated operations and
+  creates role-labeled per-Run resources only.
+- Each worker runs non-root with a read-only root filesystem, dropped
+  capabilities, no-new-privileges, CPU/memory/PID/time limits, and only its
+  validated workspace mount. It has neither API/Runner credentials nor Docker
+  socket. Its isolated per-Run network can reach the selected provider only
+  through a constrained proxy.
 - Nginx sends `/api/` (including `/api/v1/ws`) and `/health/` to the API, and
-  everything else to the web app. The WebSocket upgrade headers and the
-  browser's `Origin` header are forwarded unchanged.
-- Nginx does not terminate TLS. HTTP is reachable only from the host loopback
-  interface. Use an SSH tunnel
-  (`rtk ssh -L 8080:127.0.0.1:8080 <host>`) or a VPN for remote access.
-- Exposing this stack beyond loopback requires a reviewed TLS reverse proxy or
-  load balancer in front of it. Then set `PUBLIC_ORIGIN=https://<exact-host>`,
-  `APP_ENV=production`, and `SESSION_COOKIE_SECURE=true`. The API rejects an
-  insecure production origin. Because WebSocket origin matching is exact, use
-  only that configured hostname; do not add alternate public names without
-  changing the configuration deliberately.
-- The browser never receives a shell/CLI or database route. Database access is
-  only through Compose `exec` for operator scripts.
-Do not add port mappings for `db`, `api`, `web`, or `runner`.
+  everything else to the web app. WebSocket upgrade and browser `Origin`
+  headers are forwarded unchanged.
+- Nginx does not terminate TLS. HTTP is reachable only from host loopback. Use
+  an SSH tunnel (`rtk ssh -L 8080:127.0.0.1:8080 <host>`) or VPN for remote
+  access. Public exposure requires reviewed TLS termination, exact
+  `PUBLIC_ORIGIN`, production mode, and secure session cookies.
+- The browser never receives a shell/CLI or database route. Do not add port
+  mappings for `db`, `api`, `web`, `runner`, or `runtime-launcher`.
 
 ## Prerequisites
 
@@ -57,19 +59,13 @@ Do not add port mappings for `db`, `api`, `web`, or `runner`.
    ```
 
    The script refuses to overwrite an existing `.env`, prompts for the owner
-   password twice without echoing it, and hashes it with the API image's
-   `python -m app.password_hash` helper. It generates the PostgreSQL password,
-   session secret, and Runner shared token with `openssl`, plus default Runner
-   UID/GID values. It writes `.env` atomically with mode `600` and prints no
-   secret values. It builds a temporary local API image to run the hash helper;
-   the plaintext password is sent on stdin, never on a command line or in the
-   environment.
-
+   password twice without echo, and hashes it with Argon2id. It generates
+   PostgreSQL/session secrets, `RUNNER_SHARED_TOKEN`,
+   `RUNTIME_LAUNCHER_TOKEN`, and Runner UID/GID defaults. It writes atomically
+   with mode `600` and prints no secret values.
    Optional non-secret overrides: `APP_PORT`, `PUBLIC_ORIGIN`,
    `OWNER_USERNAME`, `POSTGRES_DB`, `POSTGRES_USER`, `APP_DB_USER`,
    `RUNNER_UID`, and `RUNNER_GID`.
-   Leave `OWNER_PASSWORD_HASH` unset to enter a password without echo. The
-   bootstrap hashes it using Argon2id and does not print the result.
 
 2. Review `.env`. The default loopback HTTP setup uses
    `APP_ENV=development`, `SESSION_COOKIE_SECURE=false`, and
@@ -98,6 +94,33 @@ Do not add port mappings for `db`, `api`, `web`, or `runner`.
 `docker compose down` stops services and keeps the `db_data` volume. Do not run
 `docker compose down -v` unless you intend to destroy the database.
 
+## Runner and isolated API integration tests
+
+For local Runner authentication and the optional restricted-role PostgreSQL
+integration test, first prepare the ignored `.env` and a disposable database:
+
+```bash
+rtk docker compose up -d db
+rtk bash scripts/prepare-runner-test-env.sh
+rtk docker compose up -d --build api runner
+rtk docker compose --profile test run --rm --build api-postgres-test
+```
+
+The preparation script generates `RUNNER_SHARED_TOKEN` if it is missing and
+sets `TEST_DATABASE_URL` to an administrator URL for the exact
+`<POSTGRES_DB>_test` database. Each preparation drops and recreates only that
+database so the legacy-migration integration test always starts fresh; do not
+store user data there. It refuses other database names, updates `.env`
+atomically with mode `600`, and prints neither secret values nor the database
+URL. The test container connects only over Compose's private `data` network;
+PostgreSQL remains unpublished. The PostgreSQL test may create temporary
+database roles and records, and cleans up its own fixtures. Never point
+`TEST_DATABASE_URL` at the application database.
+
+The API restart invalidates in-memory owner sessions; sign in again after
+recreating API and Runner. The local Runner can heartbeat without a provider
+key; task execution still requires a configured provider.
+
 ## Configuration and secrets boundary
 
 All secrets and URLs are supplied at runtime by `.env` through Compose. Nothing
@@ -105,14 +128,21 @@ is baked into the application images, and no default production credentials
 exist:
 
 - `APP_DB_USER`/`APP_DB_PASSWORD` provision a separate non-admin API role. The
-  API receives only `DATABASE_URL`; the migration service applies project,
-  versioned definition/skill, Agent Instance, Task/Run, provider configuration,
-  workspace policy, Runner connection/dispatch, activity/projection, approval,
-  artifact-metadata, and scene-version schemas. Grants are scoped per table:
-  mutable owner records get the required `SELECT`/`INSERT`/`UPDATE`;
+  API uses a restricted `DATABASE_URL` and private `REDIS_URL`; the migration
+  service applies project and versioned definition/skill, Agent Instance,
+  Task/Run, owner-scoped Model Endpoint, legacy provider-configuration migration,
+  artifact-metadata, scene-version, and Activity Event outbox schemas. Grants are
+  scoped per table: mutable owner records get the required `SELECT`/`INSERT`/`UPDATE`;
   append-only versions, events, decisions, artifacts, and scene versions get
-  `SELECT`/`INSERT`. The role cannot update/delete immutable evidence or
+  `SELECT`/`INSERT`. The outbox gets `SELECT`/`INSERT`/`UPDATE` so the API can
+  claim and acknowledge publication; the role cannot delete evidence or
   administer the database.
+- API writes Activity Event, Run projection, and Redis fan-out outbox in one
+  PostgreSQL transaction. A background publisher retries outbox delivery;
+  Redis outage delays live fan-out but does not undo committed events or Run
+  state. Reconnect replays persisted events from the PostgreSQL cursor. The
+  Redis stream currently uses an approximate 100,000-entry cap; load-based
+  retention and backlog policy remain open.
 - `MIGRATION_DATABASE_URL` is the one-shot migration administrator connection.
 - `SESSION_SECRET` is at least 32 random bytes; rotating it invalidates
   sessions.
@@ -122,10 +152,16 @@ exist:
   Origin validation.
 - `OWNER_USERNAME` identifies the single owner. Server-side owner/resource
   scope remains authoritative; the browser cannot assert an owner ID.
-- `RUNNER_SHARED_TOKEN` authenticates internal Runner calls; keep it secret.
-  `NINEROUTER_URL` and `NINEROUTER_KEY` configure the provider endpoint/key for
-  Runner use only. `RUNNER_UID`/`RUNNER_GID` should match host ownership of
-  `workspaces/` and `.runner-state/`.
+- `RUNNER_SHARED_TOKEN` authenticates internal API Runner calls.
+  `RUNTIME_LAUNCHER_TOKEN` separately authenticates Runner-to-Launcher calls;
+  keep both secret. `NINEROUTER_KEY` supplies the credential for the selected
+  Model Endpoint. Its URL is stored on the endpoint record; a global
+  `NINEROUTER_URL` is not required. Endpoint records store the URL and
+  allowlisted environment-variable name, never the key value.
+- `REDIS_URL` selects the private Redis Streams service; Compose defaults it to
+  `redis://redis:6379/0`. Do not publish Redis to the host.
+  Runner/Launcher/worker identities and workspace ownership are configured by
+  `RUNNER_UID`/`RUNNER_GID`.
 - `SESSION_TTL_SECONDS` is capped at 8 hours. Keep it at or below `28800`.
 
 `.env`, `.env.*`, and `backups/` are git-ignored; `.env.example` contains only
@@ -268,32 +304,29 @@ The restore script is intentionally non-destructive. The Phase 2 restore
 demonstration and its scratch-database evidence are recorded in
 `docs/progress.md`; repeat it after material schema or backup changes.
 
-## Known Phase 3–6 limits
+## Known Phase 2–6 limits
 
-- Phase 3 workspace policy/tool allowlist, Run dispatch, and same-workspace
-  serialization are implemented and passed restricted-role PostgreSQL 17
-  integration on a disposable `*_test` database. API-to-Runner full task
-  execution remains unverified.
-- Phase 4 internal Runner heartbeat/claim/event routes authenticate with the
-  shared token, derive scope from persisted dispatch, and acknowledge durable
-  deduplicated events. Action summaries are fixed labels from the file-tool
-  allowlist. Component tests pass; deployed restart/reconnect reconciliation
-  remains open.
-- Phase 6 Runner supports bounded non-streaming Chat Completions with
-  `list_files`, `read_file`, and `write_file`; a local HTTP-mock tool loop and
-  SQLite outbox restart tests pass. No live configured-provider Run or
-  end-to-end live 3D visualization has been observed.
-- Active Runs sharing one configured workspace path are serialized. The Runner
-  does not create a per-Run clone/worktree, expose a shell, or isolate writes
-  inside that path from an operator editing it concurrently.
-- Provider URL validation disables redirects but is not an OS/container
-  egress firewall. Provider-only egress, cancellation/acknowledgement,
-  final-answer/artifact persistence, and two independent live Runs remain open.
-- Owner sessions are opaque random tokens held in API-process memory. Logout
-  revokes the server-side session immediately; API restart invalidates all active
-  sessions. A shared session store is required before scaling beyond one API
-  replica.
-- Login rate limiting is per API process; limits reset on restart and are not
-  shared across replicas.
-- There is no TLS termination, public ingress, or automated off-host backup.
-- Only one owner exists; there is no user administration or multi-tenant scope.
+- Phase 2 now implements per-Run worker containers, bounded worker resources,
+  an authenticated Docker Runtime Launcher, per-Run selected-endpoint proxy,
+  cancellation verification contract, lease reconciliation, and owner-scoped
+  Run Result persistence. Launcher readiness was exercised with the provider
+  unset; it correctly reported `provider_ready: false`.
+- An isolated disposable PostgreSQL 17 instance applied all legacy SQL
+  migrations and Alembic through `runtime_0013`; `run_results` has SELECT and
+  INSERT but no UPDATE grant for the application role. The temporary database
+  was removed. This did not touch the Compose application database.
+- API suite and Runner/Launcher tests pass; images build and Compose validates.
+  Fixture-backed Chromium exercised Run cancellation-pending and persisted
+  Run Result rendering. These do not establish live persistence or runtime
+  execution.
+- No actual API-created Run has yet passed through Runner → Launcher → worker
+  → configured provider, nor has a real provider response populated the UI or
+  3D scene. Two independent Runs, full restart/reconnect, and Docker-level
+  egress-denial negatives remain open.
+- Active Runs sharing one configured workspace path are serialized. There is
+  no per-Run clone/worktree; concurrent operator edits are outside the
+  serialization guarantee.
+- Owner sessions are held in API-process memory; API restart invalidates them.
+- Login rate limiting is per API process, not shared across replicas.
+- There is no TLS termination, public ingress, automated off-host backup,
+  user administration, or multi-tenant scope.

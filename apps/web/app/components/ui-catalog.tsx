@@ -3,7 +3,7 @@ import {
   sampleArtifacts,
   sampleAuditEntries,
 } from "../lib/ui-preview-data";
-import { ProviderConnectionForm } from "./provider-connection-form";
+import { ModelEndpointsView } from "./model-endpoints-view";
 import {
   DisabledWorkAction,
   PageHeader,
@@ -14,25 +14,8 @@ import {
 export function ConnectionsView() {
   return (
     <div className="page-stack">
-      <PageHeader eyebrow="Connections" title="Providers & runtimes" description="Provider selection is saved as non-secret configuration. Runtime execution remains unavailable." />
-      <div className="settings-grid">
-        <ProviderConnectionForm />
-        <section className="content-section settings-card">
-          <div className="settings-card-heading"><div><p className="eyebrow">Execution</p><h2>Runtime connection</h2></div><StatusPill tone="amber">Not connected</StatusPill></div>
-          <p>The Runtime Adapter starts and observes agent work. It is separate from the model provider endpoint.</p>
-          <div className="settings-row"><span>Runtime Adapter</span><strong>Not available</strong></div>
-          <div className="settings-row"><span>Operating mode</span><strong>Unavailable until the Engine/Runner is implemented</strong></div>
-          <div className="settings-row"><span>Managed capability</span><strong>Not approved</strong></div>
-          <div className="settings-row"><span>Tool-call approval</span><strong>Fail-closed · runtime identity unavailable</strong></div>
-          <div className="settings-row"><span>Credentials / egress</span><strong>Not configured</strong></div>
-          <DisabledWorkAction reason="The Engine/Runner is not implemented; saving a provider endpoint does not enable execution.">Connect runtime</DisabledWorkAction>
-        </section>
-      </div>
-      <section className="content-section">
-        <div className="section-heading"><h2>Independent contracts</h2><StatusPill>Separate</StatusPill></div>
-        <p className="muted">A configured model endpoint records a selection only. It does not prove provider availability, support a tool call, enable task execution, or authorize outbound network access.</p>
-        <Link className="text-link" href="/usage">View usage and limits</Link>
-      </section>
+      <PageHeader eyebrow="Connections" title="Model Endpoints" description="Manage owner-scoped OpenAI-compatible Chat Completions endpoints without storing provider secrets." />
+      <ModelEndpointsView />
     </div>
   );
 }
