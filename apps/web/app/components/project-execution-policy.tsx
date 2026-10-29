@@ -111,7 +111,7 @@ export function ProjectExecutionPolicy({ projectId }: { projectId: string }) {
         <h2 id="project-execution-policy-heading">Workspace execution policy</h2>
         <StatusPill tone={revision === null ? "neutral" : "green"}>{revision === null ? "Not configured" : `Revision ${revision}`}</StatusPill>
       </div>
-      <p className="field-note">Workspace paths are relative to the host-mounted <code>./workspaces</code> directory. The Runner creates the selected directory if absent. No shell or command execution is available.</p>
+      <p className="field-note">Workspace paths are relative to the host-mounted workspace root configured for Runtime Launcher. The selected directory is created if absent. No shell or command execution is available.</p>
       {loading ? <p role="status">Loading workspace policy…</p> : null}
       {!loading ? (
         <form className="draft-form" onSubmit={savePolicy}>
@@ -136,7 +136,7 @@ export function ProjectExecutionPolicy({ projectId }: { projectId: string }) {
           </fieldset>
           <div className="preview-grid">
             <label className="preview-field">Max duration (seconds)<input type="number" min={1} max={3600} required value={draft.max_duration_seconds} onChange={(event) => update("max_duration_seconds", Number(event.currentTarget.value))} /></label>
-            <label className="preview-field">Max inference turns<input type="number" min={1} max={12} required value={draft.max_inference_turns} onChange={(event) => update("max_inference_turns", Number(event.currentTarget.value))} /></label>
+            <label className="preview-field">Max inference turns<input type="number" min={1} max={24} required value={draft.max_inference_turns} onChange={(event) => update("max_inference_turns", Number(event.currentTarget.value))} /></label>
             <label className="preview-field">Max tool calls<input type="number" min={1} max={50} required value={draft.max_tool_calls} onChange={(event) => update("max_tool_calls", Number(event.currentTarget.value))} /></label>
           </div>
           <label className="check-row"><input type="checkbox" checked={draft.enabled} onChange={(event) => update("enabled", event.currentTarget.checked)} />Enable policy for new Runs</label>

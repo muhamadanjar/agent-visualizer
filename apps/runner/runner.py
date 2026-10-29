@@ -631,6 +631,11 @@ class RunnerSupervisor:
         self._launcher = launcher
         self._outbox = outbox
 
+
+    def _unknown(self, run_id: str, reason: str, *, cleanup: bool) -> None:
+        LOG.error("run_unknown run_id=%s reason=%s", run_id, reason)
+        self._terminal(run_id, "run.unknown", cleanup=cleanup)
+
     def reconcile(self) -> None:
         containers = self._launcher.list_runs()
         if not containers:
@@ -774,9 +779,7 @@ class RunnerSupervisor:
                 stream = self._launcher.events(run_id, cursor)
             except InvalidWorkerFrameError:
                 stop = self._launcher.stop(run_id)
-                self._terminal(
-                    run_id, "run.unknown", cleanup=stop["verified"]
-                )
+                self._unknown(run_id, "worker_frame_stream_invalid", cleanup=stop["verified"])
                 return
             frames = stream["events"]
             for frame in frames:
@@ -789,9 +792,7 @@ class RunnerSupervisor:
                     or not isinstance(frame.get("payload"), dict)
                 ):
                     stop = self._launcher.stop(run_id)
-                    self._terminal(
-                        run_id, "run.unknown", cleanup=stop["verified"]
-                    )
+                    self._unknown(run_id, "worker_frame_schema_invalid", cleanup=stop["verified"])
                     return
                 sequence = frame["sequence"]
                 if sequence <= cursor:
@@ -801,9 +802,7 @@ class RunnerSupervisor:
                 if kind == "started":
                     if started or payload:
                         stop = self._launcher.stop(run_id)
-                        self._terminal(
-                            run_id, "run.unknown", cleanup=stop["verified"]
-                        )
+                        self._unknown(run_id, "worker_start_frame_invalid", cleanup=stop["verified"])
                         return
                     try:
                         emit_stable_event(
@@ -815,23 +814,17 @@ class RunnerSupervisor:
                         )
                     except RunnerEventRejected:
                         stop = self._launcher.stop(run_id)
-                        self._terminal(
-                            run_id, "run.unknown", cleanup=stop["verified"]
-                        )
+                        self._unknown(run_id, "run_started_event_rejected", cleanup=stop["verified"])
                         return
                     started = True
                 elif kind in {"event", "result"}:
                     if result_saved:
                         stop = self._launcher.stop(run_id)
-                        self._terminal(
-                            run_id, "run.unknown", cleanup=stop["verified"]
-                        )
+                        self._unknown(run_id, "worker_duplicate_activity", cleanup=stop["verified"])
                         return
                     if not started:
                         stop = self._launcher.stop(run_id)
-                        self._terminal(
-                            run_id, "run.unknown", cleanup=stop["verified"]
-                        )
+                        self._unknown(run_id, "worker_activity_before_started", cleanup=stop["verified"])
                         return
                     if kind == "event":
                         try:
@@ -841,11 +834,7 @@ class RunnerSupervisor:
                             flush_events(self._api, self._outbox)
                         except (InvalidWorkerFrameError, RunnerEventRejected):
                             stop = self._launcher.stop(run_id)
-                            self._terminal(
-                                run_id,
-                                "run.unknown",
-                                cleanup=stop["verified"],
-                            )
+                            self._unknown(run_id, "worker_event_rejected", cleanup=stop["verified"])
                             return
                     else:
                         text = payload.get("text")
@@ -856,9 +845,7 @@ class RunnerSupervisor:
                             or len(text.encode("utf-8")) > MAX_FILE_BYTES
                         ):
                             stop = self._launcher.stop(run_id)
-                            self._terminal(
-                                run_id, "run.unknown", cleanup=stop["verified"]
-                            )
+                            self._unknown(run_id, "worker_result_invalid", cleanup=stop["verified"])
                             return
                         result = self._api.post(
                             "/internal/runner/results",
@@ -878,9 +865,7 @@ class RunnerSupervisor:
                         result_saved = True
                 else:
                     stop = self._launcher.stop(run_id)
-                    self._terminal(
-                        run_id, "run.unknown", cleanup=stop["verified"]
-                    )
+                    self._unknown(run_id, "worker_frame_kind_invalid", cleanup=stop["verified"])
                     return
                 cursor = sequence
 
@@ -889,7 +874,7 @@ class RunnerSupervisor:
             if status == "exited":
                 finished_wall = _parse_started_at(stream.get("finished_at"))
                 if finished_wall is None:
-                    self._terminal(run_id, "run.unknown", cleanup=False)
+                    self._unknown(run_id, "worker_exit_timestamp_missing", cleanup=False)
                     return
                 if not started:
                     self._terminal(run_id, "run.failed", cleanup=True)
@@ -931,11 +916,10 @@ class RunnerSupervisor:
                             },
                         )
                     stop = self._launcher.stop(run_id)
-                    self._terminal(
-                        run_id,
-                        "run.canceled" if stop["verified"] else "run.unknown",
-                        cleanup=stop["verified"],
-                    )
+                    if stop["verified"]:
+                        self._terminal(run_id, "run.canceled", cleanup=True)
+                    else:
+                        self._unknown(run_id, "cancellation_stop_unverified", cleanup=False)
                     return
                 last_cancel_check = now
 
@@ -946,11 +930,10 @@ class RunnerSupervisor:
             )
             if elapsed >= max_duration_seconds:
                 stop = self._launcher.stop(run_id)
-                self._terminal(
-                    run_id,
-                    "run.failed" if stop["verified"] else "run.unknown",
-                    cleanup=stop["verified"],
-                )
+                if stop["verified"]:
+                    self._terminal(run_id, "run.failed", cleanup=True)
+                else:
+                    self._unknown(run_id, "timeout_stop_unverified", cleanup=False)
                 return
 
             if now - last_heartbeat >= 15:
@@ -960,9 +943,7 @@ class RunnerSupervisor:
                 )
                 if not isinstance(lease, dict) or lease.get("active") is not True:
                     stop = self._launcher.stop(run_id)
-                    self._terminal(
-                        run_id, "run.unknown", cleanup=stop["verified"]
-                    )
+                    self._unknown(run_id, "run_lease_inactive", cleanup=stop["verified"])
                     return
                 try:
                     emit_event(
@@ -974,9 +955,7 @@ class RunnerSupervisor:
                     )
                 except RunnerEventRejected:
                     stop = self._launcher.stop(run_id)
-                    self._terminal(
-                        run_id, "run.unknown", cleanup=stop["verified"]
-                    )
+                    self._unknown(run_id, "heartbeat_event_rejected", cleanup=stop["verified"])
                     return
                 last_heartbeat = now
             time.sleep(0.25)
@@ -1058,7 +1037,7 @@ def _relative_path(value: object, *, allow_root: bool = False) -> PurePosixPath:
 
 def _resolve_workspace_path(root: Path, value: object) -> Path:
     try:
-        relative = _relative_path(value)
+        relative = _relative_path(value, allow_root=value == ".")
     except ValueError as error:
         raise TaskExecutionError("workspace path is invalid") from error
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1543,7 +1522,33 @@ def run_worker() -> int:
             )
         return 0
     except (RunnerTransportError, TaskExecutionError, ProviderResponseError) as error:
-        LOG.error("worker_execution_failed", extra={"error_type": type(error).__name__})
+        cause = error.__cause__
+        cause_type = type(cause).__name__ if cause is not None else "none"
+        cause_status = getattr(cause, "status_code", None)
+        if not isinstance(cause_status, int) or isinstance(cause_status, bool):
+            cause_status = "unavailable"
+        safe_setup_reasons = {
+            "Model Endpoint configuration is unavailable",
+            "Run tool configuration is invalid",
+            "Model parameters are invalid",
+            "workspace path is invalid",
+            "workspace root cannot be a symlink",
+            "workspace path cannot traverse a symlink",
+            "workspace path escaped its root",
+            "workspace tool allowlist is invalid",
+        }
+        cause_reason = (
+            str(cause)
+            if isinstance(cause, TaskExecutionError) and str(cause) in safe_setup_reasons
+            else "unavailable"
+        )
+        LOG.error(
+            "worker_execution_failed error_type=%s cause_type=%s cause_status=%s cause_reason=%s",
+            type(error).__name__,
+            cause_type,
+            cause_status,
+            cause_reason,
+        )
         return 1
     finally:
         outbox.close()

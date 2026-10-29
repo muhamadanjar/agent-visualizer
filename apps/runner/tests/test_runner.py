@@ -65,6 +65,13 @@ def test_workspace_path_rejects_symlink_escape(tmp_path: Path) -> None:
         _resolve_workspace_path(root, "linked/new-project")
     assert not (outside / "new-project").exists()
 
+
+def test_workspace_path_accepts_mounted_run_root(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+
+    assert _resolve_workspace_path(root, ".") == root.resolve()
+
 def test_event_outbox_keeps_unacknowledged_events_across_restart(tmp_path: Path) -> None:
     path = tmp_path / "state" / "events.sqlite3"
     outbox = EventOutbox(path)

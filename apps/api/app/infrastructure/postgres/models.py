@@ -573,7 +573,7 @@ class RunActivityProjectionTable(SQLModel, table=True):
         CheckConstraint("char_length(source_id) BETWEEN 1 AND 128"),
         CheckConstraint(
             "status IN ('running', 'waiting_input', 'waiting_approval', 'blocked', "
-            "'succeeded', 'failed', 'canceled')"
+            "'succeeded', 'failed', 'canceled', 'unknown')"
         ),
         CheckConstraint("last_event_cursor >= 1"),
         CheckConstraint("last_sequence IS NULL OR last_sequence >= 0"),
@@ -733,7 +733,7 @@ class ProjectExecutionPolicyTable(SQLModel, table=True):
             "allowed_tools <@ ARRAY['list_files', 'read_file', 'write_file']::text[]"
         ),
         CheckConstraint("max_duration_seconds BETWEEN 1 AND 3600"),
-        CheckConstraint("max_inference_turns BETWEEN 1 AND 12"),
+        CheckConstraint("max_inference_turns BETWEEN 1 AND 24"),
         CheckConstraint("max_tool_calls BETWEEN 1 AND 50"),
         CheckConstraint("revision >= 1"),
         PrimaryKeyConstraint("owner_id", "project_id"),

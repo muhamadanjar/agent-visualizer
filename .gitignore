@@ -6,3 +6,4 @@ backups/
 /.runner-state/
 /workspaces/
 __pycache__**
+/docker-compose.override.yml

@@ -45,6 +45,52 @@ def test_worker_log_frames_keep_only_complete_stdout_frames() -> None:
     assert frames == [started, event, result]
 
 
+@pytest.mark.parametrize(
+    ("running", "status_code", "retries"),
+    [(True, 502, True), (False, 502, False), (True, 503, False)],
+)
+def test_event_stream_retries_transient_log_gateway_error_only_while_running(
+    running: bool, status_code: int, retries: bool
+) -> None:
+    run_id = "891e3b15-7408-4d39-91af-ff0ea5a06d18"
+
+    class Engine:
+        def list_owned_role(self, _run_id: str, _role: str) -> list[dict[str, object]]:
+            return [
+                {
+                    "Id": "worker",
+                    "Labels": {
+                        server.OWNER_LABEL: "true",
+                        server.RUN_ID_LABEL: run_id,
+                        server.ROLE_LABEL: "worker",
+                    },
+                }
+            ]
+
+        def inspect_container(self, _container_id: str) -> dict[str, object]:
+            return {"State": {"Running": running, "ExitCode": None}}
+
+        def logs(self, _container_id: str) -> bytes:
+            raise server.EngineError(status_code)
+
+    launcher = object.__new__(server.RuntimeLauncher)
+    launcher._engine = Engine()  # type: ignore[assignment]
+
+    if not retries:
+        with pytest.raises(server.EngineError):
+            launcher.events(run_id, after_sequence=0)
+        return
+
+    assert launcher.events(run_id, after_sequence=0) == {
+        "events": [],
+        "status": "running",
+        "exit_code": None,
+        "started_at": None,
+        "finished_at": None,
+    }
+
+
+
 def test_worker_log_frames_require_startup_before_activity() -> None:
     event = {
         "sequence": 1,
@@ -126,7 +172,7 @@ def test_start_payload_accepts_only_selected_local_ninerouter_endpoint() -> None
         "workspace_path": "project-a/run-1",
         "allowed_tools": ["read_file"],
         "max_duration_seconds": 3600,
-        "max_inference_turns": 12,
+        "max_inference_turns": 24,
         "max_tool_calls": 50,
     }
 
@@ -137,6 +183,9 @@ def test_start_payload_accepts_only_selected_local_ninerouter_endpoint() -> None
     assert workspace == "project-a/run-1"
     assert job["workspace_path"] == "."
     assert target == ("host.docker.internal", 20128)
+    payload["max_inference_turns"] = 25
+    with pytest.raises(server.LauncherError, match="Run inference limit is invalid"):
+        server._validate_start_payload(payload)
 
 
 def test_start_payload_rejects_private_and_unencrypted_nonlocal_endpoints() -> None:

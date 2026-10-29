@@ -185,18 +185,33 @@ def test_project_policy_is_owner_scoped_and_rejects_unsafe_paths() -> None:
                 "workspace_path": "team/project",
                 "allowed_tools": ["list_files", "read_file", "write_file"],
                 "max_duration_seconds": 300,
-                "max_inference_turns": 6,
+                "max_inference_turns": 24,
                 "max_tool_calls": 15,
                 "enabled": True,
             },
         )
         assert response.status_code == 200
         assert response.json()["revision"] == 1
+        assert response.json()["max_inference_turns"] == 24
         assert client.get(path).json()["allowed_tools"] == [
             "list_files",
             "read_file",
             "write_file",
         ]
+        over_limit = client.put(
+            path,
+            headers={"origin": ORIGIN},
+            json={
+                "workspace_path": "team/project",
+                "allowed_tools": ["list_files", "read_file"],
+                "max_duration_seconds": 300,
+                "max_inference_turns": 25,
+                "max_tool_calls": 15,
+                "enabled": True,
+            },
+        )
+        assert over_limit.status_code == 422
+
 
         unsafe = client.put(
             path,

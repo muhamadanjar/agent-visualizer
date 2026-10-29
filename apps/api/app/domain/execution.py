@@ -68,7 +68,7 @@ class WorkspacePolicyDraft:
             raise ExecutionPolicyInputError("allowed_tools")
         if not 1 <= max_duration_seconds <= 3600:
             raise ExecutionPolicyInputError("max_duration_seconds")
-        if not 1 <= max_inference_turns <= 12:
+        if not 1 <= max_inference_turns <= 24:
             raise ExecutionPolicyInputError("max_inference_turns")
         if not 1 <= max_tool_calls <= 50:
             raise ExecutionPolicyInputError("max_tool_calls")

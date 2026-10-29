@@ -302,7 +302,7 @@ class WorkspacePolicyWrite(BaseModel):
         return value
 
     max_duration_seconds: StrictInt = Field(ge=1, le=3600)
-    max_inference_turns: StrictInt = Field(ge=1, le=12)
+    max_inference_turns: StrictInt = Field(ge=1, le=24)
     max_tool_calls: StrictInt = Field(ge=1, le=50)
     enabled: StrictBool = True
 

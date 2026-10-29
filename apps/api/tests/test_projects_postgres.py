@@ -116,7 +116,7 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
             await apply_alembic_migrations(dsn)
             assert await connection.fetchval(
                 "SELECT version_num FROM alembic_version"
-            ) == "events_0014"
+            ) == "execution_0016"
             migrated_endpoint = await connection.fetchrow(
                 "SELECT name, credential_env, default_model_id, default_route "
                 "FROM model_endpoints WHERE owner_id = $1",
@@ -841,11 +841,12 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                     workspace_path="parallel-project",
                     allowed_tools=["list_files", "read_file", "write_file"],
                     max_duration_seconds=300,
-                    max_inference_turns=6,
+                    max_inference_turns=24,
                     max_tool_calls=15,
                 ),
             )
             assert parallel_policy is not None
+            assert parallel_policy.max_inference_turns == 24
             parallel_instance = await restricted_instances.create(
                 restricted_owner_id,
                 "Parallel instance",
@@ -1505,6 +1506,50 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                         "WHERE owner_id = 'owner' AND run_id = $1",
                         UUID(api_run["id"]),
                     ) == "succeeded"
+                    unknown_run_request_id = uuid4()
+                    unknown_run_response = await client.post(
+                        f"/api/v1/tasks/{api_task_id}/runs",
+                        json={"request_id": str(unknown_run_request_id)},
+                        headers={"origin": ORIGIN},
+                    )
+                    assert unknown_run_response.status_code == 201
+                    unknown_run = unknown_run_response.json()
+                    assert unknown_run["attempt_number"] == 2
+                    unknown_claim_response = await client.post(
+                        "/internal/runner/claim",
+                        json={"runner_id": str(api_runner_id)},
+                        headers=runner_headers,
+                    )
+                    assert unknown_claim_response.status_code == 200
+                    assert unknown_claim_response.json()["run_id"] == unknown_run["id"]
+                    unknown_event_response = await client.post(
+                        "/internal/runner/events",
+                        json={
+                            "runner_id": str(api_runner_id),
+                            "run_id": unknown_run["id"],
+                            "event_id": str(uuid4()),
+                            "event_type": "run.unknown",
+                            "occurred_at": datetime.now(timezone.utc).isoformat(),
+                            "source_sequence": 1,
+                        },
+                        headers=runner_headers,
+                    )
+                    assert unknown_event_response.status_code == 200
+                    assert unknown_event_response.json()["acknowledged"] is True
+                    assert await connection.fetchval(
+                        "SELECT state FROM run_dispatches WHERE owner_id = 'owner' AND run_id = $1",
+                        UUID(unknown_run["id"]),
+                    ) == "unknown"
+                    assert await connection.fetchval(
+                        "SELECT status FROM run_activity_projections "
+                        "WHERE owner_id = 'owner' AND run_id = $1",
+                        UUID(unknown_run["id"]),
+                    ) == "unknown"
+                    assert await connection.fetchval(
+                        "SELECT event_type FROM activity_events "
+                        "WHERE owner_id = 'owner' AND run_id = $1",
+                        UUID(unknown_run["id"]),
+                    ) == "run.unknown"
                     assert api_run["attempt_number"] == 1
                     assert api_run["configuration_snapshot"]["task"]["revision"] == 2
                     assert api_run["configuration_snapshot"]["model_endpoint"]["endpoint_url"] == "http://localhost:20128/v1"
@@ -1519,12 +1564,12 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                     assert (
                         await client.get(f"/api/v1/runs/{api_run['id']}")
                     ).json() == api_run
+                    listed_runs_response = await client.get(
+                        f"/api/v1/tasks/{api_task_id}/runs"
+                    )
                     assert [
-                        item["id"]
-                        for item in (
-                            await client.get(f"/api/v1/tasks/{api_task_id}/runs")
-                        ).json()
-                    ] == [api_run["id"]]
+                        item["id"] for item in listed_runs_response.json()
+                    ] == [api_run["id"], unknown_run["id"]]
                     assert (
                         await client.get(f"/api/v1/runs/{first_run.id}")
                     ).status_code == 404
@@ -1745,7 +1790,7 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
             ) == "blocked"
             assert await connection.fetchval(
                 "SELECT version_num FROM alembic_version"
-            ) == "events_0014"
+            ) == "execution_0016"
         finally:
             if restricted_pool is not None:
                 await restricted_pool.close()
@@ -2077,7 +2122,8 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                 owner_id, own_definition.id, version=1
             )
             assert historical_definition is not None
-            assert historical_definition.archived_at is not None
+            assert historical_definition.version == 1
+            assert historical_definition.name == "Researcher"
         finally:
             async with pool.acquire() as cleanup_connection:
                 async with cleanup_connection.transaction():

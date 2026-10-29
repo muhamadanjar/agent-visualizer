@@ -21,6 +21,7 @@ MAX_DOCKER_RESPONSE_BYTES = 9 * 1024 * 1024
 MAX_LOG_BYTES = 8 * 1024 * 1024
 MAX_ACTIVE_RUNS = 2
 MAX_DURATION_SECONDS = 3600
+MAX_INFERENCE_TURNS = 24
 MAX_RESULT_BYTES = 1_048_576
 WORKER_MEMORY_BYTES = 2 * 1024 * 1024 * 1024
 WORKER_NANO_CPUS = 1_000_000_000
@@ -445,14 +446,51 @@ class RuntimeLauncher:
                 raise
 
     def events(self, run_id: str, after_sequence: int) -> dict[str, object]:
-        container_id = self._owned_container_id(run_id, "worker")
+        try:
+            container_id = self._owned_container_id(run_id, "worker")
+        except EngineError as error:
+            LOG.error(
+                "worker_container_lookup_failed run_id=%s status_code=%s",
+                run_id,
+                error.status_code,
+            )
+            raise
         if container_id is None:
             raise LauncherError("Run container was not found", 404)
-        inspection = self._engine.inspect_container(container_id)
+        try:
+            inspection = self._engine.inspect_container(container_id)
+        except EngineError as error:
+            LOG.error(
+                "worker_inspection_failed run_id=%s status_code=%s",
+                run_id,
+                error.status_code,
+            )
+            raise
         state = inspection.get("State")
         if not isinstance(state, dict):
+            LOG.error("worker_state_invalid run_id=%s", run_id)
             raise EngineError(502, "Docker worker state is invalid")
-        frames = _worker_frames(self._engine.logs(container_id))
+        try:
+            raw_logs = self._engine.logs(container_id)
+        except EngineError as error:
+            # Docker may return 502 before a running worker emits its first stdout frame.
+            if state.get("Running") is not True or error.status_code != 502:
+                LOG.error(
+                    "worker_logs_unavailable run_id=%s status_code=%s",
+                    run_id,
+                    error.status_code,
+                )
+                raise
+            raw_logs = b""
+        try:
+            frames = _worker_frames(raw_logs)
+        except EngineError as error:
+            LOG.error(
+                "worker_frame_parse_failed run_id=%s reason=%s",
+                run_id,
+                str(error),
+            )
+            raise
         events = [frame for frame in frames if frame["sequence"] > after_sequence][:128]
         return {
             "events": events,
@@ -609,7 +647,7 @@ def _validate_start_payload(payload: object) -> tuple[str, str, str, dict[str, o
         raise LauncherError("Run tool allowlist is invalid")
     if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= MAX_DURATION_SECONDS:
         raise LauncherError("Run execution timeout is invalid")
-    if not isinstance(turns, int) or isinstance(turns, bool) or not 1 <= turns <= 12:
+    if not isinstance(turns, int) or isinstance(turns, bool) or not 1 <= turns <= MAX_INFERENCE_TURNS:
         raise LauncherError("Run inference limit is invalid")
     if not isinstance(tool_calls, int) or isinstance(tool_calls, bool) or not 1 <= tool_calls <= 50:
         raise LauncherError("Run tool-call limit is invalid")
@@ -991,6 +1029,12 @@ class LauncherRequestHandler(BaseHTTPRequestHandler):
         except LauncherError as error:
             self._send_error(error.status_code, str(error))
         except EngineError as error:
+            if path.path.startswith("/internal/runs/") and path.path.endswith("/events"):
+                LOG.error(
+                    "runtime_event_stream_failed run_id=%s status_code=%s",
+                    path.path.split("/")[3],
+                    error.status_code,
+                )
             self._send_error(error.status_code, "runtime_engine_unavailable")
 
     def do_POST(self) -> None:

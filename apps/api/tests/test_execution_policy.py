@@ -62,3 +62,26 @@ def test_workspace_policy_rejects_unbounded_execution_limits() -> None:
             max_inference_turns=6,
             max_tool_calls=24,
         )
+
+
+def test_workspace_policy_accepts_24_inference_turns() -> None:
+    policy = WorkspacePolicyDraft.create(
+        workspace_path="repo",
+        allowed_tools=("read_file",),
+        max_duration_seconds=900,
+        max_inference_turns=24,
+        max_tool_calls=24,
+    )
+
+    assert policy.max_inference_turns == 24
+
+
+def test_workspace_policy_rejects_more_than_24_inference_turns() -> None:
+    with pytest.raises(ExecutionPolicyInputError, match="max_inference_turns"):
+        WorkspacePolicyDraft.create(
+            workspace_path="repo",
+            allowed_tools=("read_file",),
+            max_duration_seconds=900,
+            max_inference_turns=25,
+            max_tool_calls=24,
+        )
