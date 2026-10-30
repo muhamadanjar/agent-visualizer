@@ -100,6 +100,11 @@ _Avoid_: Run snapshot
 One execution attempt for a Task. A retry creates a new attempt; runtime outcome is distinct from Task acceptance.
 _Avoid_: Task status
 
+**Agent Availability**:
+A current summary of whether an `Agent Instance` has active work, is waiting, is idle, or is uncertain. It is distinct from any individual Run status and from `Visual Agent State`; uncertainty is never represented as idle.
+_Avoid_: Visual Agent State, Agent Status
+
+
 ## Presentation data
 
 **Visual Agent State**:

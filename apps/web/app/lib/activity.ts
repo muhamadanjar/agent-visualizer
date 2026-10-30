@@ -13,6 +13,7 @@ export type ActivityEvent = {
     task_revision: number;
     source_sequence: number | null;
     safe_action_summary: string | null;
+    approval_id?: string | null;
   };
 };
 
@@ -33,6 +34,13 @@ export type RuntimeProjection = {
 export type ActivitySnapshot = {
   cursor: number;
   projections: RuntimeProjection[];
+};
+
+export type AgentAvailabilityState = "idle" | "working" | "waiting" | "unknown";
+
+export type AgentAvailability = {
+  agent_instance_id: string;
+  availability: AgentAvailabilityState;
 };
 
 export type RunActivity = {
@@ -102,6 +110,38 @@ export function requestActivitySnapshot(signal?: AbortSignal): Promise<ActivityS
   return requestActivity<ActivitySnapshot>("/api/v1/activity/snapshot", signal);
 }
 
+function isAgentAvailability(value: unknown): value is AgentAvailability {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.agent_instance_id === "string"
+    && (record.availability === "idle"
+      || record.availability === "working"
+      || record.availability === "waiting"
+      || record.availability === "unknown");
+}
+
+export async function requestAgentAvailability(
+  instanceIds: string[],
+  signal?: AbortSignal,
+): Promise<AgentAvailability[]> {
+  const records: AgentAvailability[] = [];
+  for (let offset = 0; offset < instanceIds.length; offset += 200) {
+    const query = new URLSearchParams();
+    for (const instanceId of instanceIds.slice(offset, offset + 200)) {
+      query.append("agent_instance_id", instanceId);
+    }
+    const value: unknown = await requestActivity<unknown>(
+      `/api/v1/agent-instances/availability?${query.toString()}`,
+      signal,
+    );
+    if (!Array.isArray(value) || !value.every(isAgentAvailability)) {
+      throw new Error("The Agent Availability response was not recognized.");
+    }
+    records.push(...value);
+  }
+  return records;
+}
+
 export function requestRunActivity(runId: string, signal?: AbortSignal): Promise<RunActivity> {
   return requestActivity<RunActivity>(
     `/api/v1/runs/${encodeURIComponent(runId)}/activity`,
@@ -143,7 +183,12 @@ function isActivityEvent(value: unknown): value is ActivityEvent {
   const payload = record.payload as Record<string, unknown>;
   return typeof payload.task_revision === "number"
     && (typeof payload.source_sequence === "number" || payload.source_sequence === null)
-    && (typeof payload.safe_action_summary === "string" || payload.safe_action_summary === null);
+    && (typeof payload.safe_action_summary === "string" || payload.safe_action_summary === null)
+    && (
+      payload.approval_id === undefined
+      || typeof payload.approval_id === "string"
+      || payload.approval_id === null
+    );
 }
 
 function isActivitySnapshot(value: unknown): value is ActivitySnapshot {
@@ -229,13 +274,38 @@ export function subscribeToActivity(emit: (message: ActivityMessage) => void): (
         emit({ type: "connection", state: "unavailable" });
       }
     };
-    socket.onclose = () => {
+    socket.onclose = (event) => {
       clearInterval(pingTimer);
       pingTimer = undefined;
       socket = null;
       if (stopped) return;
-      emit({ type: "connection", state: "disconnected" });
-      reconnectTimer = setTimeout(connect, 2_000);
+      const reconnect = () => {
+        if (stopped) return;
+        emit({ type: "connection", state: "disconnected" });
+        reconnectTimer = setTimeout(connect, 2_000);
+      };
+      if (event.code === 1008) {
+        emit({ type: "connection", state: "unavailable" });
+        return;
+      }
+      if (event.code === 1006) {
+        void fetch("/api/v1/auth/me", {
+          cache: "no-store",
+          credentials: "same-origin",
+          headers: { accept: "application/json" },
+        })
+          .then((response) => {
+            if (stopped) return;
+            if (response.status === 401 || response.status === 403) {
+              emit({ type: "connection", state: "unavailable" });
+              return;
+            }
+            reconnect();
+          })
+          .catch(reconnect);
+        return;
+      }
+      reconnect();
     };
     socket.onerror = () => socket?.close();
   }

@@ -45,6 +45,52 @@ def test_worker_log_frames_keep_only_complete_stdout_frames() -> None:
     assert frames == [started, event, result]
 
 
+def test_worker_log_frames_accept_bounded_failure_diagnostics() -> None:
+    frames = [
+        {"sequence": 1, "kind": "started", "payload": {}},
+        {
+            "sequence": 2,
+            "kind": "failure",
+            "payload": {
+                "error_type": "ProviderResponseError",
+                "cause_type": "HTTPError",
+                "cause_status": 429,
+                "cause_reason": "unavailable",
+            },
+        },
+    ]
+    logs = _docker_frame(
+        1,
+        b"".join(json.dumps(frame).encode() + b"\n" for frame in frames),
+    )
+
+    assert server._worker_frames(logs) == frames
+
+
+def test_worker_log_frames_reject_unbounded_failure_reason() -> None:
+    frames = [
+        {"sequence": 1, "kind": "started", "payload": {}},
+        {
+            "sequence": 2,
+            "kind": "failure",
+            "payload": {
+                "error_type": "ProviderResponseError",
+                "cause_type": "HTTPError",
+                "cause_status": 429,
+                "cause_reason": "provider response leaked",
+            },
+        },
+    ]
+
+    with pytest.raises(server.EngineError):
+        server._worker_frames(
+            _docker_frame(
+                1,
+                b"".join(json.dumps(frame).encode() + b"\n" for frame in frames),
+            )
+        )
+
+
 @pytest.mark.parametrize(
     ("running", "status_code", "retries"),
     [(True, 502, True), (False, 502, False), (True, 503, False)],
@@ -357,3 +403,60 @@ def test_proxy_http_host_must_match_allowlisted_request_target() -> None:
             "http://host.docker.internal:20128/v1",
             "internal.service:20128",
         )
+
+
+@pytest.mark.parametrize(
+    ("states", "expected_verified", "expected_kills"),
+    [
+        ([{"Running": False}], True, 0),
+        ([{"Running": True}, {"Running": False}], True, 1),
+        ([{"Running": True}, {"Running": True}], False, 1),
+    ],
+)
+def test_stop_run_reports_only_inspected_worker_stop(
+    states: list[dict[str, bool]], expected_verified: bool, expected_kills: int
+) -> None:
+    run_id = "891e3b15-7408-4d39-91af-ff0ea5a06d18"
+
+    class Engine:
+        def __init__(self) -> None:
+            self.inspections = iter(states)
+            self.kills = 0
+
+        def list_owned_role(
+            self, requested_run_id: str, role: str
+        ) -> list[dict[str, object]]:
+            assert requested_run_id == run_id
+            assert role == "worker"
+            return [
+                {
+                    "Id": "worker-container",
+                    "Labels": {
+                        server.OWNER_LABEL: "true",
+                        server.RUN_ID_LABEL: run_id,
+                        server.ROLE_LABEL: "worker",
+                    },
+                }
+            ]
+
+        def stop_container(self, _container_id: str) -> None:
+            return None
+
+        def inspect_container(self, _container_id: str) -> dict[str, object]:
+            return {"State": next(self.inspections)}
+
+        def kill_container(self, _container_id: str) -> None:
+            self.kills += 1
+
+    launcher = server.RuntimeLauncher.__new__(server.RuntimeLauncher)
+    engine = Engine()
+    launcher._engine = engine  # type: ignore[assignment]
+
+    result = launcher.stop_run(run_id)
+
+    assert result == {
+        "run_id": run_id,
+        "verified": expected_verified,
+        "status": "stopped" if expected_verified else "unknown",
+    }
+    assert engine.kills == expected_kills

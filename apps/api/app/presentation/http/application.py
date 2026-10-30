@@ -587,7 +587,7 @@ class ActivityEventPayloadResponse(BaseModel):
     task_revision: int
     source_sequence: int | None
     safe_action_summary: str | None
-
+    approval_id: UUID | None
 
 class ActivityEventResponse(BaseModel):
     event_id: UUID
@@ -856,6 +856,11 @@ class AgentInstanceResponse(BaseModel):
     archived: bool
     created_at: datetime
     updated_at: datetime
+
+
+class AgentAvailabilityResponse(BaseModel):
+    agent_instance_id: UUID
+    availability: Literal["idle", "working", "waiting", "unknown"]
 
 
 def _agent_instance_response(instance: AgentInstance) -> AgentInstanceResponse:
@@ -2174,6 +2179,28 @@ def create_http_app(
             project_id=project_id,
         )
         return [_agent_instance_response(instance) for instance in instances]
+
+    @application.get(
+        "/api/v1/agent-instances/availability",
+        response_model=list[AgentAvailabilityResponse],
+    )
+    async def list_agent_availability(
+        agent_instance_id: list[UUID] = Query(min_length=1, max_length=200),
+        principal: OwnerPrincipal = Depends(require_owner),
+        execution: ExecutionRepository = Depends(require_execution_repository),
+    ) -> list[AgentAvailabilityResponse]:
+        availability = await execution.list_agent_availability(
+            principal.owner_id,
+            agent_instance_id,
+            now=datetime.now(UTC),
+        )
+        return [
+            AgentAvailabilityResponse(
+                agent_instance_id=item.instance_id,
+                availability=item.availability,
+            )
+            for item in availability
+        ]
 
     @application.get(
         "/api/v1/agent-instances/{instance_id}",

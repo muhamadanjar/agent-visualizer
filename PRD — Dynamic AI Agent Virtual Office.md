@@ -1231,6 +1231,15 @@ Visual animation mapping ditentukan oleh frontend berdasarkan normalized events.
 
 Karakter dapat bergerak menuju lokasi yang sesuai dengan aktivitas.
 
+Pergerakan visual menggunakan `Agent Availability`, read model turunan yang owner-scoped dari dispatch `Run / Attempt` unresolved dan projection `Activity Event` persisted; status ini bukan kolom status baru pada `Agent Instance` dan bukan `Activity Event` baru:
+
+- `idle`: tidak ada dispatch yang masih unresolved; karakter duduk di Rest Room.
+- `working`: dispatch `leased` dengan projection `running` yang fresh; karakter bergerak ke workstation dan menjalankan pose mengetik.
+- `waiting`: dispatch `queued`/`blocked`, projection menunggu input/approval, atau cancellation pending; karakter tetap di workstation tanpa pose mengetik.
+- `unknown`: dispatch/projection hilang, stale, tidak konsisten, atau API tidak tersedia; karakter tetap di workstation dalam pose netral dan tidak pernah dianggap `idle`.
+
+Run terminal tidak mencegah `idle` setelah tidak ada dispatch unresolved. `Agent Availability` tidak memberi izin, assignment, atau lokasi workspace tersimpan.
+
 Contoh:
 
 ```text

@@ -7,6 +7,8 @@ from typing import Protocol
 from uuid import UUID
 
 
+from app.domain.availability import AgentAvailability, AgentRunEvidence
+
 ALLOWED_WORKSPACE_TOOLS = frozenset({"list_files", "read_file", "write_file"})
 _WORKSPACE_SEGMENT_RE = re.compile(r"[^/\\\x00-\x1f\x7f]{1,255}\Z")
 
@@ -141,6 +143,10 @@ class RunnerLeaseStatus:
 
 
 class ExecutionRepository(Protocol):
+
+    async def list_agent_availability(
+        self, owner_id: str, instance_ids: list[UUID], *, now: datetime
+    ) -> list[AgentAvailability]: ...
     async def get_policy_for_project(
         self, owner_id: str, project_id: UUID
     ) -> WorkspacePolicy | None: ...

@@ -31,6 +31,7 @@ def _wire_event(owner_id: str, sequence: int) -> dict[str, object]:
             "task_revision": 1,
             "source_sequence": sequence,
             "safe_action_summary": None,
+            "approval_id": None,
         },
     }
 
@@ -56,6 +57,17 @@ def test_activity_event_hub_scopes_owners_and_bounds_slow_subscribers() -> None:
 def test_activity_stream_rejects_malformed_cursor_envelopes() -> None:
     event = _wire_event("owner-a", 1)
     assert _decode_event(json.dumps(event)) == event
+    legacy = _wire_event("owner-a", 5)
+    del legacy["payload"]["approval_id"]
+    assert _decode_event(json.dumps(legacy)) == _wire_event("owner-a", 5)
+
+    approval = _wire_event("owner-a", 6)
+    approval["type"] = "approval.requested"
+    approval_id = str(uuid4())
+    approval["payload"]["approval_id"] = approval_id
+    assert _decode_event(json.dumps(approval)) == approval
+    approval["payload"]["approval_id"] = None
+    assert _decode_event(json.dumps(approval)) is None
 
     malformed = _wire_event("owner-a", 2)
     malformed["sequence"] = True
@@ -156,3 +168,35 @@ def test_stream_consumer_reads_new_events_after_existing_stream_cursor() -> None
     assert consumer_ready.is_set()
     assert redis.read_cursor == "10-0"
     assert queue.get_nowait()["sequence"] == 1
+
+def test_stream_consumer_recovers_from_redis_read_failure_without_losing_cursor() -> None:
+    event = _wire_event("owner-a", 11)
+    stop = asyncio.Event()
+    consumer_ready = asyncio.Event()
+    hub = ActivityEventHub()
+    queue = hub.subscribe("owner-a")
+
+    class Redis:
+        read_cursor: str | None = None
+        attempts = 0
+
+        async def xrevrange(self, _stream, *, count: int):
+            assert count == 1
+            return [(b"10-0", {})]
+
+        async def xread(self, streams, *, count: int, block: int):
+            assert count == 100 and block == 1000
+            self.read_cursor = streams[STREAM_KEY]
+            self.attempts += 1
+            if self.attempts == 1:
+                raise ConnectionError("Redis unavailable")
+            stop.set()
+            return [(STREAM_KEY, [(b"11-0", {"event": json.dumps(event)})])]
+
+    redis = Redis()
+    asyncio.run(consume_stream(redis, hub, stop, consumer_ready))
+
+    assert consumer_ready.is_set()
+    assert redis.attempts == 2
+    assert redis.read_cursor == "10-0"
+    assert queue.get_nowait()["sequence"] == 11

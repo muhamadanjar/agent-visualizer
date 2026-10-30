@@ -22,6 +22,9 @@ ACTIVITY_EVENT_TYPES = frozenset(
         "run.canceled",
         "run.unknown",
         "session.heartbeat",
+        "approval.requested",
+        "approval.approved",
+        "approval.rejected",
     }
 )
 EVENT_STATUS = {
@@ -64,7 +67,7 @@ class ActivityEventDraft:
     occurred_at: datetime
     source_sequence: int | None
     action_summary: str | None = None
-
+    approval_id: UUID | None = None
     def validate(self) -> None:
         if not self.owner_id or len(self.owner_id) > 128:
             raise EvidenceInputError("owner_id")
@@ -80,6 +83,9 @@ class ActivityEventDraft:
             raise EvidenceInputError("source_sequence")
         if self.occurred_at.tzinfo is None or self.occurred_at.utcoffset() is None:
             raise EvidenceInputError("occurred_at")
+        approval_event = self.event_type.startswith("approval.")
+        if approval_event != (self.approval_id is not None):
+            raise EvidenceInputError("approval_id")
         if self.event_type == "run.tool_action":
             if (
                 self.action_summary is None
@@ -112,7 +118,7 @@ class ActivityEvent:
     received_at: datetime
     source_sequence: int | None
     action_summary: str | None = None
-
+    approval_id: UUID | None = None
 
 @dataclass(frozen=True, slots=True)
 class RunActivityProjection:
@@ -194,6 +200,7 @@ def activity_event_envelope(event: ActivityEvent) -> dict[str, object]:
             "task_revision": event.task_revision,
             "source_sequence": event.source_sequence,
             "safe_action_summary": event.action_summary,
+            "approval_id": None if event.approval_id is None else str(event.approval_id),
         },
     }
 
@@ -215,6 +222,7 @@ def _same_event(row: Mapping[str, object], event: ActivityEventDraft) -> bool:
             ("occurred_at", event.occurred_at),
             ("source_sequence", event.source_sequence),
             ("action_summary", event.action_summary),
+            ("approval_id", event.approval_id),
         )
     )
 

@@ -29,6 +29,17 @@ WORKER_PIDS_LIMIT = 128
 PROXY_NETWORK = os.environ.get("RUNTIME_EGRESS_NETWORK", "agent-office-runtime-egress")
 WORKSPACE_CONTAINER_ROOT = os.environ.get("WORKSPACE_ROOT", "/workspace-root")
 ALLOWED_TOOLS = {"list_files", "read_file", "write_file"}
+SAFE_WORKER_FAILURE_REASONS = {
+    "unavailable",
+    "Model Endpoint configuration is unavailable",
+    "Run tool configuration is invalid",
+    "Model parameters are invalid",
+    "workspace path is invalid",
+    "workspace root cannot be a symlink",
+    "workspace path cannot traverse a symlink",
+    "workspace path escaped its root",
+    "workspace tool allowlist is invalid",
+}
 RUNNER_ID_LABEL = "agent-office.runner-id"
 RUN_ID_LABEL = "agent-office.run-id"
 ROLE_LABEL = "agent-office.role"
@@ -899,6 +910,7 @@ def _worker_frames(raw_logs: bytes) -> list[dict[str, object]]:
     previous = 0
     started = False
     result_seen = False
+    failure_seen = False
     for line in lines:
         if not line:
             continue
@@ -913,7 +925,7 @@ def _worker_frames(raw_logs: bytes) -> list[dict[str, object]]:
             or not isinstance(frame.get("sequence"), int)
             or isinstance(frame.get("sequence"), bool)
             or frame["sequence"] <= previous
-            or frame.get("kind") not in {"started", "event", "result"}
+            or frame.get("kind") not in {"started", "event", "result", "failure"}
             or not isinstance(frame.get("payload"), dict)
         ):
             raise EngineError(502, "Worker protocol frame is invalid")
@@ -925,8 +937,32 @@ def _worker_frames(raw_logs: bytes) -> list[dict[str, object]]:
             started = True
         elif not started:
             raise EngineError(502, "Worker activity preceded startup acknowledgement")
-        elif result_seen:
-            raise EngineError(502, "Worker output followed its result frame")
+        elif result_seen or failure_seen:
+            raise EngineError(502, "Worker output followed a terminal frame")
+        elif frame["kind"] == "failure":
+            error_type = payload.get("error_type")
+            cause_type = payload.get("cause_type")
+            cause_status = payload.get("cause_status")
+            cause_reason = payload.get("cause_reason")
+            if (
+                set(payload)
+                != {"error_type", "cause_type", "cause_status", "cause_reason"}
+                or not isinstance(error_type, str)
+                or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", error_type)
+                or not isinstance(cause_type, str)
+                or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", cause_type)
+                or (
+                    cause_status != "unavailable"
+                    and (
+                        not isinstance(cause_status, int)
+                        or isinstance(cause_status, bool)
+                        or not 100 <= cause_status <= 599
+                    )
+                )
+                or cause_reason not in SAFE_WORKER_FAILURE_REASONS
+            ):
+                raise EngineError(502, "Worker failure frame is invalid")
+            failure_seen = True
         elif frame["kind"] == "event":
             event_type = payload.get("event_type")
             event_id = payload.get("event_id")

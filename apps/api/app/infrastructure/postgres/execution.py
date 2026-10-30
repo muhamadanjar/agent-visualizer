@@ -7,6 +7,11 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import aliased
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from app.domain.availability import (
+    AgentAvailability,
+    AgentRunEvidence,
+    derive_agent_availability,
+)
 from app.domain.execution import (
     RunExecutionJob,
     RunnerLeaseStatus,
@@ -16,7 +21,9 @@ from app.domain.execution import (
     WorkspacePolicyDraft,
 )
 from app.infrastructure.postgres.models import (
+    AgentInstanceTable,
     ProjectExecutionPolicyTable,
+    RunActivityProjectionTable,
     RunDispatchTable,
     RunTable,
     RunnerConnectionTable,
@@ -41,6 +48,72 @@ def _workspace_policy(row: ProjectExecutionPolicyTable) -> WorkspacePolicy:
 class PostgresExecutionRepository:
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
         self._sessions = sessions
+
+    async def list_agent_availability(
+        self, owner_id: str, instance_ids: list[UUID], *, now: datetime
+    ) -> list[AgentAvailability]:
+        unique_ids = list(dict.fromkeys(instance_ids))
+        if not unique_ids:
+            return []
+
+        statement = (
+            select(
+                AgentInstanceTable.id.label("instance_id"),
+                RunDispatchTable.state.label("dispatch_state"),
+                RunActivityProjectionTable.status.label("projection_status"),
+                RunActivityProjectionTable.last_event_type.label("last_event_type"),
+                RunActivityProjectionTable.last_event_at.label("last_event_at"),
+                RunActivityProjectionTable.last_heartbeat_at.label("last_heartbeat_at"),
+            )
+            .select_from(AgentInstanceTable)
+            .outerjoin(
+                RunDispatchTable,
+                (RunDispatchTable.owner_id == AgentInstanceTable.owner_id)
+                & (RunDispatchTable.instance_id == AgentInstanceTable.id)
+                & RunDispatchTable.state.in_(("queued", "leased", "unknown", "blocked")),
+            )
+            .outerjoin(
+                RunActivityProjectionTable,
+                (RunActivityProjectionTable.owner_id == RunDispatchTable.owner_id)
+                & (RunActivityProjectionTable.run_id == RunDispatchTable.run_id),
+            )
+            .where(
+                AgentInstanceTable.owner_id == owner_id,
+                AgentInstanceTable.archived_at.is_(None),
+                AgentInstanceTable.id.in_(unique_ids),
+            )
+        )
+        async with self._sessions() as session:
+            rows = (await session.execute(statement)).mappings().all()
+
+        owned_ids: set[UUID] = set()
+        evidence_by_instance: dict[UUID, list[AgentRunEvidence]] = {}
+        for row in rows:
+            instance_id = row["instance_id"]
+            owned_ids.add(instance_id)
+            dispatch_state = row["dispatch_state"]
+            if dispatch_state is None:
+                continue
+            evidence_by_instance.setdefault(instance_id, []).append(
+                AgentRunEvidence(
+                    instance_id=instance_id,
+                    dispatch_state=dispatch_state,
+                    projection_status=row["projection_status"],
+                    last_event_type=row["last_event_type"],
+                    last_event_at=row["last_event_at"],
+                    last_heartbeat_at=row["last_heartbeat_at"],
+                )
+            )
+
+        return [
+            derive_agent_availability(
+                instance_id,
+                evidence_by_instance.get(instance_id, ()),
+                owned=instance_id in owned_ids,
+                now=now,
+            )
+            for instance_id in unique_ids
+        ]
 
     async def get_policy_for_project(
         self, owner_id: str, project_id: UUID

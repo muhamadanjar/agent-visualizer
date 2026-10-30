@@ -6,13 +6,13 @@
 | **Author(s)** | Muhamad Anjar |
 | **Reviewer(s)** | [perlu konfirmasi: reviewer] |
 | **Tanggal Dibuat** | 2026-10-27 |
-| **Terakhir Diupdate** | 2026-10-28 |
+| **Terakhir Diupdate** | 2026-10-29 |
 | **Service Terkait** | `apps/api`, `apps/dispatcher`, `apps/runner`, Docker Compose, `apps/web` |
 | **Ticket / Issue** | N/A — tidak diberikan |
 
 ## Ringkasan (TL;DR)
 
-P0 menargetkan LangChain dalam container terisolasi per Run; Agent Office tetap mengendalikan Task/Run, permission, cancellation, dan Activity Event. Implementasi kini memiliki Runner supervisor, Runtime Launcher terpisah, worker container per Run, proxy endpoint-terpilih, worker startup acknowledgement sebelum `run.started`, dan validasi frame pada Runner serta Launcher. URL Model Endpoint berasal dari snapshot Run sehingga global `NINEROUTER_URL` tidak wajib. Full API → Runner → Launcher → provider → UI/3D execution dan live restart recovery belum terverifikasi; design doc dan roadmap Phase 2 tetap terbuka.
+P0 menargetkan LangChain dalam container terisolasi per Run; Agent Office tetap mengendalikan Task/Run, permission, cancellation, dan Activity Event. Implementasi memiliki Runner supervisor, Runtime Launcher, worker container per Run, proxy endpoint-terpilih, startup acknowledgement, dan validasi frame. Runner memakai pool bounded dua Run. Tes API, Runner, Launcher, serta Docker mencakup owner-cancel, verified/unknown stop, recovery scheduling, concurrent jobs, stop/kill/reinspect, dan penolakan egress. Live acceptance kini lulus: cancellation; Run berhasil setelah restart Runtime Launcher (Attempt 27), Runner (Attempt 40), dan API (Attempt 41); dua overlapping Runs berhasil. Verifikasi browser/UI dan Visual Agent State setelah refresh/reconnect tetap merupakan acceptance terpisah di workstream lanjutan.
 
 ## Latar Belakang & Masalah
 
@@ -89,7 +89,7 @@ Run hanya menjadi `canceled` setelah stop proses/container terverifikasi. Bila s
 
 LangChain menggantikan loop custom secara langsung. API contract boleh breaking; web dan Runner diperbarui serentak dan tidak ada compatibility shim. Migrasi database tetap additive dan mempertahankan Run lama sebagai histori; old Run tidak dieksekusi ulang dengan konfigurasi runtime baru. Rollback berarti mengembalikan deployment sebelum start Run baru, bukan menjalankan ulang attempt yang statusnya tidak pasti.
 
-Dependency implementasi dipatok pada `langchain==1.4.7` dan `langchain-openai==1.7.3`. Runner (24 tests) dan Launcher (19 tests) membuktikan konstruksi agent, pemilihan model/route tanpa global `NINEROUTER_URL`, startup acknowledgement, batas worker-frame/lifecycle, event quarantine, orphan resource cleanup, cancellation verification branches, dan bounded result persistence pada level komponen. Disposable PostgreSQL 17 migration mencapai `runtime_0013`; Compose config dan kedua image berhasil dibangun. Tidak ada API-created Run yang melewati container/provider nyata; Docker egress denial dan Provider Router execution belum dibuktikan.
+Dependency implementasi dipatok pada `langchain==1.4.7` dan `langchain-openai==1.7.3`. Verifikasi automated terdokumentasi: Runner `35 passed`, API `68 passed, 1 skipped`, Launcher `27 passed, 2 skipped` dengan opt-in Docker integration; compileall, Runner Docker image build, Compose config, dan graph update berhasil. Live API-created cancellation berhasil pada Attempt 26. Attempt 27 berhasil saat Runtime Launcher restart memakai `openrouter/cohere/north-mini-code:free`; Attempt 40 dengan `ag/gemini-3.8-flash` berhasil setelah Runner restart; Attempt 41 dengan model yang sama berhasil setelah API restart dan menyimpan `run.succeeded` serta satu Run Result. Runs `53bf4f84-c174-4b15-9870-c34fa1c5896b` dan `37590e3e-d958-40af-9cd5-011b7c4262f2` berhasil dengan overlap pada workspace berbeda menggunakan `ag/gemini-3.8-flash`. Test policy dinonaktifkan kembali dan concurrency Definition dipulihkan ke 1. Sebelumnya ada provider-route, model-call-limit, dan timeout failures; acceptance terlewati pada probe read-only yang dibatasi.
 
 P0 capability implementation includes create/start, bounded tool calls, normalized lifecycle/safe-action events, result/error, timeout, cancellation acknowledgement, and no-browser dependency. Streaming and pause/resume are not claimed; remaining capabilities stay open until acceptance evidence is recorded.
 
@@ -118,7 +118,7 @@ P0 capability implementation includes create/start, bounded tool calls, normaliz
 
 ## Pertanyaan Terbuka
 
-- [implementasi belum membuktikan: API-created real provider Run, endpoint-denial enforcement inside Docker, live cancellation/restart/reconciliation, concurrent independent Runs, dan persisted event/result acceptance di UI/3D]
+- [ditangani di workstream lanjutan: verifikasi browser/UI dan Visual Agent State setelah refresh/reconnect; bukan blocker Agent Runtime. Live API-created cancellation, recovery Run setelah restart Runtime Launcher/Runner/API, dan dua overlapping Runs telah berhasil pada 2026-10-29.]
 - [perlu konfirmasi: nama/email author dan reviewer]
 
 ## Referensi

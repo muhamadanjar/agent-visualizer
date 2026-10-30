@@ -22,6 +22,7 @@ from app.domain.evidence import (
     ArtifactDraft,
     EvidenceInputError,
     action_digest,
+    activity_event_envelope,
 )
 from app.domain.instances import AgentInstanceInputError
 from app.domain.registry import AgentRegistryConflictError
@@ -116,7 +117,7 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
             await apply_alembic_migrations(dsn)
             assert await connection.fetchval(
                 "SELECT version_num FROM alembic_version"
-            ) == "execution_0016"
+            ) == "events_0017"
             migrated_endpoint = await connection.fetchrow(
                 "SELECT name, credential_env, default_model_id, default_route "
                 "FROM model_endpoints WHERE owner_id = $1",
@@ -1153,6 +1154,17 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                 approval_draft
             )
             assert inserted is False and replayed_approval.id == approval.id
+            request_events = await evidence_repository.list_events_for_run(
+                restricted_owner_id, first_run.id, limit=20
+            )
+            assert request_events is not None
+            approval_events = [
+                event for event in request_events if event.approval_id == approval.id
+            ]
+            assert [event.event_type for event in approval_events] == [
+                "approval.requested"
+            ]
+            assert approval_events[0].action_summary is None
             decision_time = datetime.now(timezone.utc)
             try:
                 await approval_repository.resolve(
@@ -1174,6 +1186,100 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                 decision_time,
             )
             assert rejected.decision == "rejected"
+            replayed_rejected = await approval_repository.resolve(
+                restricted_owner_id,
+                approval.id,
+                approval_digest,
+                "rejected",
+                decision_time,
+            )
+            assert replayed_rejected.id == approval.id
+            approved_draft = replace(approval_draft, request_id=uuid4())
+            approved_request, inserted = await approval_repository.create_request(
+                approved_draft
+            )
+            assert inserted is True
+            approved = await approval_repository.resolve(
+                restricted_owner_id,
+                approved_request.id,
+                approval_digest,
+                "approved",
+                decision_time,
+            )
+            assert approved.decision == "approved"
+            replayed_approved = await approval_repository.resolve(
+                restricted_owner_id,
+                approved_request.id,
+                approval_digest,
+                "approved",
+                decision_time,
+            )
+            assert replayed_approved.id == approved_request.id
+            all_approval_events = await evidence_repository.list_events_for_run(
+                restricted_owner_id, first_run.id, limit=20
+            )
+            assert all_approval_events is not None
+            all_approval_events = sorted(
+                (
+                    event
+                    for event in all_approval_events
+                    if event.approval_id in {approval.id, approved_request.id}
+                ),
+                key=lambda event: event.cursor,
+            )
+            assert [event.event_type for event in all_approval_events] == [
+                "approval.requested",
+                "approval.rejected",
+                "approval.requested",
+                "approval.approved",
+            ]
+            assert all(event.action_summary is None for event in all_approval_events)
+            assert all(
+                activity_event_envelope(event)["payload"]["approval_id"]
+                == str(event.approval_id)
+                for event in all_approval_events
+            )
+            pending_approval_outbox = await connection.fetchval(
+                """
+                SELECT count(*)
+                FROM activity_event_outbox
+                WHERE owner_id = $1 AND cursor = ANY($2::bigint[])
+                """,
+                restricted_owner_id,
+                [event.cursor for event in all_approval_events],
+            )
+            assert pending_approval_outbox == 4
+            await connection.execute(
+                "UPDATE activity_event_outbox SET published_at = now() "
+                "WHERE owner_id = $1",
+                restricted_owner_id,
+            )
+            await connection.execute(
+                "UPDATE activity_event_outbox SET published_at = NULL "
+                "WHERE owner_id = $1 AND cursor = ANY($2::bigint[])",
+                restricted_owner_id,
+                [event.cursor for event in all_approval_events],
+            )
+            approval_claim_id = uuid4()
+            claimed_approval_events = []
+            for _ in all_approval_events:
+                claimed = await evidence_repository.claim_outbox_batch(
+                    approval_claim_id, limit=10, lease_seconds=30
+                )
+                assert len(claimed) == 1
+                claimed_approval_events.extend(claimed)
+                assert await evidence_repository.mark_outbox_published(
+                    claimed[0].owner_id, claimed[0].cursor, approval_claim_id
+                )
+            assert [
+                (event.event_type, event.approval_id)
+                for event in claimed_approval_events
+            ] == [
+                ("approval.requested", approval.id),
+                ("approval.rejected", approval.id),
+                ("approval.requested", approved_request.id),
+                ("approval.approved", approved_request.id),
+            ]
 
             artifact_repository = PostgresArtifactRepository(restricted_sessions)
             artifact = await artifact_repository.create(
@@ -1676,6 +1782,43 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
             first_lease_expiry = datetime.now(timezone.utc) + timedelta(minutes=2)
             second_lease_expiry = datetime.now(timezone.utc) + timedelta(minutes=1)
             async with connection.transaction():
+                await connection.execute(
+                    """
+                    DELETE FROM activity_event_outbox
+                    WHERE owner_id = $1 AND cursor IN (
+                        SELECT cursor FROM activity_events
+                        WHERE owner_id = $1 AND event_type LIKE 'approval.%'
+                    )
+                    """,
+                    restricted_owner_id,
+                )
+                await connection.execute(
+                    "DELETE FROM activity_events "
+                    "WHERE owner_id = $1 AND event_type LIKE 'approval.%'",
+                    restricted_owner_id,
+                )
+                await connection.execute(
+                    """
+                    ALTER TABLE activity_events
+                    DROP CONSTRAINT activity_events_approval_fk,
+                    DROP CONSTRAINT activity_events_approval_id_check,
+                    DROP CONSTRAINT activity_events_event_type_check,
+                    DROP COLUMN approval_id
+                    """
+                )
+                await connection.execute(
+                    """
+                    ALTER TABLE activity_events
+                    ADD CONSTRAINT activity_events_event_type_check CHECK (
+                        event_type IN (
+                            'run.started', 'run.waiting_input', 'run.waiting_approval',
+                            'run.blocked', 'run.tool_action', 'run.cancellation_pending',
+                            'run.succeeded', 'run.failed', 'run.canceled', 'run.unknown',
+                            'session.heartbeat'
+                        )
+                    )
+                    """
+                )
                 await connection.execute("DROP INDEX run_dispatches_active_workspace_idx")
                 await connection.execute("ALTER TABLE run_dispatches DROP COLUMN workspace_path")
                 await connection.execute("DROP TABLE activity_event_outbox")
@@ -1790,7 +1933,7 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
             ) == "blocked"
             assert await connection.fetchval(
                 "SELECT version_num FROM alembic_version"
-            ) == "execution_0016"
+            ) == "events_0017"
         finally:
             if restricted_pool is not None:
                 await restricted_pool.close()
@@ -1804,14 +1947,17 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                                 "(SELECT id FROM runs WHERE owner_id = 'owner' AND task_id = $1)",
                                 api_task_id,
                             )
-                            await connection.execute(
-                                "DELETE FROM activity_event_outbox "
-                                "WHERE owner_id = 'owner' AND cursor IN "
-                                "(SELECT cursor FROM activity_events "
-                                "WHERE owner_id = 'owner' AND run_id IN "
-                                "(SELECT id FROM runs WHERE owner_id = 'owner' AND task_id = $1))",
-                                api_task_id,
-                            )
+                            if await connection.fetchval(
+                                "SELECT to_regclass('public.activity_event_outbox') IS NOT NULL"
+                            ):
+                                await connection.execute(
+                                    "DELETE FROM activity_event_outbox "
+                                    "WHERE owner_id = 'owner' AND cursor IN "
+                                    "(SELECT cursor FROM activity_events "
+                                    "WHERE owner_id = 'owner' AND run_id IN "
+                                    "(SELECT id FROM runs WHERE owner_id = 'owner' AND task_id = $1))",
+                                    api_task_id,
+                                )
                             for table in (
                                 "run_activity_projections",
                                 "activity_events",
@@ -1873,11 +2019,11 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                     )
                     for table in (
                         "approval_decisions",
-                        "approval_requests",
                         "artifacts",
                         "run_activity_projections",
                         "activity_event_outbox",
                         "activity_events",
+                        "approval_requests",
                         "owner_event_cursors",
                     ):
                         await connection.execute(

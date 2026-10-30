@@ -477,8 +477,16 @@ class ActivityEventTable(SQLModel, table=True):
             "event_type IN ('run.started', 'run.waiting_input', 'run.waiting_approval', "
             "'run.blocked', 'run.tool_action', 'run.cancellation_pending', "
             "'run.succeeded', 'run.failed', 'run.canceled', 'run.unknown', "
-            "'session.heartbeat')",
+            "'session.heartbeat', 'approval.requested', 'approval.approved', "
+            "'approval.rejected')",
             name="activity_events_event_type_check",
+        ),
+        CheckConstraint(
+            "(event_type IN ('approval.requested', 'approval.approved', 'approval.rejected') "
+            "AND approval_id IS NOT NULL) OR "
+            "(event_type NOT IN ('approval.requested', 'approval.approved', 'approval.rejected') "
+            "AND approval_id IS NULL)",
+            name="activity_events_approval_id_check",
         ),
         CheckConstraint(
             "(event_type = 'run.tool_action' AND action_summary IS NOT NULL "
@@ -501,10 +509,17 @@ class ActivityEventTable(SQLModel, table=True):
         ),
         ForeignKeyConstraint(
             ["owner_id", "agent_instance_id"],
-            ["agent_instances.owner_id", "agent_instances.id"], ondelete="RESTRICT"
+            ["agent_instances.owner_id", "agent_instances.id"],
+            ondelete="RESTRICT",
         ),
         Index("activity_events_owner_run_cursor_idx", "owner_id", "run_id", "cursor"),
         Index("activity_events_owner_project_cursor_idx", "owner_id", "project_id", "cursor"),
+        ForeignKeyConstraint(
+            ["owner_id", "approval_id"],
+            ["approval_requests.owner_id", "approval_requests.id"],
+            name="activity_events_approval_fk",
+            ondelete="RESTRICT",
+        ),
     )
 
     owner_id: str = Field(sa_column=Column(Text, nullable=False))
@@ -526,7 +541,7 @@ class ActivityEventTable(SQLModel, table=True):
     )
     source_sequence: int | None = Field(default=None, sa_column=Column(BigInteger))
     action_summary: str | None = Field(default=None, sa_column=Column(Text))
-
+    approval_id: UUID | None = Field(default=None, sa_column=Column(PGUUID(as_uuid=True)))
 
 class ActivityEventOutboxTable(SQLModel, table=True):
     __tablename__ = "activity_event_outbox"

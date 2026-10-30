@@ -13,6 +13,7 @@ from unittest.mock import patch
 import pytest
 from runner import (
     EventOutbox,
+    RunnerJobPool,
     RunnerSupervisor,
     RunnerSettings,
     RunnerTransportError,
@@ -29,6 +30,210 @@ from runner import (
 )
 
 
+
+def test_runner_job_pool_runs_two_distinct_jobs_concurrently() -> None:
+    pool = RunnerJobPool(max_workers=2)
+
+    first_started = threading.Event()
+    second_started = threading.Event()
+    release = threading.Event()
+
+    def run(started: threading.Event) -> None:
+        started.set()
+        assert release.wait(timeout=2)
+
+    try:
+        assert pool.submit("run-1", run, first_started)
+        assert pool.submit("run-2", run, second_started)
+        assert first_started.wait(timeout=2)
+        assert second_started.wait(timeout=2)
+        assert not pool.submit("run-3", run, threading.Event())
+        assert pool.active_run_ids() == {"run-1", "run-2"}
+    finally:
+        release.set()
+        pool.shutdown()
+
+
+def test_runner_pool_reserves_failed_run_until_recovery_or_release() -> None:
+    pool = RunnerJobPool(max_workers=2)
+    failed = threading.Event()
+    release_second = threading.Event()
+    recovered = threading.Event()
+
+    def fail() -> None:
+        failed.set()
+        raise RunnerTransportError("temporary monitor failure")
+
+    def wait_for_release() -> None:
+        assert release_second.wait(timeout=2)
+
+    try:
+        assert pool.submit("run-1", fail)
+        assert failed.wait(timeout=2)
+        pool.reap()
+        assert pool.failed_run_ids() == {"run-1"}
+        assert pool.available_workers == 1
+
+        assert pool.submit("run-2", wait_for_release)
+        assert not pool.submit("run-3", wait_for_release)
+        assert pool.resubmit_recovered(
+            "run-1", lambda: recovered.set()
+        )
+        assert recovered.wait(timeout=2)
+        release_second.set()
+        while pool.active_run_ids():
+            time.sleep(0.01)
+        assert pool.available_workers == 2
+    finally:
+        release_second.set()
+        pool.shutdown()
+
+
+def test_runner_pool_logs_safe_failure_reason_and_http_status(caplog) -> None:
+    from runner import APIResponseError
+
+    pool = RunnerJobPool(max_workers=1)
+    failed = threading.Event()
+
+    def fail() -> None:
+        failed.set()
+        raise APIResponseError(503)
+
+    try:
+        assert pool.submit("run-1", fail)
+        assert failed.wait(timeout=2)
+        pool.reap()
+
+        record = next(
+            record for record in caplog.records if record.msg.startswith("run_worker_failed")
+        )
+        assert record.getMessage() == (
+            "run_worker_failed run_id=run-1 error_type=APIResponseError "
+            "error_reason=API request failed with HTTP 503 error_status=503 "
+            "error_cause_type=none"
+        )
+    finally:
+        pool.shutdown()
+
+
+
+
+def test_safe_failure_status_reads_wrapped_provider_status() -> None:
+    from runner import TaskExecutionError, _safe_failure_status
+
+    class OpenAIAPIError(Exception):
+        status_code = 429
+
+    error = TaskExecutionError("LangChain runtime failed")
+    error.__cause__ = OpenAIAPIError("private response text")
+
+    assert _safe_failure_status(error) == 429
+
+
+def test_runner_pool_shutdown_signals_monitor_workers() -> None:
+    pool = RunnerJobPool(max_workers=1)
+    started = threading.Event()
+    stopped = threading.Event()
+
+    def monitor(shutdown_event: threading.Event) -> None:
+        started.set()
+        shutdown_event.wait(timeout=2)
+        stopped.set()
+
+    assert pool.submit("run-1", monitor, pool.shutdown_event)
+    assert started.wait(timeout=2)
+    pool.shutdown()
+    assert stopped.is_set()
+
+
+def test_monitor_shutdown_leaves_active_worker_for_reconciliation(
+    tmp_path: Path,
+) -> None:
+    run_id = "891e3b15-7408-4d39-91af-ff0ea5a06d18"
+    runner_id = "0f00b7b5-d3ea-4c16-b952-e036a07de498"
+    started = threading.Event()
+
+    class API:
+        def post(self, path: str, _payload: dict[str, object], **_kwargs: object):
+            assert path == "/internal/runner/cancel-requests"
+            return {"run_ids": []}
+
+    class Launcher:
+        def events(self, _run_id: str, _cursor: int) -> dict[str, object]:
+            started.set()
+            return {
+                "events": [],
+                "status": "running",
+                "exit_code": None,
+                "finished_at": None,
+            }
+
+        def stop(self, _run_id: str) -> dict[str, bool]:
+            raise AssertionError("shutdown must not stop the worker")
+
+        def remove(self, _run_id: str) -> None:
+            raise AssertionError("shutdown must not remove the worker")
+
+    outbox = EventOutbox(tmp_path / "events.sqlite3")
+    supervisor = RunnerSupervisor(runner_id, API(), Launcher(), outbox)  # type: ignore[arg-type]
+    pool = RunnerJobPool(max_workers=1)
+    try:
+        assert pool.submit(
+            run_id,
+            supervisor.monitor_recovered,
+            {
+                "run_id": run_id,
+                "max_duration_seconds": 3600,
+                "started_at": datetime.now(UTC).isoformat(),
+            },
+            pool.shutdown_event,
+        )
+        assert started.wait(timeout=2)
+        pool.shutdown()
+        assert outbox.pending() == []
+    finally:
+        pool.shutdown()
+        outbox.close()
+
+
+def test_recovery_start_during_shutdown_does_not_terminalize_run(
+    tmp_path: Path,
+) -> None:
+    run_id = "891e3b15-7408-4d39-91af-ff0ea5a06d18"
+    runner_id = "0f00b7b5-d3ea-4c16-b952-e036a07de498"
+    list_started = threading.Event()
+    release_list = threading.Event()
+
+    class API:
+        def post(self, *_args: object, **_kwargs: object):
+            raise AssertionError("shutdown recovery must not emit a terminal event")
+
+    class Launcher:
+        def list_runs(self) -> list[dict[str, object]]:
+            list_started.set()
+            assert release_list.wait(timeout=2)
+            return []
+
+    outbox = EventOutbox(tmp_path / "events.sqlite3")
+    supervisor = RunnerSupervisor(runner_id, API(), Launcher(), outbox)  # type: ignore[arg-type]
+    pool = RunnerJobPool(max_workers=1)
+    try:
+        assert pool.submit(
+            run_id,
+            supervisor._recover_start,
+            run_id,
+            3600,
+            pool.shutdown_event,
+        )
+        assert list_started.wait(timeout=2)
+        pool.shutdown_event.set()
+        release_list.set()
+        pool.shutdown()
+        assert outbox.pending() == []
+    finally:
+        release_list.set()
+        pool.shutdown()
+        outbox.close()
 
 def test_workspace_tools_confine_reads_and_writes_and_apply_allowlist(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
@@ -605,6 +810,33 @@ def test_worker_stream_api_emits_safe_event_and_result_frames() -> None:
     ]
 
 
+def test_worker_stream_api_emits_sanitized_failure_diagnostics() -> None:
+    stream = io.StringIO()
+    api = WorkerStreamAPI("runner-1", "run-1", stream)
+
+    api.failure(
+        error_type="ProviderResponseError",
+        cause_type="HTTPError",
+        cause_status=429,
+        cause_reason="unavailable",
+    )
+
+    frames = [json.loads(line) for line in stream.getvalue().splitlines()]
+    assert frames == [
+        {"sequence": 1, "kind": "started", "payload": {}},
+        {
+            "sequence": 2,
+            "kind": "failure",
+            "payload": {
+                "error_type": "ProviderResponseError",
+                "cause_type": "HTTPError",
+                "cause_status": 429,
+                "cause_reason": "unavailable",
+            },
+        },
+    ]
+
+
 def test_external_worker_event_replay_reuses_host_sequence_and_payload(
     tmp_path: Path,
 ) -> None:
@@ -716,6 +948,88 @@ def test_supervisor_persists_result_before_success_terminal_event(tmp_path: Path
         assert result_index < succeeded_index
         assert launcher.removed == [run_id]
         assert outbox.pending() == []
+    finally:
+        outbox.close()
+
+
+def test_supervisor_logs_worker_failure_diagnostic_and_marks_run_failed(
+    caplog, tmp_path: Path
+) -> None:
+    run_id = "891e3b15-7408-4d39-91af-ff0ea5a06d18"
+    runner_id = "0f00b7b5-d3ea-4c16-b952-e036a07de498"
+    started_at = datetime.now(UTC)
+    finished_at = started_at + timedelta(seconds=1)
+    events: list[str] = []
+
+    class API:
+        def post(self, path: str, payload: dict[str, object], **_kwargs: object):
+            if path == "/internal/runner/events":
+                events.append(str(payload["event_type"]))
+                return {
+                    "acknowledged": True,
+                    "event_id": payload["event_id"],
+                    "cursor": len(events),
+                }
+            raise AssertionError(f"unexpected API path: {path}")
+
+    class Launcher:
+        def start(self, _payload: dict[str, object]) -> dict[str, object]:
+            return {
+                "run_id": run_id,
+                "status": "running",
+                "started_at": started_at.isoformat(),
+            }
+
+        def events(self, _run_id: str, after_sequence: int) -> dict[str, object]:
+            frames = [
+                {"sequence": 1, "kind": "started", "payload": {}},
+                {
+                    "sequence": 2,
+                    "kind": "failure",
+                    "payload": {
+                        "error_type": "ProviderResponseError",
+                        "cause_type": "HTTPError",
+                        "cause_status": 429,
+                        "cause_reason": "unavailable",
+                    },
+                },
+            ]
+            return {
+                "events": [frame for frame in frames if frame["sequence"] > after_sequence],
+                "status": "exited",
+                "exit_code": 1,
+                "finished_at": finished_at.isoformat(),
+            }
+
+        def remove(self, _run_id: str) -> None:
+            pass
+
+    outbox = EventOutbox(tmp_path / "events.sqlite3")
+    supervisor = RunnerSupervisor(runner_id, API(), Launcher(), outbox)  # type: ignore[arg-type]
+    try:
+        supervisor.run_job(
+            {
+                "run_id": run_id,
+                "configuration_snapshot": {},
+                "workspace_path": "workspace",
+                "allowed_tools": ["read_file"],
+                "max_duration_seconds": 3600,
+                "max_inference_turns": 12,
+                "max_tool_calls": 50,
+            }
+        )
+
+        record = next(
+            record
+            for record in caplog.records
+            if record.msg.startswith("worker_execution_failed")
+        )
+        assert record.getMessage() == (
+            f"worker_execution_failed run_id={run_id} "
+            "error_type=ProviderResponseError cause_type=HTTPError "
+            "cause_status=429 cause_reason=unavailable"
+        )
+        assert events == ["run.started", "run.failed"]
     finally:
         outbox.close()
 
@@ -921,5 +1235,59 @@ def test_start_failure_is_terminal_only_after_launcher_reconciliation(
         )
 
         assert event_types == [terminal]
+    finally:
+        outbox.close()
+
+def test_reconcile_returns_all_live_runs_for_concurrent_recovery(
+    tmp_path: Path,
+) -> None:
+    runner_id = "0f00b7b5-d3ea-4c16-b952-e036a07de498"
+    run_ids = [
+        "891e3b15-7408-4d39-91af-ff0ea5a06d18",
+        "201e72cf-11f9-42ac-890e-8dca8c940eaf",
+    ]
+    started_at = datetime.now(UTC).isoformat()
+
+    class API:
+        def post(self, path: str, payload: dict[str, object], **_kwargs: object):
+            assert path == "/internal/runner/lease-status"
+            ids = payload["run_ids"]
+            return {
+                "runs": [
+                    {
+                        "run_id": run_id,
+                        "runner_id": runner_id,
+                        "state": "leased",
+                        "active_lease": True,
+                        "max_duration_seconds": 3600,
+                    }
+                    for run_id in ids
+                ]
+            }
+
+    class Launcher:
+        def list_runs(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "run_id": run_id,
+                    "status": "running",
+                    "started_at": started_at,
+                }
+                for run_id in run_ids
+            ]
+
+        def stop(self, _run_id: str) -> dict[str, bool]:
+            raise AssertionError("active leased Runs must be recovered, not stopped")
+
+        def remove(self, _run_id: str) -> None:
+            raise AssertionError("active leased Runs must not be removed")
+
+    outbox = EventOutbox(tmp_path / "events.sqlite3")
+    supervisor = RunnerSupervisor(runner_id, API(), Launcher(), outbox)  # type: ignore[arg-type]
+    try:
+        reconciliation = supervisor.reconcile()
+        assert [recovery["run_id"] for recovery in reconciliation.recoveries] == run_ids
+        assert reconciliation.observed_run_ids == set(run_ids)
+        assert reconciliation.released_run_ids == set()
     finally:
         outbox.close()

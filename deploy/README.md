@@ -1,11 +1,12 @@
 # Private pilot operations
 
-This directory documents the local deployment boundary. Roadmap Phase 2
-(Agent Runtime) remains in progress. The per-Run launcher/worker boundary,
-cancellation/result contracts, and persistence are implemented, with unit,
-schema, migration, image-build, and browser-fixture evidence. No API-created
-Run has been observed through the real provider and 3D path. See
-`docs/progress.md` for the exact evidence and remaining gates.
+The roadmap's Phase 2 (Agent Runtime) is Complete with live successful Runs,
+cancellation, restart recovery, and overlapping execution recorded in
+[`docs/progress.md`](../docs/progress.md). Roadmap Phase 3 (Event System) is
+Complete; Phase 4 (Virtual Office 3D) remains In Progress. Phase 3 outage,
+reconnect, and isolated fan-out evidence is recorded in the progress register.
+This deployment note does not claim that a healthy container proves a domain
+workflow.
 
 ## Topology and exposure boundary
 
@@ -117,9 +118,45 @@ PostgreSQL remains unpublished. The PostgreSQL test may create temporary
 database roles and records, and cleans up its own fixtures. Never point
 `TEST_DATABASE_URL` at the application database.
 
-The API restart invalidates in-memory owner sessions; sign in again after
-recreating API and Runner. The local Runner can heartbeat without a provider
-key; task execution still requires a configured provider.
+### Isolated Event System fan-out benchmark
+
+This benchmark uses only the disposable `<POSTGRES_DB>_test` database on the
+Compose `db` service and Redis database 15 on the Compose `redis` service.
+Preparing the test environment drops and recreates only the test database;
+Redis stream key `agent-office:activity-events:v1` must not already exist in
+database 15. The script enforces both backend targets before connecting.
+Synthetic events are written only to that isolated Redis database. The script
+starts a temporary API on container loopback and measures authenticated TCP
+WebSocket fan-out from the Redis consumer. It does not exercise the PostgreSQL
+outbox, a real Run, or the 3D office, and it is not a production-capacity claim.
+
+```bash
+rtk docker compose up -d db redis
+rtk bash scripts/prepare-runner-test-env.sh
+rtk docker compose --profile test run --rm api-postgres-test
+rtk docker compose --profile test run --rm \
+  -e REDIS_URL=redis://redis:6379/15 \
+  -v "$PWD/apps/api/scripts/activity_ws_benchmark.py:/tmp/activity_ws_benchmark.py:ro" \
+  api-postgres-test python /tmp/activity_ws_benchmark.py
+```
+
+The benchmark fails on event loss, a producer rate below 100 events/second,
+or p95 delivery latency above 1 second. It deletes only the stream key it
+created and refuses to overwrite a pre-existing key.
+
+- API writes Activity Event, Run projection, and Redis fan-out outbox in one
+  PostgreSQL transaction. A background publisher retries outbox delivery;
+  Redis outage delays live fan-out but does not undo committed events or Run
+  state. Reconnect replays persisted events from the PostgreSQL cursor.
+  PostgreSQL Activity Event records are preserved during the pilot; Redis
+  Streams uses an approximate 100,000-entry cap. The temporary target is 10
+  WebSocket clients, 100 events/second, and p95 delivery latency ≤1 second;
+  it is not a production capacity claim. Two TCP profile runs delivered all
+  1,000 events/client at about 100 events/second; p95 was 599.32 ms and
+  132.99 ms. Both exclude PostgreSQL outbox processing. A browser request made
+  after API process restart returned HTTP 200 for authentication/snapshot, the
+  WebSocket was accepted, and the rendered Office showed
+  `Browser event feed: connected`.
 
 ## Configuration and secrets boundary
 
@@ -140,9 +177,14 @@ exist:
 - API writes Activity Event, Run projection, and Redis fan-out outbox in one
   PostgreSQL transaction. A background publisher retries outbox delivery;
   Redis outage delays live fan-out but does not undo committed events or Run
-  state. Reconnect replays persisted events from the PostgreSQL cursor. The
-  Redis stream currently uses an approximate 100,000-entry cap; load-based
-  retention and backlog policy remain open.
+  state. Reconnect replays persisted events from the PostgreSQL cursor.
+  PostgreSQL Activity Event records are preserved during the pilot; Redis
+  Streams uses an approximate 100,000-entry cap. The temporary load target is
+  10 WebSocket clients, 100 events/second, and p95 delivery latency ≤1 second;
+  it is not a production capacity claim. The Redis-outage recovery and isolated
+  TCP fan-out profile passed; the profile excludes PostgreSQL outbox processing.
+  The post-restart authenticated browser session, snapshot, and WebSocket
+  connection were verified separately.
 - `MIGRATION_DATABASE_URL` is the one-shot migration administrator connection.
 - `SESSION_SECRET` is at least 32 random bytes; rotating it invalidates
   sessions.

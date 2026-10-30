@@ -168,7 +168,10 @@ def _decode_event(raw: Any) -> dict[str, object] | None:
         "payload",
     }:
         return None
-    if set(payload) != {"task_revision", "source_sequence", "safe_action_summary"}:
+    if set(payload) not in (
+        {"task_revision", "source_sequence", "safe_action_summary"},
+        {"task_revision", "source_sequence", "safe_action_summary", "approval_id"},
+    ):
         return None
     owner_id = value.get("owner_id")
     sequence = value.get("sequence")
@@ -177,9 +180,12 @@ def _decode_event(raw: Any) -> dict[str, object] | None:
     source_sequence = payload.get("source_sequence")
     task_revision = payload.get("task_revision")
     action_summary = payload.get("safe_action_summary")
+    approval_id = payload.get("approval_id")
     try:
         for key in ("event_id", "project_id", "agent_id", "run_id", "task_id"):
             UUID(value[key])
+        if approval_id is not None:
+            UUID(approval_id)
         timestamp = datetime.fromisoformat(value["timestamp"])
     except (KeyError, TypeError, ValueError):
         return None
@@ -196,6 +202,7 @@ def _decode_event(raw: Any) -> dict[str, object] | None:
         or timestamp.tzinfo is None
         or not isinstance(event_type, str)
         or event_type not in ACTIVITY_EVENT_TYPES
+        or (event_type.startswith("approval.") != (approval_id is not None))
         or not isinstance(task_revision, int)
         or isinstance(task_revision, bool)
         or task_revision < 1
@@ -219,6 +226,8 @@ def _decode_event(raw: Any) -> dict[str, object] | None:
         )
     ):
         return None
+    if "approval_id" not in payload:
+        value = {**value, "payload": {**payload, "approval_id": None}}
     return value
 
 

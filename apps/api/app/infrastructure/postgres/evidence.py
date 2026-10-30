@@ -3,8 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from typing import Any
-from uuid import UUID, uuid4
-
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -61,124 +60,150 @@ class PostgresActivityEventRepository:
             raise EvidenceInputError("runner")
         return await self._append_event(event, terminal_runner_id=runner_id)
 
+    async def append_in_transaction(
+        self, session: AsyncSession, event: ActivityEventDraft
+    ) -> tuple[ActivityEvent, bool]:
+        if not event.event_type.startswith("approval."):
+            raise EvidenceInputError("event_type")
+        if not session.in_transaction():
+            raise RuntimeError("Activity Event insertion requires an existing transaction")
+        event.validate()
+        return await self._append_event_on_connection(
+            RawSQLExecutor(session), event, terminal_runner_id=None
+        )
+
     async def _append_event(
         self, event: ActivityEventDraft, *, terminal_runner_id: UUID | None
     ) -> tuple[ActivityEvent, bool]:
         event.validate()
         async with self._pool.acquire() as connection:
             async with connection.transaction():
-                dedupe_key = f"event:{event.owner_id}:{event.source_id}:{event.event_id}"
-                await connection.execute(
-                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", dedupe_key
+                return await self._append_event_on_connection(
+                    connection, event, terminal_runner_id=terminal_runner_id
                 )
-                existing = await connection.fetchrow(
-                    _EVENT_SELECT
-                    + " WHERE owner_id = $1 AND source_id = $2 AND event_id = $3",
-                    event.owner_id,
-                    event.source_id,
-                    event.event_id,
-                )
-                if existing is not None:
-                    if not _same_event(existing, event):
-                        raise EvidenceInputError("event_id_conflict")
-                    if terminal_runner_id is not None:
-                        await self._finalize_terminal_dispatch(
-                            connection,
-                            event,
-                            terminal_runner_id,
-                            received_at=existing["received_at"],
-                        )
-                    return _activity_event(existing), False
 
-                scope = await connection.fetchrow(
-                    """
-                    SELECT 1
-                    FROM runs AS run
-                    JOIN task_revisions AS revision
-                      ON revision.owner_id = run.owner_id
-                     AND revision.task_id = run.task_id
-                     AND revision.revision = run.task_revision
-                     AND revision.project_id = $5
-                    JOIN agent_instances AS instance
-                      ON instance.owner_id = run.owner_id
-                     AND instance.id = $6
-                    WHERE run.owner_id = $1 AND run.id = $2
-                      AND run.task_id = $3 AND run.task_revision = $4
-                      AND run.configuration_snapshot #>> '{task,project_id}' = $5::text
-                      AND run.configuration_snapshot #>> '{agent_instance,id}' = $6::text
-                    """,
-                    event.owner_id,
-                    event.run_id,
-                    event.task_id,
-                    event.task_revision,
-                    event.project_id,
-                    event.agent_instance_id,
+    async def _append_event_on_connection(
+        self,
+        connection: RawSQLExecutor,
+        event: ActivityEventDraft,
+        *,
+        terminal_runner_id: UUID | None,
+    ) -> tuple[ActivityEvent, bool]:
+        dedupe_key = f"event:{event.owner_id}:{event.source_id}:{event.event_id}"
+        await connection.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", dedupe_key
+        )
+        existing = await connection.fetchrow(
+            _EVENT_SELECT
+            + " WHERE owner_id = $1 AND source_id = $2 AND event_id = $3",
+            event.owner_id,
+            event.source_id,
+            event.event_id,
+        )
+        if existing is not None:
+            if not _same_event(existing, event):
+                raise EvidenceInputError("event_id_conflict")
+            if terminal_runner_id is not None:
+                await self._finalize_terminal_dispatch(
+                    connection,
+                    event,
+                    terminal_runner_id,
+                    received_at=existing["received_at"],
                 )
-                if scope is None:
-                    raise EvidenceInputError("scope")
+            return _activity_event(existing), False
 
-                if terminal_runner_id is not None:
-                    await self._finalize_terminal_dispatch(
-                        connection,
-                        event,
-                        terminal_runner_id,
-                        received_at=None,
-                    )
+        scope = await connection.fetchrow(
+            """
+            SELECT 1
+            FROM runs AS run
+            JOIN task_revisions AS revision
+              ON revision.owner_id = run.owner_id
+             AND revision.task_id = run.task_id
+             AND revision.revision = run.task_revision
+             AND revision.project_id = $5
+            JOIN agent_instances AS instance
+              ON instance.owner_id = run.owner_id
+             AND instance.id = $6
+            WHERE run.owner_id = $1 AND run.id = $2
+              AND run.task_id = $3 AND run.task_revision = $4
+              AND run.configuration_snapshot #>> '{task,project_id}' = $5::text
+              AND run.configuration_snapshot #>> '{agent_instance,id}' = $6::text
+            """,
+            event.owner_id,
+            event.run_id,
+            event.task_id,
+            event.task_revision,
+            event.project_id,
+            event.agent_instance_id,
+        )
+        if scope is None:
+            raise EvidenceInputError("scope")
 
-                cursor = await connection.fetchval(
-                    """
-                    INSERT INTO owner_event_cursors (owner_id, cursor)
-                    VALUES ($1, 1)
-                    ON CONFLICT (owner_id) DO UPDATE
-                    SET cursor = owner_event_cursors.cursor + 1
-                    RETURNING cursor
-                    """,
-                    event.owner_id,
-                )
-                row = await connection.fetchrow(
-                    """
-                    INSERT INTO activity_events (
-                        owner_id, cursor, source_id, event_id, schema_version,
-                        source_session_id, workspace_id, project_id, task_id,
-                        task_revision, agent_instance_id, run_id, event_type,
-                        occurred_at, source_sequence, action_summary
-                    )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                            $11, $12, $13, $14, $15, $16)
-                    RETURNING owner_id, cursor, source_id, event_id, schema_version,
-                              source_session_id, workspace_id, project_id, task_id,
-                              task_revision, agent_instance_id, run_id, event_type,
-                              occurred_at, received_at, source_sequence, action_summary
-                    """,
-                    event.owner_id,
-                    cursor,
-                    event.source_id,
-                    event.event_id,
-                    event.schema_version,
-                    event.source_session_id,
-                    event.workspace_id,
-                    event.project_id,
-                    event.task_id,
-                    event.task_revision,
-                    event.agent_instance_id,
-                    event.run_id,
-                    event.event_type,
-                    event.occurred_at,
-                    event.source_sequence,
-                    event.action_summary,
-                )
-                if row is None:
-                    raise RuntimeError("activity event insert returned no row")
-                await connection.execute(
-                    """
-                    INSERT INTO activity_event_outbox (owner_id, cursor)
-                    VALUES ($1, $2)
-                    """,
-                    event.owner_id,
-                    cursor,
-                )
-                await self._project_event(connection, event, cursor)
-                return _activity_event(row), True
+        if terminal_runner_id is not None:
+            await self._finalize_terminal_dispatch(
+                connection,
+                event,
+                terminal_runner_id,
+                received_at=None,
+            )
+
+        cursor = await connection.fetchval(
+            """
+            INSERT INTO owner_event_cursors (owner_id, cursor)
+            VALUES ($1, 1)
+            ON CONFLICT (owner_id) DO UPDATE
+            SET cursor = owner_event_cursors.cursor + 1
+            RETURNING cursor
+            """,
+            event.owner_id,
+        )
+        row = await connection.fetchrow(
+            """
+            INSERT INTO activity_events (
+                owner_id, cursor, source_id, event_id, schema_version,
+                source_session_id, workspace_id, project_id, task_id,
+                task_revision, agent_instance_id, run_id, event_type,
+                occurred_at, source_sequence, action_summary, approval_id
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                    $11, $12, $13, $14, $15, $16, $17)
+            RETURNING owner_id, cursor, source_id, event_id, schema_version,
+                      source_session_id, workspace_id, project_id, task_id,
+                      task_revision, agent_instance_id, run_id, event_type,
+                      occurred_at, received_at, source_sequence, action_summary,
+                      approval_id
+            """,
+            event.owner_id,
+            cursor,
+            event.source_id,
+            event.event_id,
+            event.schema_version,
+            event.source_session_id,
+            event.workspace_id,
+            event.project_id,
+            event.task_id,
+            event.task_revision,
+            event.agent_instance_id,
+            event.run_id,
+            event.event_type,
+            event.occurred_at,
+            event.source_sequence,
+            event.action_summary,
+            event.approval_id,
+        )
+        if row is None:
+            raise RuntimeError("activity event insert returned no row")
+        await connection.execute(
+            """
+            INSERT INTO activity_event_outbox (owner_id, cursor)
+            VALUES ($1, $2)
+            """,
+            event.owner_id,
+            cursor,
+        )
+        if not event.event_type.startswith("approval."):
+            await self._project_event(connection, event, cursor)
+        return _activity_event(row), True
 
     async def _finalize_terminal_dispatch(
         self,
@@ -519,7 +544,7 @@ class PostgresActivityEventRepository:
                        event.project_id, event.task_id, event.task_revision,
                        event.agent_instance_id, event.run_id, event.event_type,
                        event.occurred_at, event.received_at, event.source_sequence,
-                       event.action_summary
+                       event.action_summary, event.approval_id
                 FROM activity_events AS event
                 JOIN claimed
                   ON claimed.owner_id = event.owner_id AND claimed.cursor = event.cursor
@@ -600,6 +625,7 @@ def _approval(
 class PostgresApprovalRepository:
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
         self._sessions = sessions
+        self._activity_events = PostgresActivityEventRepository(sessions)
 
     async def create_request(
         self, draft: ApprovalRequestDraft
@@ -634,6 +660,16 @@ class PostgresApprovalRepository:
                     or request.resource_ref != draft.resource_ref
                 ):
                     raise EvidenceInputError("approval_request_conflict")
+                await self._emit_approval_event(
+                    session, request, "approval.requested", request.created_at
+                )
+                if decision is not None and decision.decision in {"approved", "rejected"}:
+                    await self._emit_approval_event(
+                        session,
+                        request,
+                        f"approval.{decision.decision}",
+                        decision.decided_at,
+                    )
                 return _approval(request, decision), False
 
             request = ApprovalRequestTable(
@@ -648,6 +684,9 @@ class PostgresApprovalRepository:
             )
             session.add(request)
             await session.flush()
+            await self._emit_approval_event(
+                session, request, "approval.requested", request.created_at
+            )
             return _approval(request), True
 
     async def resolve(
@@ -665,7 +704,8 @@ class PostgresApprovalRepository:
         if now.tzinfo is None or now.utcoffset() is None:
             raise EvidenceInputError("decided_at")
         async with self._sessions.begin() as session:
-            await RawSQLExecutor(session).execute(
+            raw = RawSQLExecutor(session)
+            await raw.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
                 f"approval:{owner_id}:{approval_id}",
             )
@@ -679,6 +719,9 @@ class PostgresApprovalRepository:
                 raise EvidenceInputError("approval")
             if request.action_digest != action_digest:
                 raise EvidenceInputError("action_digest_mismatch")
+            await self._emit_approval_event(
+                session, request, "approval.requested", request.created_at
+            )
             current = await session.scalar(
                 select(ApprovalDecisionTable).where(
                     ApprovalDecisionTable.owner_id == owner_id,
@@ -688,6 +731,13 @@ class PostgresApprovalRepository:
             if current is not None:
                 if current.decision != decision:
                     raise EvidenceInputError("decision_conflict")
+                if current.decision in {"approved", "rejected"}:
+                    await self._emit_approval_event(
+                        session,
+                        request,
+                        f"approval.{current.decision}",
+                        current.decided_at,
+                    )
                 return _approval(request, current)
             if request.expires_at <= now and decision != "expired":
                 raise EvidenceInputError("approval_expired")
@@ -701,7 +751,57 @@ class PostgresApprovalRepository:
             )
             session.add(resolved)
             await session.flush()
+            if decision in {"approved", "rejected"}:
+                await self._emit_approval_event(
+                    session, request, f"approval.{decision}", resolved.decided_at
+                )
             return _approval(request, resolved)
+
+    async def _emit_approval_event(
+        self,
+        session: AsyncSession,
+        request: ApprovalRequestTable,
+        event_type: str,
+        occurred_at: datetime,
+    ) -> None:
+        run = await session.scalar(
+            select(RunTable).where(
+                RunTable.owner_id == request.owner_id,
+                RunTable.id == request.run_id,
+            )
+        )
+        if run is None:
+            raise EvidenceInputError("approval")
+        snapshot = run.configuration_snapshot
+        task_snapshot = snapshot.get("task") if isinstance(snapshot, dict) else None
+        instance_snapshot = snapshot.get("agent_instance") if isinstance(snapshot, dict) else None
+        try:
+            project_id = UUID(str(task_snapshot["project_id"]))
+            agent_instance_id = UUID(str(instance_snapshot["id"]))
+        except (KeyError, TypeError, ValueError) as error:
+            raise EvidenceInputError("scope") from error
+        task_revision = run.task_revision
+        event = ActivityEventDraft(
+            owner_id=request.owner_id,
+            source_id="approval-api",
+            event_id=uuid5(
+                NAMESPACE_URL,
+                f"agent-office:approval:{request.id}:{event_type}",
+            ),
+            schema_version=1,
+            source_session_id=None,
+            workspace_id=None,
+            project_id=project_id,
+            task_id=run.task_id,
+            task_revision=task_revision,
+            agent_instance_id=agent_instance_id,
+            run_id=request.run_id,
+            event_type=event_type,
+            occurred_at=occurred_at,
+            source_sequence=None,
+            approval_id=request.id,
+        )
+        await self._activity_events.append_in_transaction(session, event)
 
     async def get_for_owner(
         self, owner_id: str, approval_id: UUID
@@ -885,7 +985,7 @@ _EVENT_SELECT = """
 SELECT owner_id, cursor, source_id, event_id, schema_version,
        source_session_id, workspace_id, project_id, task_id, task_revision,
        agent_instance_id, run_id, event_type, occurred_at, received_at,
-       source_sequence, action_summary
+       source_sequence, action_summary, approval_id
 FROM activity_events
 """
 

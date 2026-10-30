@@ -3,13 +3,18 @@
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { Component, useCallback, useEffect, useMemo, useState, type CSSProperties, type ErrorInfo, type ReactNode } from "react";
+import { createOfficeLayout } from "./office-layout";
+import { assignOfficeAvatarModels } from "./office-avatar";
 import type { OfficeSceneAgent } from "./office-scene";
-import { DisabledWorkAction, StatusPill } from "./workspace-components";
+import { StatusPill } from "./workspace-components";
 import {
   requestActivitySnapshot,
+  requestAgentAvailability,
   subscribeToActivity,
   type ActivityConnection,
   type ActivitySnapshot,
+  type AgentAvailability,
+  type AgentAvailabilityState,
   type RuntimeProjection,
 } from "../lib/activity";
 
@@ -36,6 +41,10 @@ const OFFICE_AGENT_MAX_OFFSET = 1_000_000;
 const MAX_DETAILED_AVATARS = 20;
 const MAX_MOBILE_AVATARS = 8;
 const AGENT_ACCENTS = ["#477b78", "#946a43", "#6c719b", "#a35b4d", "#557c59", "#7d6391", "#417892"];
+
+function availabilityMap(records: AgentAvailability[]): Map<string, AgentAvailabilityState> {
+  return new Map(records.map((record) => [record.agent_instance_id, record.availability] as const));
+}
 
 function isOfficeAgentInstance(value: unknown): value is OfficeAgentInstance {
   if (typeof value !== "object" || value === null) return false;
@@ -97,6 +106,28 @@ function projectionAnimation(projection: RuntimeProjection | undefined): VisualA
   return "neutral";
 }
 
+function availabilityLabel(availability: AgentAvailabilityState | undefined): string {
+  switch (availability ?? "unknown") {
+    case "idle": return "Idle · verified";
+    case "working": return "Working · verified";
+    case "waiting": return "Waiting · unresolved Run";
+    case "unknown": return "Unknown · state uncertain";
+  }
+}
+
+function availabilityShortLabel(availability: AgentAvailabilityState | undefined): string {
+  switch (availability ?? "unknown") {
+    case "idle": return "Idle";
+    case "working": return "Working";
+    case "waiting": return "Waiting";
+    case "unknown": return "Unknown";
+  }
+}
+
+function availabilityPriority(availability: AgentAvailabilityState): number {
+  return availability === "working" ? 2 : availability === "waiting" ? 1 : 0;
+}
+
 type SceneErrorBoundaryProps = { children: ReactNode; onError: () => void };
 type SceneErrorBoundaryState = { failed: boolean };
 
@@ -117,9 +148,10 @@ class SceneErrorBoundary extends Component<SceneErrorBoundaryProps, SceneErrorBo
   }
 }
 
-function OfficeFallback({ agents, runtimeByAgent, onSelectAgent, onRetry }: {
+function OfficeFallback({ agents, runtimeByAgent, availabilityByAgent, onSelectAgent, onRetry }: {
   agents: OfficeAgentInstance[];
   runtimeByAgent: Map<string, RuntimeProjection>;
+  availabilityByAgent: Map<string, AgentAvailabilityState>;
   onSelectAgent: (agent: OfficeAgentInstance) => void;
   onRetry: () => void;
 }) {
@@ -135,7 +167,7 @@ function OfficeFallback({ agents, runtimeByAgent, onSelectAgent, onRetry }: {
         {agents.map((agent) => (
           <button className="fallback-agent" key={agent.id} type="button" onClick={() => onSelectAgent(agent)}>
             <span className="agent-avatar" aria-hidden="true">{agent.display_name.slice(0, 1)}</span>
-            <span><strong>{agent.display_name} · {agent.definition_name}</strong><small>{agent.project_name ?? "No project assigned"} · {projectionLabel(runtimeByAgent.get(agent.id))}</small></span>
+            <span><strong>{agent.display_name} · {agent.definition_name}</strong><small>{agent.project_name ?? "No project assigned"} · {availabilityShortLabel(availabilityByAgent.get(agent.id))} · {projectionLabel(runtimeByAgent.get(agent.id))}</small></span>
             <span aria-hidden="true">→</span>
           </button>
         ))}
@@ -154,6 +186,8 @@ export function OfficeExperience() {
   const [reducedMotion, setReducedMotion] = useState(false);
   const [simplifiedScene, setSimplifiedScene] = useState(false);
   const [agentRecords, setAgentRecords] = useState<OfficeAgentInstance[] | null>(null);
+  const [availabilityByAgent, setAvailabilityByAgent] = useState<Map<string, AgentAvailabilityState>>(new Map());
+  const [availabilityLoadError, setAvailabilityLoadError] = useState<string | null>(null);
   const [agentPaginationLimitReached, setAgentPaginationLimitReached] = useState(false);
   const [agentLoadError, setAgentLoadError] = useState<string | null>(null);
   const [agentLoadGeneration, setAgentLoadGeneration] = useState(0);
@@ -164,6 +198,7 @@ export function OfficeExperience() {
   const [projectFilter, setProjectFilter] = useState("all");
   const [definitionFilter, setDefinitionFilter] = useState("all");
 
+  const [selectionNotice, setSelectionNotice] = useState<string | null>(null);
   const runtimeByAgent = useMemo(() => {
     const latestByAgent = new Map<string, RuntimeProjection>();
     for (const projection of activitySnapshot?.projections ?? []) {
@@ -179,20 +214,17 @@ export function OfficeExperience() {
   const selectedRuntime = selectedAgent ? runtimeByAgent.get(selectedAgent.id) : undefined;
   const selectedTitle = selectedAgent?.display_name
     ?? (selectedAgentId ? agentRecords === null && !agentLoadError ? "Refreshing Agent Instance…" : "Agent Instance unavailable" : "Select an Agent Instance");
+  const selectedAvailability = selectedAgent ? availabilityByAgent.get(selectedAgent.id) : undefined;
   const selectedDetail = selectedAgent
-    ? selectedRuntime
-      ? `Persisted Agent Instance. Latest event projection: ${selectedRuntime.status} (${selectedRuntime.freshness}). The 3D anchor is presentation-only, not a saved workspace location.`
-      : activityLoadError
-        ? "Persisted Agent Instance. Runtime event projection could not be loaded; live status is unavailable. The 3D anchor is presentation-only."
-        : "Persisted Agent Instance. No runtime event projection is available; status is unavailable. The 3D anchor is presentation-only."
+    ? `${availabilityLabel(selectedAvailability)}. Availability is derived from persisted unresolved Run dispatches and fresh activity projection evidence; uncertain states are never sent to the rest room. ${selectedRuntime ? `Latest event projection: ${selectedRuntime.status} (${selectedRuntime.freshness}).` : "No current event projection is available."} The 3D anchor is presentation-only, not a saved workspace location.`
     : selectedAgentId && !agentRecords
       ? "Refreshing saved Agent Instance details."
       : selectedAgentId
         ? "This Agent Instance is not in the current active records; it may have been archived."
-        : "Select a persisted Agent Instance in the scene or list to inspect its last verified event projection.";
-  const selectionStatus = selectedRuntime
-    ? selectedRuntime.freshness === "fresh" ? `${selectedRuntime.status} · fresh` : `Stale · last ${selectedRuntime.status}`
-    : selectedAgent ? "Status unavailable" : selectedAgentId ? "Unavailable" : "No selection";
+        : "Select a persisted Agent Instance to inspect its derived availability and latest event projection.";
+  const selectionStatus = selectedAgent
+    ? availabilityLabel(selectedAvailability)
+    : selectedAgentId ? "Unavailable" : "No selection";
 
   useEffect(() => {
     setSceneReady(true);
@@ -201,11 +233,27 @@ export function OfficeExperience() {
   useEffect(() => {
     const controller = new AbortController();
     setAgentRecords(null);
+    setAvailabilityByAgent(new Map());
+    setAvailabilityLoadError(null);
     setAgentLoadError(null);
     setAgentPaginationLimitReached(false);
     void loadOfficeAgentInstances(controller.signal)
-      .then(({ records, paginationLimitReached }) => {
+      .then(async ({ records, paginationLimitReached }) => {
+        let availability = new Map<string, AgentAvailabilityState>();
+        let availabilityError: string | null = null;
+        try {
+          const values = await requestAgentAvailability(
+            records.map((agent) => agent.id),
+            controller.signal,
+          );
+          availability = availabilityMap(values);
+        } catch (reason: unknown) {
+          if (controller.signal.aborted) return;
+          availabilityError = reason instanceof Error ? reason.message : "Could not load Agent Availability.";
+        }
         if (controller.signal.aborted) return;
+        setAvailabilityByAgent(availability);
+        setAvailabilityLoadError(availabilityError);
         setAgentRecords(records);
         setAgentPaginationLimitReached(paginationLimitReached);
       })
@@ -215,6 +263,46 @@ export function OfficeExperience() {
       });
     return () => controller.abort();
   }, [agentLoadGeneration]);
+
+  useEffect(() => {
+    const agents = agentRecords;
+    if (agents === null || agents.length === 0) return;
+    const instanceIds = agents.map((agent) => agent.id);
+    const controller = new AbortController();
+    let active = true;
+    let refreshing = false;
+
+    async function refreshAvailability() {
+      if (!active || refreshing) return;
+      refreshing = true;
+      try {
+        const values = await requestAgentAvailability(
+          instanceIds,
+          controller.signal,
+        );
+        if (active) {
+          setAvailabilityByAgent(availabilityMap(values));
+          setAvailabilityLoadError(null);
+        }
+      } catch (reason: unknown) {
+        if (active && !controller.signal.aborted) {
+          setAvailabilityByAgent(new Map());
+          setAvailabilityLoadError(reason instanceof Error ? reason.message : "Could not load Agent Availability.");
+        }
+      } finally {
+        refreshing = false;
+      }
+    }
+
+    void refreshAvailability();
+    const refreshTimer = setInterval(() => void refreshAvailability(), 5_000);
+    return () => {
+      active = false;
+      controller.abort();
+      clearInterval(refreshTimer);
+    };
+  }, [agentRecords]);
+
 
   useEffect(() => {
     const controller = new AbortController();
@@ -273,39 +361,108 @@ export function OfficeExperience() {
     };
   }, []);
 
+  const avatarModelsByAgent = useMemo(
+    () => assignOfficeAvatarModels((agentRecords ?? []).map((agent) => agent.id)),
+    [agentRecords],
+  );
   const sceneAgents = useMemo<OfficeSceneAgent[]>(() => {
     const sortedById = [...(agentRecords ?? [])].sort((left, right) => left.id.localeCompare(right.id));
     const priority = [...sortedById].sort((left, right) => {
-      const leftProjection = runtimeByAgent.get(left.id);
-      const rightProjection = runtimeByAgent.get(right.id);
-      const leftActive = leftProjection?.freshness === "fresh" && leftProjection.status === "running" ? 1 : 0;
-      const rightActive = rightProjection?.freshness === "fresh" && rightProjection.status === "running" ? 1 : 0;
-      if (leftActive !== rightActive) return rightActive - leftActive;
-      const leftCursor = leftProjection?.last_event_cursor ?? -1;
-      const rightCursor = rightProjection?.last_event_cursor ?? -1;
+      const leftAvailability = availabilityByAgent.get(left.id) ?? "unknown";
+      const rightAvailability = availabilityByAgent.get(right.id) ?? "unknown";
+      const leftPriority = availabilityPriority(leftAvailability);
+      const rightPriority = availabilityPriority(rightAvailability);
+      if (leftPriority !== rightPriority) return rightPriority - leftPriority;
+      const leftCursor = runtimeByAgent.get(left.id)?.last_event_cursor ?? -1;
+      const rightCursor = runtimeByAgent.get(right.id)?.last_event_cursor ?? -1;
       if (leftCursor !== rightCursor) return rightCursor - leftCursor;
       return left.id.localeCompare(right.id);
     });
     const fullAvatarIds = new Set(priority.slice(0, simplifiedScene ? MAX_MOBILE_AVATARS : MAX_DETAILED_AVATARS).map((agent) => agent.id));
-    const columns = 16;
-    const rows = Math.max(1, Math.ceil(sortedById.length / columns));
+    const layout = createOfficeLayout(sortedById.length);
     return sortedById.map((agent, index) => {
       const projection = runtimeByAgent.get(agent.id);
-      const row = Math.floor(index / columns);
-      const column = index % columns;
-      const rowLength = Math.min(columns, sortedById.length - row * columns);
+      const availability = availabilityByAgent.get(agent.id) ?? "unknown";
+      const station = layout.stations[index]!;
       return {
         id: agent.id,
         displayName: agent.display_name,
-        statusLabel: projectionLabel(projection),
-        animation: projectionAnimation(projection),
+        statusLabel: availabilityShortLabel(availability),
+        animation: availability === "working"
+          ? "working"
+          : availability === "idle" ? projectionAnimation(projection) : "neutral",
+        modelUrl: avatarModelsByAgent.get(agent.id)!,
         fullAvatar: fullAvatarIds.has(agent.id),
         selected: agent.id === selectedAgentId,
         accent: AGENT_ACCENTS[hashAgentId(agent.id) % AGENT_ACCENTS.length],
-        position: [(column - (rowLength - 1) / 2) * 0.95, 0, (row - (rows - 1) / 2) * 1.1],
+        availability,
+        position: availability === "idle" ? station.restPosition : station.chairPosition,
+        stationPosition: station.workstationPosition,
+        chairPosition: station.chairPosition,
+        restPosition: station.restPosition,
+        restSeatPosition: station.restSeatPosition,
+        routeToWork: station.routeToWork,
+        routeToRest: station.routeToRest,
       };
     });
-  }, [agentRecords, runtimeByAgent, selectedAgentId, simplifiedScene]);
+  }, [agentRecords, availabilityByAgent, runtimeByAgent, selectedAgentId, simplifiedScene, avatarModelsByAgent]);
+
+  const availabilitySummary = useMemo(() => {
+    const counts: Record<AgentAvailabilityState, number> = {
+      idle: 0,
+      working: 0,
+      waiting: 0,
+      unknown: 0,
+    };
+    for (const agent of agentRecords ?? []) {
+      counts[availabilityByAgent.get(agent.id) ?? "unknown"] += 1;
+    }
+    return `${counts.working} work · ${counts.idle} rest · ${counts.waiting} wait · ${counts.unknown} unknown`;
+  }, [agentRecords, availabilityByAgent]);
+  useEffect(() => {
+    if (agentRecords === null) return;
+
+    const resolveHash = () => {
+      const encodedId = window.location.hash.slice(1);
+      if (!encodedId) {
+        setSelectedAgentId(null);
+        setFocusTarget([0, 0.8, 0]);
+        setSelectionNotice(null);
+        return;
+      }
+
+      let agentId = "";
+      try {
+        agentId = decodeURIComponent(encodedId);
+      } catch {
+        // An invalid fragment is treated like a stale Agent Instance link.
+      }
+
+      const agent = agentRecords.find((record) => record.id === agentId);
+      if (agent) {
+        setSelectedAgentId(agent.id);
+        const agentIndex = [...agentRecords]
+          .sort((left, right) => left.id.localeCompare(right.id))
+          .findIndex((record) => record.id === agent.id);
+        const station = createOfficeLayout(agentRecords.length).stations[agentIndex];
+        if (station) {
+          const availability = availabilityByAgent.get(agent.id) ?? "unknown";
+          const position = availability === "idle" ? station.restPosition : station.chairPosition;
+          setFocusTarget([position[0], 0.8, position[2]]);
+        }
+        return;
+      }
+
+      setSelectedAgentId(null);
+      setFocusTarget([0, 0.8, 0]);
+      setSelectionNotice("The linked Agent Instance is unavailable or archived.");
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+    };
+
+    resolveHash();
+    window.addEventListener("hashchange", resolveHash);
+    return () => window.removeEventListener("hashchange", resolveHash);
+  }, [agentRecords]);
 
   const projects = useMemo(() => {
     const values = new Map<string, string>();
@@ -328,8 +485,14 @@ export function OfficeExperience() {
 
   const selectAgent = useCallback((agent: OfficeAgentInstance) => {
     setSelectedAgentId(agent.id);
+    setSelectionNotice(null);
     const visual = sceneAgents.find((item) => item.id === agent.id);
     if (visual) setFocusTarget([visual.position[0], 0.8, visual.position[2]]);
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}${window.location.search}#${encodeURIComponent(agent.id)}`,
+    );
   }, [sceneAgents]);
   const selectSceneAgent = useCallback((agentId: string) => {
     const agent = agentRecords?.find((item) => item.id === agentId);
@@ -347,6 +510,10 @@ export function OfficeExperience() {
     setFocusTarget([0, 0.8, 0]);
   }
 
+  const createTaskHref = selectedAgent
+    ? `/tasks/new?agent_instance_id=${encodeURIComponent(selectedAgent.id)}${selectedAgent.project_id ? `&project_id=${encodeURIComponent(selectedAgent.project_id)}` : ""}`
+    : null;
+
   return (
     <section className="office-experience" aria-label="Agent Instance 3D visualization">
       <div className="office-scene-column">
@@ -357,13 +524,14 @@ export function OfficeExperience() {
             <button type="button" className="quiet-button" disabled={sceneFailed || !sceneReady} onClick={focusSelectedAgent}>Focus selected</button>
             <button type="button" className="quiet-button" disabled={sceneFailed || !sceneReady} onClick={resetCamera}>Reset view</button>
           </div>
-          <span className="layout-version">{simplifiedScene ? "Mobile simplified · up to 8 detailed rigs" : "Up to 20 detailed rigs · all positions are visual-only"}</span>
+          <span className="layout-version">{simplifiedScene ? "Dedicated rest room · up to 8 detailed agents" : "Dedicated rest room · up to 20 detailed agents"}</span>
         </div>
         <div className="office-canvas-wrap">
           {!sceneReady ? <div className="scene-loading" role="status">Preparing Agent Instance view…</div> : sceneFailed ? (
             <OfficeFallback
               agents={visibleAgents}
               runtimeByAgent={runtimeByAgent}
+              availabilityByAgent={availabilityByAgent}
               onSelectAgent={selectAgent}
               onRetry={() => {
                 setSceneFailed(false);
@@ -389,22 +557,23 @@ export function OfficeExperience() {
                 : agentRecords === null
                   ? "Loading persisted Agent Instances…"
                   : agentRecords.length
-                    ? `${agentRecords.length} persisted Agent Instances · ${runtimeByAgent.size} event projections`
+                    ? `${agentRecords.length} agents · ${availabilitySummary}`
                     : "No registered Agent Instances · no sample agents are shown"}
             </div>
           ) : null}
         </div>
         <div className="scene-bottom-row">
-          <p className="scene-hint" role="status">Select an Agent Instance to inspect it. Orbit, pan, and zoom the scene; display anchors are not workspace assignments.</p>
-          <span className="scene-motion-label">{reducedMotion ? "Reduced motion enabled" : "Event-backed animation only"}</span>
+          <p className="scene-hint" role="status">Select an Agent Instance to inspect its status. Verified idle instances rest in the separate room; verified working instances sit at their workstation. Furniture and positions remain presentation-only.</p>
+          <span className="scene-motion-label">{reducedMotion ? "Reduced motion enabled" : "Verified availability drives movement; fresh work evidence drives typing"}</span>
         </div>
       </div>
 
       <aside className="office-inspector" aria-label="Agent Instance inspection">
+        {selectionNotice ? <p className="office-selection-notice" role="status">{selectionNotice}</p> : null}
         <section className="inspector-card focus-card">
           <div className="inspector-heading"><div><p className="eyebrow">Selection</p><h2>{selectedTitle}</h2></div><StatusPill>{selectionStatus}</StatusPill></div>
           <p>{selectedDetail}</p>
-          {selectedAgent ? <div className="selected-agent-facts"><span><strong>Definition</strong>{selectedAgent.definition_name}</span><span><strong>Project</strong>{selectedAgent.project_name ?? "Unassigned"}</span><span><strong>Runtime status</strong>{selectedRuntime ? `${selectedRuntime.status} · ${selectedRuntime.freshness}` : "Status unavailable"}</span><span><strong>3D anchor</strong>Presentation only</span></div> : null}
+          {selectedAgent ? <div className="selected-agent-facts"><span><strong>Definition</strong>{selectedAgent.definition_name}</span><span><strong>Project</strong>{selectedAgent.project_name ?? "Unassigned"}</span><span><strong>Agent Availability</strong>{availabilityLabel(selectedAvailability)}</span><span><strong>Run projection</strong>{selectedRuntime ? `${selectedRuntime.status} · ${selectedRuntime.freshness}` : "No current projection"}</span><span><strong>3D anchor</strong>Presentation only</span></div> : null}
           {selectedAgent ? (
             <div className="selected-agent-facts" role="group" aria-label="Verified Activity Event details">
               <span>
@@ -423,8 +592,9 @@ export function OfficeExperience() {
           ) : null}
           <div className="inspector-actions">
             {selectedAgent ? <Link className="text-link" href={`/agents/${selectedAgent.id}`}>Open Agent Instance</Link> : null}
-            {selectedAgent ? <DisabledWorkAction reason="The Engine/Runner is not connected.">Start or message agent</DisabledWorkAction> : null}
+            {createTaskHref ? <Link className="button" href={createTaskHref}>Create Task for agent</Link> : null}
           </div>
+          {selectedAgent ? <p className="field-note">Creating a Task does not start a Run.</p> : null}
         </section>
 
         <section className="inspector-card office-agents-card" aria-labelledby="office-agents-heading">
@@ -432,8 +602,20 @@ export function OfficeExperience() {
           {agentRecords && agentRecords.length > 0 ? (
             <div className="office-agent-filters">
               <label className="preview-field">Search<input type="search" value={agentSearch} onChange={(event) => setAgentSearch(event.target.value)} placeholder="Name, definition, or project" /></label>
-              <label className="preview-field">Project<select value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)}><option value="all">All projects</option>{projects.map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label>
-              <label className="preview-field">Definition<select value={definitionFilter} onChange={(event) => setDefinitionFilter(event.target.value)}><option value="all">All definitions</option>{definitions.map((definition) => <option key={definition}>{definition}</option>)}</select></label>
+              <div className="office-filter-group" role="group" aria-label="Filter by Project">
+                <span className="office-filter-label">Project</span>
+                <div className="office-filter-chips">
+                  <button className={projectFilter === "all" ? "office-filter-chip is-active" : "office-filter-chip"} type="button" aria-pressed={projectFilter === "all"} onClick={() => setProjectFilter("all")}>All projects</button>
+                  {projects.map(([id, name]) => <button key={id} className={projectFilter === id ? "office-filter-chip is-active" : "office-filter-chip"} type="button" aria-pressed={projectFilter === id} onClick={() => setProjectFilter(id)}>{name}</button>)}
+                </div>
+              </div>
+              <div className="office-filter-group" role="group" aria-label="Filter by Agent Definition">
+                <span className="office-filter-label">Definition</span>
+                <div className="office-filter-chips">
+                  <button className={definitionFilter === "all" ? "office-filter-chip is-active" : "office-filter-chip"} type="button" aria-pressed={definitionFilter === "all"} onClick={() => setDefinitionFilter("all")}>All definitions</button>
+                  {definitions.map((definition) => <button key={definition} className={definitionFilter === definition ? "office-filter-chip is-active" : "office-filter-chip"} type="button" aria-pressed={definitionFilter === definition} onClick={() => setDefinitionFilter(definition)}>{definition}</button>)}
+                </div>
+              </div>
               {agentPaginationLimitReached ? <span className="field-note" role="status">API pagination boundary reached; additional records may not be listed.</span> : null}
             </div>
           ) : null}
@@ -443,8 +625,7 @@ export function OfficeExperience() {
           {agentRecords && agentRecords.length > 0 && visibleAgents.length === 0 ? <p className="empty-state">No registered Agent Instances match these filters.</p> : null}
           <div className="office-agent-list" aria-label="Persisted Agent Instances">
             {visibleAgents.map((agent) => {
-              const runtime = runtimeByAgent.get(agent.id);
-              const runtimeLabel = projectionLabel(runtime);
+              const statusLabel = availabilityShortLabel(availabilityByAgent.get(agent.id));
               return (
                 <button
                   className={selectedAgent?.id === agent.id ? "office-agent-link is-selected" : "office-agent-link"}
@@ -455,15 +636,17 @@ export function OfficeExperience() {
                 >
                   <span className="agent-avatar" aria-hidden="true" style={{ "--avatar-color": AGENT_ACCENTS[hashAgentId(agent.id) % AGENT_ACCENTS.length] } as CSSProperties}>{agent.display_name.slice(0, 1)}</span>
                   <span className="office-agent-label"><strong>{agent.display_name}</strong><small>{agent.definition_name}</small><small>{agent.project_name ?? "No project assigned"}</small></span>
-                  <span className="office-agent-presence">{runtimeLabel}</span>
+                  <span className="office-agent-presence">{statusLabel}</span>
                 </button>
               );
             })}
           </div>
-          <p className="field-note" role={activityLoadError ? "alert" : "status"}>
-            {activityLoadError
-              ? `Runtime projections unavailable: ${activityLoadError}`
-              : `Browser event feed: ${activityConnection}. Feed connectivity does not indicate agent liveness. Scene anchors are presentation-only.`}
+          <p className="field-note" role={availabilityLoadError || activityLoadError ? "alert" : "status"}>
+            {availabilityLoadError
+              ? `Agent Availability unavailable; all agents remain unknown and outside the rest-room policy: ${availabilityLoadError}`
+              : activityLoadError
+                ? `Runtime projections unavailable: ${activityLoadError}`
+                : `Agent Availability is derived from persisted unresolved Run dispatches and fresh projections. Browser event feed: ${activityConnection}. Event-feed connectivity does not indicate agent liveness.`}
           </p>
         </section>
       </aside>

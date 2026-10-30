@@ -50,17 +50,29 @@ class MemoryExecution:
         self.run_id = run_id
         self.active = True
         self.cancel_state: str | None = "cancellation_pending"
+        self.cancel_requested = False
         self.owner_id = "owner"
 
     async def request_cancellation(self, owner_id: str, run_id: UUID) -> str | None:
         if owner_id != self.owner_id or run_id != self.run_id:
             return None
+        if self.cancel_state == "cancellation_pending":
+            self.cancel_requested = True
         return self.cancel_state
 
     async def get_run_context_for_runner(self, runner_id: UUID, run_id: UUID):
         if runner_id != self.runner_id or run_id != self.run_id:
             return None
         return SimpleNamespace(owner_id=self.owner_id)
+
+    async def get_cancellation_requests(self, runner_id: UUID):
+        if (
+            runner_id == self.runner_id
+            and self.active
+            and self.cancel_requested
+        ):
+            return [self.run_id]
+        return []
 
     async def get_lease_statuses(self, runner_id: UUID, run_ids: list[UUID]):
         if runner_id != self.runner_id or self.run_id not in run_ids:
@@ -185,18 +197,37 @@ def test_result_requires_active_runner_lease_and_rejects_conflicting_replay() ->
         assert client.post(url, json=payload, headers=headers).status_code == 409
 
 
-def test_owner_can_request_cancellation_only_for_an_active_run() -> None:
+def test_owner_cancel_is_delivered_to_authenticated_runner_poll() -> None:
     run = _run()
     runner_id = uuid4()
     execution = MemoryExecution(runner_id, run.id)
+    headers = {"Authorization": f"Bearer {RUNNER_TOKEN}"}
     with _client(run, execution, MemoryResults()) as client:
         _login(client)
         url = f"/api/v1/runs/{run.id}/cancel"
         assert client.post(url).status_code == 403
-        response = client.post(url, headers={"origin": ORIGIN})
+
+        response = client.post(
+            f"/api/v1/runs/{run.id}/cancel", headers={"origin": ORIGIN}
+        )
         assert response.status_code == 202
         assert response.json() == {"status": "cancellation_pending"}
 
+        poll = client.post(
+            "/internal/runner/cancel-requests",
+            json={"runner_id": str(runner_id)},
+            headers=headers,
+        )
+        assert poll.status_code == 200
+        assert poll.json() == {"run_ids": [str(run.id)]}
+
+        execution.active = False
+        assert client.post(
+            "/internal/runner/cancel-requests",
+            json={"runner_id": str(runner_id)},
+            headers=headers,
+        ).json() == {"run_ids": []}
+        execution.active = True
         execution.cancel_state = "succeeded"
         assert client.post(url, headers={"origin": ORIGIN}).status_code == 409
         assert client.post(

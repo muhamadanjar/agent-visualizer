@@ -65,6 +65,12 @@ export function TaskRequestForm({ taskId }: { taskId?: string }) {
         setBlockedByTaskIds(currentTask.blocked_by_task_ids);
         setMaxDurationMinutes(currentTask.max_duration_minutes?.toString() ?? "");
         setMaxChildRuns(currentTask.max_child_runs?.toString() ?? "");
+      } else {
+        const params = new URLSearchParams(window.location.search);
+        const requestedAgentId = params.get("agent_instance_id");
+        const requestedProjectId = params.get("project_id");
+        setAgentInstanceId(loadedAgents.some((agent) => agent.id === requestedAgentId) ? requestedAgentId ?? "" : "");
+        setProjectId(loadedProjects.some((project) => project.id === requestedProjectId) ? requestedProjectId ?? "" : "");
       }
     }).catch((reason: unknown) => {
       if (!controller.signal.aborted) {

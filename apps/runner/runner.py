@@ -5,6 +5,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import signal
 import socket
 import sqlite3
@@ -14,6 +15,8 @@ import threading
 import time
 import uuid
 import sys
+from concurrent.futures import Future, ThreadPoolExecutor
+
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -33,9 +36,22 @@ from runtime import (
 
 
 LOG = logging.getLogger("agent_office.runner")
+MAX_ACTIVE_RUNS = 2
 MAX_FILE_BYTES = 1_048_576
 MAX_RUNNER_RESPONSE_BYTES = 8 * MAX_FILE_BYTES
 MAX_FILE_LIST = 200
+SAFE_WORKER_FAILURE_REASONS = {
+    "unavailable",
+    "Model Endpoint configuration is unavailable",
+    "Run tool configuration is invalid",
+    "Model parameters are invalid",
+    "workspace path is invalid",
+    "workspace root cannot be a symlink",
+    "workspace path cannot traverse a symlink",
+    "workspace path escaped its root",
+    "workspace tool allowlist is invalid",
+}
+
 RUNNER_ACTIVITY_EVENT_TYPES = {
     "run.started",
     "run.cancellation_pending",
@@ -79,6 +95,22 @@ class TaskExecutionError(RuntimeError):
 class ProviderResponseError(RuntimeError):
     pass
 
+
+
+def _safe_failure_status(error: BaseException) -> int | str:
+    cause = error.__cause__
+    for candidate in (error, cause):
+        if candidate is None:
+            continue
+        for attribute in ("status_code", "code"):
+            status = getattr(candidate, attribute, None)
+            if (
+                isinstance(status, int)
+                and not isinstance(status, bool)
+                and 100 <= status <= 599
+            ):
+                return status
+    return "unavailable"
 
 @dataclass(frozen=True, slots=True)
 class RunnerSettings:
@@ -234,6 +266,7 @@ class WorkerStreamAPI:
         self._stream = stream
         self._sequence = 0
         self._started_written = False
+        self._failure_written = False
         self._result_written = False
         self._lock = threading.Lock()
 
@@ -243,6 +276,46 @@ class WorkerStreamAPI:
                 raise RunnerTransportError("Worker startup was already acknowledged")
             self._started_written = True
         self._write_frame("started", {})
+
+    def failure(
+        self,
+        *,
+        error_type: str,
+        cause_type: str,
+        cause_status: int | str,
+        cause_reason: str,
+    ) -> None:
+        if (
+            not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", error_type)
+            or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", cause_type)
+            or (
+                cause_status != "unavailable"
+                and (
+                    not isinstance(cause_status, int)
+                    or isinstance(cause_status, bool)
+                    or not 100 <= cause_status <= 599
+                )
+            )
+            or cause_reason not in SAFE_WORKER_FAILURE_REASONS
+        ):
+            raise RunnerTransportError("Worker failure diagnostic is invalid")
+        with self._lock:
+            should_start = not self._started_written
+        if should_start:
+            self.started()
+        with self._lock:
+            if self._failure_written or self._result_written:
+                raise RunnerTransportError("Worker failure frame is out of order")
+            self._failure_written = True
+        self._write_frame(
+            "failure",
+            {
+                "error_type": error_type,
+                "cause_type": cause_type,
+                "cause_status": cause_status,
+                "cause_reason": cause_reason,
+            },
+        )
 
     def post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         if (
@@ -616,6 +689,103 @@ def emit_stable_event(
     outbox.enqueue_stable(runner_id, run_id, event_type)
     flush_events(api, outbox)
 
+@dataclass(frozen=True, slots=True)
+class RunnerReconciliation:
+    recoveries: list[dict[str, Any]]
+    released_run_ids: set[str]
+    observed_run_ids: set[str]
+
+
+class RunnerJobPool:
+    """Bounded concurrent execution for claimed and recovered Runs."""
+
+    def __init__(self, max_workers: int) -> None:
+        if max_workers < 1:
+            raise ValueError("Runner worker count must be positive")
+        self._executor = ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="runner-run"
+        )
+        self._futures: dict[str, Future[Any]] = {}
+        self._failed_run_ids: set[str] = set()
+        self._max_workers = max_workers
+        self._shutdown_event = threading.Event()
+
+    @property
+    def shutdown_event(self) -> threading.Event:
+        return self._shutdown_event
+
+    def submit(self, run_id: str, operation: Callable[..., Any], *args: Any) -> bool:
+        self.reap()
+        if run_id in self._futures or len(self._futures) >= self._max_workers:
+            return False
+        self._futures[run_id] = self._executor.submit(operation, *args)
+        return True
+
+    def resubmit_recovered(
+        self, run_id: str, operation: Callable[..., Any], *args: Any
+    ) -> bool:
+        self.reap()
+        if run_id not in self._failed_run_ids:
+            return self.submit(run_id, operation, *args)
+        del self._futures[run_id]
+        self._failed_run_ids.remove(run_id)
+        return self.submit(run_id, operation, *args)
+
+    def release_failed(self, run_id: str) -> None:
+        if run_id in self._failed_run_ids:
+            del self._futures[run_id]
+            self._failed_run_ids.remove(run_id)
+
+    def failed_run_ids(self) -> set[str]:
+        self.reap()
+        return set(self._failed_run_ids)
+
+    def active_run_ids(self) -> set[str]:
+        self.reap()
+        return set(self._futures)
+
+    @property
+    def available_workers(self) -> int:
+        self.reap()
+        return self._max_workers - len(self._futures)
+
+    def reap(self) -> None:
+        for run_id, future in tuple(self._futures.items()):
+            if not future.done() or run_id in self._failed_run_ids:
+                continue
+            try:
+                future.result()
+            except Exception as error:
+                self._failed_run_ids.add(run_id)
+                cause = error.__cause__
+                status = getattr(error, "status_code", None)
+                if status is None:
+                    status = getattr(cause, "code", None)
+                if not isinstance(status, int) or isinstance(status, bool):
+                    status = "unavailable"
+                reason = (
+                    str(error)
+                    if isinstance(error, RunnerTransportError)
+                    else "unavailable"
+                )
+                LOG.error(
+                    "run_worker_failed run_id=%s error_type=%s error_reason=%s "
+                    "error_status=%s error_cause_type=%s",
+                    run_id,
+                    type(error).__name__,
+                    reason,
+                    status,
+                    type(cause).__name__ if cause is not None else "none",
+                )
+            else:
+                del self._futures[run_id]
+
+    def shutdown(self) -> None:
+        self._shutdown_event.set()
+        self._executor.shutdown(wait=True)
+
+
+
 
 
 class RunnerSupervisor:
@@ -636,16 +806,19 @@ class RunnerSupervisor:
         LOG.error("run_unknown run_id=%s reason=%s", run_id, reason)
         self._terminal(run_id, "run.unknown", cleanup=cleanup)
 
-    def reconcile(self) -> None:
+    def reconcile(self) -> RunnerReconciliation:
+        """Clean stale containers and return leases requiring monitoring."""
         containers = self._launcher.list_runs()
         if not containers:
-            return
+            return RunnerReconciliation([], set(), set())
         run_ids = [container.get("run_id") for container in containers]
         if (
             any(not isinstance(run_id, str) for run_id in run_ids)
             or len(set(run_ids)) != len(run_ids)
         ):
             raise RunnerTransportError("Runtime launcher returned invalid Run IDs")
+        observed_run_ids = set(run_ids)
+        released_run_ids: set[str] = set()
         by_id: dict[str, dict[str, Any]] = {}
         for offset in range(0, len(run_ids), 2):
             response = self._api.post(
@@ -665,6 +838,7 @@ class RunnerSupervisor:
                     if isinstance(row, dict) and isinstance(row.get("run_id"), str)
                 }
             )
+        recoveries: list[dict[str, Any]] = []
         for container in containers:
             run_id = container["run_id"]
             lease = by_id.get(run_id)
@@ -672,6 +846,7 @@ class RunnerSupervisor:
                 stop = self._launcher.stop(run_id)
                 if stop["verified"]:
                     self._launcher.remove(run_id)
+                    released_run_ids.add(run_id)
                 continue
             state = lease.get("state")
             if state in {"succeeded", "failed", "canceled"}:
@@ -680,25 +855,57 @@ class RunnerSupervisor:
                     if not stop["verified"]:
                         continue
                 self._launcher.remove(run_id)
+                released_run_ids.add(run_id)
                 continue
             if lease.get("active_lease") is True:
                 if lease.get("runner_id") != self._runner_id:
                     continue
                 max_duration = lease.get("max_duration_seconds")
-                if not isinstance(max_duration, int):
+                started_at = container.get("started_at")
+                if (
+                    not isinstance(max_duration, int)
+                    or isinstance(max_duration, bool)
+                    or not 1 <= max_duration <= 3600
+                    or _parse_started_at(started_at) is None
+                ):
                     stop = self._launcher.stop(run_id)
                     self._terminal(run_id, "run.unknown", cleanup=stop["verified"])
+                    if stop["verified"]:
+                        released_run_ids.add(run_id)
                     continue
-                self._monitor(
-                    run_id,
-                    max_duration,
-                    container.get("started_at"),
+                recoveries.append(
+                    {
+                        "run_id": run_id,
+                        "max_duration_seconds": max_duration,
+                        "started_at": started_at,
+                    }
                 )
                 continue
             stop = self._launcher.stop(run_id)
             self._terminal(run_id, "run.unknown", cleanup=stop["verified"])
+            if stop["verified"]:
+                released_run_ids.add(run_id)
+        return RunnerReconciliation(
+            recoveries, released_run_ids, observed_run_ids
+        )
 
-    def run_job(self, job: dict[str, Any]) -> None:
+    def monitor_recovered(
+        self,
+        recovery: dict[str, Any],
+        shutdown_event: threading.Event | None = None,
+    ) -> None:
+        self._monitor(
+            recovery["run_id"],
+            recovery["max_duration_seconds"],
+            recovery["started_at"],
+            shutdown_event,
+        )
+
+    def run_job(
+        self, job: dict[str, Any], shutdown_event: threading.Event | None = None
+    ) -> None:
+        if shutdown_event is not None and shutdown_event.is_set():
+            return
         run_id = job.get("run_id")
         if not isinstance(run_id, str):
             raise RunnerTransportError("Claimed Run ID is invalid")
@@ -715,7 +922,9 @@ class RunnerSupervisor:
         try:
             started = self._launcher.start(payload)
         except RunnerTransportError:
-            self._recover_start(run_id, job.get("max_duration_seconds"))
+            self._recover_start(
+                run_id, job.get("max_duration_seconds"), shutdown_event
+            )
             return
         if (
             not isinstance(started, dict)
@@ -723,17 +932,35 @@ class RunnerSupervisor:
             or started.get("status") != "running"
             or _parse_started_at(started.get("started_at")) is None
         ):
-            self._recover_start(run_id, job.get("max_duration_seconds"))
+            self._recover_start(
+                run_id, job.get("max_duration_seconds"), shutdown_event
+            )
             return
-        self._monitor_started(run_id, int(job["max_duration_seconds"]), started["started_at"])
+        self._monitor_started(
+            run_id,
+            int(job["max_duration_seconds"]),
+            started["started_at"],
+            shutdown_event,
+        )
 
-    def _recover_start(self, run_id: str, max_duration: Any) -> None:
+    def _recover_start(
+        self,
+        run_id: str,
+        max_duration: Any,
+        shutdown_event: threading.Event | None = None,
+    ) -> None:
+        if shutdown_event is not None and shutdown_event.is_set():
+            return
         try:
             containers = self._launcher.list_runs()
         except RunnerTransportError:
+            if shutdown_event is not None and shutdown_event.is_set():
+                return
             emit_stable_event(
                 self._api, self._outbox, self._runner_id, run_id, "run.unknown"
             )
+            return
+        if shutdown_event is not None and shutdown_event.is_set():
             return
         container = next(
             (row for row in containers if row.get("run_id") == run_id), None
@@ -757,13 +984,22 @@ class RunnerSupervisor:
             stop = self._launcher.stop(run_id)
             self._terminal(run_id, "run.unknown", cleanup=stop["verified"])
             return
-        self._monitor_started(run_id, max_duration, started_at)
+        self._monitor_started(run_id, max_duration, started_at, shutdown_event)
 
-    def _monitor_started(self, run_id: str, max_duration: int, started_at: Any) -> None:
-        self._monitor(run_id, max_duration, started_at)
-
+    def _monitor_started(
+        self,
+        run_id: str,
+        max_duration: int,
+        started_at: Any,
+        shutdown_event: threading.Event | None = None,
+    ) -> None:
+        self._monitor(run_id, max_duration, started_at, shutdown_event)
     def _monitor(
-        self, run_id: str, max_duration_seconds: int, started_at: Any
+        self,
+        run_id: str,
+        max_duration_seconds: int,
+        started_at: Any,
+        shutdown_event: threading.Event | None = None,
     ) -> None:
         if not 1 <= max_duration_seconds <= 3600:
             raise RunnerTransportError("Run timeout is outside the host policy")
@@ -771,18 +1007,25 @@ class RunnerSupervisor:
         started_monotonic = time.monotonic()
         cursor = 0
         result_saved = False
+        failure_seen = False
         last_cancel_check = 0.0
         last_heartbeat = started_monotonic
         started = False
         while True:
+            if shutdown_event is not None and shutdown_event.is_set():
+                return
             try:
                 stream = self._launcher.events(run_id, cursor)
             except InvalidWorkerFrameError:
+                if shutdown_event is not None and shutdown_event.is_set():
+                    return
                 stop = self._launcher.stop(run_id)
                 self._unknown(run_id, "worker_frame_stream_invalid", cleanup=stop["verified"])
                 return
             frames = stream["events"]
             for frame in frames:
+                if shutdown_event is not None and shutdown_event.is_set():
+                    return
                 if (
                     not isinstance(frame, dict)
                     or set(frame) != {"sequence", "kind", "payload"}
@@ -817,6 +1060,49 @@ class RunnerSupervisor:
                         self._unknown(run_id, "run_started_event_rejected", cleanup=stop["verified"])
                         return
                     started = True
+                elif kind == "failure":
+                    cause_status = payload.get("cause_status")
+                    error_type = payload.get("error_type")
+                    cause_type = payload.get("cause_type")
+                    cause_reason = payload.get("cause_reason")
+                    if (
+                        not started
+                        or result_saved
+                        or failure_seen
+                        or set(payload)
+                        != {
+                            "error_type",
+                            "cause_type",
+                            "cause_status",
+                            "cause_reason",
+                        }
+                        or not isinstance(error_type, str)
+                        or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", error_type)
+                        or not isinstance(cause_type, str)
+                        or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", cause_type)
+                        or (
+                            cause_status != "unavailable"
+                            and (
+                                not isinstance(cause_status, int)
+                                or isinstance(cause_status, bool)
+                                or not 100 <= cause_status <= 599
+                            )
+                        )
+                        or cause_reason not in SAFE_WORKER_FAILURE_REASONS
+                    ):
+                        stop = self._launcher.stop(run_id)
+                        self._unknown(run_id, "worker_failure_frame_invalid", cleanup=stop["verified"])
+                        return
+                    LOG.error(
+                        "worker_execution_failed run_id=%s error_type=%s "
+                        "cause_type=%s cause_status=%s cause_reason=%s",
+                        run_id,
+                        error_type,
+                        cause_type,
+                        cause_status,
+                        cause_reason,
+                    )
+                    failure_seen = True
                 elif kind in {"event", "result"}:
                     if result_saved:
                         stop = self._launcher.stop(run_id)
@@ -868,6 +1154,8 @@ class RunnerSupervisor:
                     self._unknown(run_id, "worker_frame_kind_invalid", cleanup=stop["verified"])
                     return
                 cursor = sequence
+            if shutdown_event is not None and shutdown_event.is_set():
+                return
 
             now = time.monotonic()
             status = stream.get("status")
@@ -1438,12 +1726,14 @@ def run_forever(settings: RunnerSettings) -> None:
     )
     last_heartbeat = 0.0
     last_reconcile = 0.0
+    pool = RunnerJobPool(MAX_ACTIVE_RUNS)
     try:
         while True:
             if api is None or launcher is None or supervisor is None:
                 time.sleep(5)
                 continue
             try:
+                pool.reap()
                 readiness = launcher.ready()
                 now = time.monotonic()
                 if now - last_heartbeat >= 30:
@@ -1457,14 +1747,33 @@ def run_forever(settings: RunnerSettings) -> None:
                     last_heartbeat = now
                 flush_events(api, outbox)
                 if now - last_reconcile >= 15:
-                    supervisor.reconcile()
+                    reconciliation = supervisor.reconcile()
+                    for run_id in pool.failed_run_ids():
+                        if (
+                            run_id not in reconciliation.observed_run_ids
+                            or run_id in reconciliation.released_run_ids
+                        ):
+                            pool.release_failed(run_id)
+                    for recovery in reconciliation.recoveries:
+                        pool.resubmit_recovered(
+                            recovery["run_id"],
+                            supervisor.monitor_recovered,
+                            recovery,
+                            pool.shutdown_event,
+                        )
                     last_reconcile = now
-                if readiness["provider_ready"]:
+                while readiness["provider_ready"] and pool.available_workers:
                     job = api.post(
                         "/internal/runner/claim", {"runner_id": runner_id}
                     )
-                    if isinstance(job, dict):
-                        supervisor.run_job(job)
+                    if not isinstance(job, dict):
+                        break
+                    run_id = job.get("run_id")
+                    if not isinstance(run_id, str):
+                        raise RunnerTransportError("Claimed Run ID is invalid")
+                    pool.submit(
+                        run_id, supervisor.run_job, job, pool.shutdown_event
+                    )
                 time.sleep(0.5)
             except RunnerTransportError:
                 LOG.warning("runner_transport_failed")
@@ -1476,6 +1785,7 @@ def run_forever(settings: RunnerSettings) -> None:
                 LOG.exception("runner_iteration_failed", extra={"error_type": type(error).__name__})
                 time.sleep(2)
     finally:
+        pool.shutdown()
         outbox.close()
 
 
@@ -1504,12 +1814,18 @@ def run_worker() -> int:
         LOG.error("worker_job_invalid")
         return 1
     settings = RunnerSettings.from_env()
+    stream_api = WorkerStreamAPI(runner_id, run_id, sys.stdout)
     if not settings.provider_key:
+        stream_api.failure(
+            error_type="TaskExecutionError",
+            cause_type="none",
+            cause_status="unavailable",
+            cause_reason="Model Endpoint configuration is unavailable",
+        )
         LOG.error("worker_model_endpoint_unavailable")
         return 1
     settings.state_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     outbox = EventOutbox(settings.state_root / "events.sqlite3")
-    stream_api = WorkerStreamAPI(runner_id, run_id, sys.stdout)
     try:
         with contextlib.redirect_stdout(sys.stderr):
             execute_job(
@@ -1524,24 +1840,22 @@ def run_worker() -> int:
     except (RunnerTransportError, TaskExecutionError, ProviderResponseError) as error:
         cause = error.__cause__
         cause_type = type(cause).__name__ if cause is not None else "none"
-        cause_status = getattr(cause, "status_code", None)
-        if not isinstance(cause_status, int) or isinstance(cause_status, bool):
-            cause_status = "unavailable"
-        safe_setup_reasons = {
-            "Model Endpoint configuration is unavailable",
-            "Run tool configuration is invalid",
-            "Model parameters are invalid",
-            "workspace path is invalid",
-            "workspace root cannot be a symlink",
-            "workspace path cannot traverse a symlink",
-            "workspace path escaped its root",
-            "workspace tool allowlist is invalid",
-        }
+        cause_status = _safe_failure_status(error)
         cause_reason = (
             str(cause)
-            if isinstance(cause, TaskExecutionError) and str(cause) in safe_setup_reasons
+            if isinstance(cause, TaskExecutionError)
+            and str(cause) in SAFE_WORKER_FAILURE_REASONS
             else "unavailable"
         )
+        try:
+            stream_api.failure(
+                error_type=type(error).__name__,
+                cause_type=cause_type,
+                cause_status=cause_status,
+                cause_reason=cause_reason,
+            )
+        except RunnerTransportError:
+            pass
         LOG.error(
             "worker_execution_failed error_type=%s cause_type=%s cause_status=%s cause_reason=%s",
             type(error).__name__,

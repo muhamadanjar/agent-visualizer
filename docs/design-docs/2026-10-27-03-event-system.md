@@ -6,7 +6,7 @@
 | **Author(s)** | Anjar |
 | **Reviewer(s)** | [perlu konfirmasi: reviewer] |
 | **Tanggal Dibuat** | 2026-10-27 |
-| **Terakhir Diupdate** | 2026-10-28 |
+| **Terakhir Diupdate** | 2026-10-30 |
 | **Service Terkait** | `apps/api`, `apps/runner`, Redis Streams, PostgreSQL, `apps/web` |
 | **Ticket / Issue** | N/A — tidak diberikan |
 
@@ -45,7 +45,7 @@ serta synchronization yang tetap benar bila API/Redis/browser restart.
 
 Wire envelope mengikuti struktur PRD baru: `event_id`, `event_version`, `sequence`, `timestamp`, `type`, owner/project/task/run/agent correlation, dan payload terkontrol. Implementasi saat ini menamai versi persisted `schema_version` dan cursor sebagai `cursor`; adapter baru memetakan format lama ke wire contract baru. Legacy rows tetap dipertahankan; data migration additive/backfill saja, tanpa mengubah makna event historis.
 
-Event categories: agent lifecycle, Task lifecycle, Run lifecycle, tool lifecycle, approval, workflow/delegation. Runtime-specific callback raw payload tidak keluar adapter. P0 map minimal lifecycle, heartbeat/freshness, cancellation acknowledgement, terminal outcome, dan tool action allowlisted. Ringkasan aksi dihasilkan backend dari tool ID terdaftar, bukan prompt/runtime prose.
+P0 event taxonomy covers Run lifecycle, heartbeat/freshness, cancellation, terminal outcome, safe tool-action summaries, and approval transitions (`approval.requested`, `approval.approved`, `approval.rejected`). Agent, Task, workflow, and delegation event categories are deferred. Raw runtime callback payloads never leave the adapter. Safe action summaries are backend-derived from registered tool IDs, not model prose.
 
 ```mermaid
 sequenceDiagram
@@ -75,13 +75,19 @@ sequenceDiagram
 - Source sequence mengurutkan satu stream Runner/Run. Owner cursor mengurutkan event persisted untuk replay; timestamp saja bukan jaminan urutan yang benar.
 - `event_version` adalah field wire baru dari PRD; `schema_version` yang tersimpan tetap dipertahankan atau diterjemahkan melalui migrasi additive. Adapter baru mengikuti taksonomi event ternormalisasi; tipe historis tetap dapat dibaca dan tidak ditulis ulang.
 
-### Implementasi saat ini (2026-10-28)
+### Implementasi saat ini (2026-10-30)
 
 - API menulis `Activity Event`, projection, dan row outbox PostgreSQL dalam transaksi yang sama; publisher hanya mengakui row setelah `XADD` berhasil. Redis Streams dipakai sebagai fan-out, dengan satu stream dan pembacaan `XREAD` independen per replica API, bukan consumer group.
 - WebSocket memakai antrean lokal terbatas per koneksi; snapshot dan replay dari PostgreSQL memulihkan cursor saat subscribe/reconnect dan saat sequence gap. Frontend mengirim cursor terakhir, mendeduplikasi event, dan membedakan keadaan sinkronisasi dari status koneksi.
-- Batas stream saat ini sekitar 100.000 entry; retry outbox dan autentikasi/scope memiliki tes API/komponen serta migrasi diuji pada PostgreSQL terisolasi. Belum ada pembuktian Run produksi dari Runner sampai browser atau restart/recovery lintas service.
-- Review menemukan bypass pemeriksaan kedaluwarsa sesi ketika item antrean WebSocket selalu siap; API kini mengautentikasi ulang sebelum meneruskan setiap event. Tes regresi mereproduksi masalah sebelum perbaikan dan lulus setelah perbaikan.
-- Implementasi saat ini memetakan event Run lifecycle dan safe tool action yang sudah ada; taksonomi lengkap agent/task/approval/delegation pada proposal belum diklaim selesai. Retensi/backlog berdasarkan beban dan pengukuran latency tetap terbuka.
+- Redis Streams is capped at approximately 100,000 entries. The user selected preservation of PostgreSQL Activity Event records during the pilot; no pilot event-deletion policy is introduced. The local benchmark target is 10 WebSocket clients, 100 events/second, and p95 delivery latency ≤1 second; this is a temporary profile, not a production capacity claim.
+- Attempt 41 persisted Run events/result across API restart. In a separate live Redis outage drill, Redis was stopped for 6 seconds while read-only Run `3d4dc8e1-7552-4267-9f00-e37327c18368` was active. PostgreSQL retained 15 Run events (cursors 424–438) while Redis was down; six outbox rows were unpublished at the outage check. After Redis restart, the Run completed with 18 persisted events through cursor 441, stream length reached 441, pending outbox returned to zero, and API readiness was `ready`.
+- WebSocket API revalidates the Owner session while forwarding queued events. After API restart, a live browser received `401` from `/api/v1/auth/me` and its WebSocket handshake closed with code `1006`; automatic retries previously continued every two seconds. The frontend now checks session validity without cache on abnormal handshake closure, emits `unavailable` and stops retrying on `401/403`, while transient failures still reconnect. Regression test reproduced the retry before the fix and passes afterward.
+- Approval request, approval, and rejection transitions are persisted to the Activity Event ledger in the same PostgreSQL transaction as the approval write/decision. Event scope comes from the persisted Run snapshot; action details and digests are not copied into the event payload. PostgreSQL integration verifies event idempotency and outbox claim serialization.
+- Earlier browser replay delivered 403 historical events to 10 authenticated WebSocket clients in 3 batches, with per-client p95 1.594 seconds. This historical replay is separate from the agreed new-event profile and does not establish its pass/fail result.
+- Two isolated TCP fan-out measurements each connected 10 authenticated WebSocket clients and published 1,000 new synthetic envelopes at about 100 events/second. All clients received every event; aggregate p95 delivery was 599.32 ms and 132.99 ms across the two runs. Both used Redis database 15 and excluded PostgreSQL outbox and real Run execution; synthetic events remained outside production Redis database 0 and the UI.
+- After Redis recovery, authenticated `/api/v1/auth/me` and Run Activity returned HTTP 200; the Run projection was `succeeded` at cursor 441. A new authenticated WebSocket replay from cursor 423 returned all 18 Run events through `run.succeeded` and snapshot cursor 441.
+- After API process start at `2026-10-29T15:41:03Z`, the live browser returned HTTP 200 for `/api/v1/auth/me` and `/api/v1/activity/snapshot`; API logs show `/api/v1/ws` accepted, and `/office` rendered `Browser event feed: connected`. Because `OwnerSessionStore` is process-local and `sessions.issue` is called by login, this valid post-start session was issued after restart.
+- The authenticated Owner decision route persists approvals/rejections and their Activity Events. `ApprovalRepository.create_request` has no current Run caller, so a real Run creating `approval.requested` is not claimed by this event-system closure.
 
 ### Event-to-presentation boundary
 
@@ -112,11 +118,9 @@ sequenceDiagram
 
 ## Pertanyaan Terbuka
 
-- [perlu konfirmasi: kebutuhan stream partitioning/consumer group jika skala meningkat, retensi Redis, dan batas backlog]
-- [perlu konfirmasi: target event rate, jumlah WebSocket clients, dan latency measurement profile]
-- [perlu konfirmasi: masa migrasi `schema_version` ke wire `event_version` dan batas dukungan event legacy]
-- [perlu konfirmasi: cakupan taksonomi Event P0 untuk Agent, Task, Approval, dan Delegation]
-- [perlu konfirmasi: nama/email author dan reviewer]
+- [perlu konfirmasi: stream partitioning/consumer-group need at higher scale and backlog alert/limit] -- deferred; current pilot uses one stream and a ~100,000-entry cap
+- [perlu konfirmasi: migration period for persisted `schema_version` to wire `event_version` and legacy-event support boundary]
+- [perlu konfirmasi: author/reviewer identity] -- reviewer remains unassigned
 
 ## Referensi
 
