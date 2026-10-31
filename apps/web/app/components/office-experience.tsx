@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Component, useCallback, useEffect, useMemo, useState, type CSSProperties, type ErrorInfo, type ReactNode } from "react";
 import { createOfficeLayout } from "./office-layout";
 import { assignOfficeAvatarModels } from "./office-avatar";
+import { deriveOfficeVisualState } from "./office-visual-state";
 import type { OfficeSceneAgent } from "./office-scene";
 import { StatusPill } from "./workspace-components";
 import {
@@ -34,7 +35,6 @@ type OfficeAgentInstance = {
   updated_at: string;
 };
 type OfficeAgentInstancePage = { records: OfficeAgentInstance[]; paginationLimitReached: boolean };
-type VisualAnimation = OfficeSceneAgent["animation"];
 
 const OFFICE_AGENT_PAGE_SIZE = 200;
 const OFFICE_AGENT_MAX_OFFSET = 1_000_000;
@@ -99,18 +99,13 @@ function projectionLabel(projection: RuntimeProjection | undefined): string {
     : `Status unavailable · last verified ${projection.status} (${projection.freshness})`;
 }
 
-function projectionAnimation(projection: RuntimeProjection | undefined): VisualAnimation {
-  if (!projection || projection.freshness !== "fresh") return "neutral";
-  if (projection.status === "running" && projection.last_event_type !== "run.cancellation_pending") return "working";
-  if (projection.status === "succeeded") return "success";
-  return "neutral";
-}
 
 function availabilityLabel(availability: AgentAvailabilityState | undefined): string {
   switch (availability ?? "unknown") {
     case "idle": return "Idle · verified";
     case "working": return "Working · verified";
     case "waiting": return "Waiting · unresolved Run";
+    case "offline": return "Offline · runtime heartbeat expired";
     case "unknown": return "Unknown · state uncertain";
   }
 }
@@ -119,6 +114,7 @@ function availabilityShortLabel(availability: AgentAvailabilityState | undefined
   switch (availability ?? "unknown") {
     case "idle": return "Idle";
     case "working": return "Working";
+    case "offline": return "Offline";
     case "waiting": return "Waiting";
     case "unknown": return "Unknown";
   }
@@ -178,6 +174,7 @@ function OfficeFallback({ agents, runtimeByAgent, availabilityByAgent, onSelectA
 
 export function OfficeExperience() {
   const [zoomAdjustment, setZoomAdjustment] = useState(0);
+  const [focusMode, setFocusMode] = useState(false);
   const [focusTarget, setFocusTarget] = useState<[number, number, number]>([0, 0.8, 0]);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [sceneReady, setSceneReady] = useState(false);
@@ -384,13 +381,13 @@ export function OfficeExperience() {
       const projection = runtimeByAgent.get(agent.id);
       const availability = availabilityByAgent.get(agent.id) ?? "unknown";
       const station = layout.stations[index]!;
+      const visualState = deriveOfficeVisualState(availability, projection);
       return {
         id: agent.id,
         displayName: agent.display_name,
-        statusLabel: availabilityShortLabel(availability),
-        animation: availability === "working"
-          ? "working"
-          : availability === "idle" ? projectionAnimation(projection) : "neutral",
+        statusLabel: visualState.statusLabel,
+        activityCursor: projection?.last_event_cursor ?? -1,
+        animation: visualState.animation,
         modelUrl: avatarModelsByAgent.get(agent.id)!,
         fullAvatar: fullAvatarIds.has(agent.id),
         selected: agent.id === selectedAgentId,
@@ -412,12 +409,13 @@ export function OfficeExperience() {
       idle: 0,
       working: 0,
       waiting: 0,
+      offline: 0,
       unknown: 0,
     };
     for (const agent of agentRecords ?? []) {
       counts[availabilityByAgent.get(agent.id) ?? "unknown"] += 1;
     }
-    return `${counts.working} work · ${counts.idle} rest · ${counts.waiting} wait · ${counts.unknown} unknown`;
+    return `${counts.working} work · ${counts.idle} rest · ${counts.waiting} wait · ${counts.offline} offline · ${counts.unknown} unknown`;
   }, [agentRecords, availabilityByAgent]);
   useEffect(() => {
     if (agentRecords === null) return;
@@ -502,11 +500,14 @@ export function OfficeExperience() {
   function focusSelectedAgent() {
     const visual = sceneAgents.find((agent) => agent.id === selectedAgentId);
     if (!visual) return;
+    setZoomAdjustment(0);
+    setFocusMode(true);
     setFocusTarget([visual.position[0], 0.8, visual.position[2]]);
   }
 
   function resetCamera() {
     setZoomAdjustment(0);
+    setFocusMode(false);
     setFocusTarget([0, 0.8, 0]);
   }
 
@@ -543,6 +544,7 @@ export function OfficeExperience() {
               <OfficeScene
                 agents={sceneAgents}
                 zoom={15 + zoomAdjustment}
+                focusMode={focusMode}
                 focusTarget={focusTarget}
                 reducedMotion={reducedMotion}
                 simplified={simplifiedScene}

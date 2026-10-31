@@ -69,6 +69,14 @@ def test_activity_stream_rejects_malformed_cursor_envelopes() -> None:
     approval["payload"]["approval_id"] = None
     assert _decode_event(json.dumps(approval)) is None
 
+    for sequence, event_type in enumerate(
+        ("run.working", "run.tool_started", "run.reviewing"),
+        start=7,
+    ):
+        phase = _wire_event("owner-a", sequence)
+        phase["type"] = event_type
+        assert _decode_event(json.dumps(phase)) == phase
+
     malformed = _wire_event("owner-a", 2)
     malformed["sequence"] = True
     assert _decode_event(json.dumps(malformed)) is None

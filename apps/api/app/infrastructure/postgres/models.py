@@ -480,7 +480,8 @@ class ActivityEventTable(SQLModel, table=True):
         CheckConstraint("schema_version = 1"),
         CheckConstraint("task_revision >= 1"),
         CheckConstraint(
-            "event_type IN ('run.started', 'run.waiting_input', 'run.waiting_approval', "
+            "event_type IN ('run.started', 'run.working', 'run.tool_started', "
+            "'run.reviewing', 'run.waiting_input', 'run.waiting_approval', "
             "'run.blocked', 'run.tool_action', 'run.cancellation_pending', "
             "'run.succeeded', 'run.failed', 'run.canceled', 'run.unknown', "
             "'session.heartbeat', 'approval.requested', 'approval.approved', "

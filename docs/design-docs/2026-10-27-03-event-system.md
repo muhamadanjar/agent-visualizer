@@ -45,7 +45,7 @@ serta synchronization yang tetap benar bila API/Redis/browser restart.
 
 Wire envelope mengikuti struktur PRD baru: `event_id`, `event_version`, `sequence`, `timestamp`, `type`, owner/project/task/run/agent correlation, dan payload terkontrol. Implementasi saat ini menamai versi persisted `schema_version` dan cursor sebagai `cursor`; adapter baru memetakan format lama ke wire contract baru. Legacy rows tetap dipertahankan; data migration additive/backfill saja, tanpa mengubah makna event historis.
 
-P0 event taxonomy covers Run lifecycle, heartbeat/freshness, cancellation, terminal outcome, safe tool-action summaries, and approval transitions (`approval.requested`, `approval.approved`, `approval.rejected`). Agent, Task, workflow, and delegation event categories are deferred. Raw runtime callback payloads never leave the adapter. Safe action summaries are backend-derived from registered tool IDs, not model prose.
+P0 event taxonomy covers Run lifecycle, heartbeat/freshness, cancellation, terminal outcome, safe tool-action summaries, and approval transitions (`approval.requested`, `approval.approved`, `approval.rejected`). The FR-3D-005 visual-activity extension adds `run.working`, `run.tool_started`, and `run.reviewing`; these are normalized evidence, not Run lifecycle statuses. Agent, Task, workflow, and delegation event categories are deferred. Raw runtime callback payloads never leave the adapter. Safe action summaries are backend-derived from registered tool IDs, not model prose.
 
 ```mermaid
 sequenceDiagram
@@ -75,7 +75,9 @@ sequenceDiagram
 - Source sequence mengurutkan satu stream Runner/Run. Owner cursor mengurutkan event persisted untuk replay; timestamp saja bukan jaminan urutan yang benar.
 - `event_version` adalah field wire baru dari PRD; `schema_version` yang tersimpan tetap dipertahankan atau diterjemahkan melalui migrasi additive. Adapter baru mengikuti taksonomi event ternormalisasi; tipe historis tetap dapat dibaca dan tidak ditulis ulang.
 
-### Implementasi saat ini (2026-10-30)
+The visual-activity events remain `running` in the Run projection. `run.working` is emitted at an actual model-call start; `run.tool_started` precedes a workspace side effect; `run.reviewing` marks the next model call after tool output and does not claim human/code review. The post-call `run.tool_action` remains a backend-derived safe summary. Planning/tool-start/reviewing cues expire 30 seconds after `last_event_at` even if a later heartbeat keeps overall projection freshness current. No per-Agent Runtime Session/presence source currently proves `Offline`; missing or stale evidence remains `unknown`.
+
+### Implementasi saat ini (2026-10-31)
 
 - API menulis `Activity Event`, projection, dan row outbox PostgreSQL dalam transaksi yang sama; publisher hanya mengakui row setelah `XADD` berhasil. Redis Streams dipakai sebagai fan-out, dengan satu stream dan pembacaan `XREAD` independen per replica API, bukan consumer group.
 - WebSocket memakai antrean lokal terbatas per koneksi; snapshot dan replay dari PostgreSQL memulihkan cursor saat subscribe/reconnect dan saat sequence gap. Frontend mengirim cursor terakhir, mendeduplikasi event, dan membedakan keadaan sinkronisasi dari status koneksi.

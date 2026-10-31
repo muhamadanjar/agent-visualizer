@@ -1236,7 +1236,8 @@ Pergerakan visual menggunakan `Agent Availability`, read model turunan yang owne
 - `idle`: tidak ada dispatch yang masih unresolved; karakter duduk di Rest Room.
 - `working`: dispatch `leased` dengan projection `running` yang fresh; karakter bergerak ke workstation dan menjalankan pose mengetik.
 - `waiting`: dispatch `queued`/`blocked`, projection menunggu input/approval, atau cancellation pending; karakter tetap di workstation tanpa pose mengetik.
-- `unknown`: dispatch/projection hilang, stale, tidak konsisten, atau API tidak tersedia; karakter tetap di workstation dalam pose netral dan tidak pernah dianggap `idle`.
+- `offline`: dispatch `leased` memiliki projection aktif dan `session.heartbeat` persisted yang lebih lama dari 30 detik, tanpa Activity Event yang lebih baru; Runtime Session ditampilkan inactive di workstation. Ini tidak mengubah `Agent Instance` menjadi proses yang selalu hidup.
+- `unknown`: dispatch/projection hilang atau kontradiktif, freshness kedaluwarsa tanpa bukti heartbeat yang cukup untuk menyatakan offline, atau API tidak tersedia; karakter tetap di workstation dalam pose netral dan tidak pernah dianggap `idle`.
 
 Run terminal tidak mencegah `idle` setelah tidak ada dispatch unresolved. `Agent Availability` tidak memberi izin, assignment, atau lokasi workspace tersimpan.
 

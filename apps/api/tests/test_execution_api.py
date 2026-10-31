@@ -259,10 +259,27 @@ def test_runner_event_ack_is_authenticated_scoped_and_idempotent() -> None:
         assert stored.project_id == project.id
         assert stored.task_id == execution.context.task_id
         assert stored.agent_instance_id == execution.context.instance_id
+        for source_sequence, event_type in enumerate(
+            ("run.working", "run.tool_started", "run.reviewing"),
+            start=2,
+        ):
+            state_response = client.post(
+                route,
+                headers=headers,
+                json={
+                    **payload,
+                    "event_id": str(uuid4()),
+                    "event_type": event_type,
+                    "source_sequence": source_sequence,
+                },
+            )
+            assert state_response.status_code == 200
+            assert state_response.json()["acknowledged"] is True
         action_payload = {
             **payload,
             "event_id": str(uuid4()),
             "event_type": "run.tool_action",
+            "source_sequence": 5,
             "tool_name": "write_file",
         }
         action_response = client.post(route, json=action_payload, headers=headers)
@@ -277,7 +294,7 @@ def test_runner_event_ack_is_authenticated_scoped_and_idempotent() -> None:
             **payload,
             "event_id": str(uuid4()),
             "event_type": "run.succeeded",
-            "source_sequence": 4,
+            "source_sequence": 6,
         }
         terminal_response = client.post(
             route, json=terminal_payload, headers=headers

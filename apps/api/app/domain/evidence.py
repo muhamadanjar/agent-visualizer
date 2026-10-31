@@ -16,6 +16,9 @@ ACTIVITY_EVENT_TYPES = frozenset(
         "run.waiting_approval",
         "run.blocked",
         "run.tool_action",
+        "run.working",
+        "run.tool_started",
+        "run.reviewing",
         "run.cancellation_pending",
         "run.succeeded",
         "run.failed",
@@ -29,6 +32,9 @@ ACTIVITY_EVENT_TYPES = frozenset(
 )
 EVENT_STATUS = {
     "run.started": "running",
+    "run.working": "running",
+    "run.tool_started": "running",
+    "run.reviewing": "running",
     "run.waiting_input": "waiting_input",
     "run.waiting_approval": "waiting_approval",
     "run.blocked": "blocked",

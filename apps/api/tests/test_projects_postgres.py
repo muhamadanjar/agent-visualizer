@@ -64,9 +64,7 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
     if not database_name.endswith("_test"):
         pytest.fail("TEST_DATABASE_URL must target a disposable database ending in _test")
 
-    dsn = database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
-
-    async def verify() -> None:
+    async def verify_database(dsn: str) -> None:
         connection = await asyncpg.connect(dsn=dsn, timeout=5)
         app_role_name = f"agent_office_test_{uuid4().hex}"
         app_role_password = secrets.token_urlsafe(32)
@@ -117,7 +115,7 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
             await apply_alembic_migrations(dsn)
             assert await connection.fetchval(
                 "SELECT version_num FROM alembic_version"
-            ) == "gateway_0018"
+            ) == "activity_0019"
             migrated_endpoint = await connection.fetchrow(
                 "SELECT name, credential_env, default_model_id, default_route "
                 "FROM model_endpoints WHERE owner_id = $1",
@@ -936,16 +934,82 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                 first_run.id,
                 started_event.event_id,
             )
+            working_draft = replace(
+                event_draft,
+                event_id=uuid4(),
+                event_type="run.working",
+                occurred_at=event_time + timedelta(seconds=1),
+                source_sequence=2,
+            )
+            working_event, inserted = await evidence_repository.append_event(working_draft)
+            assert inserted is True
+            working_projection = await evidence_repository.get_projection_for_run(
+                restricted_owner_id, first_run.id
+            )
+            assert working_projection is not None
+            assert working_projection.status == "running"
+            assert working_projection.last_event_type == "run.working"
+            tool_started_draft = replace(
+                event_draft,
+                event_id=uuid4(),
+                event_type="run.tool_started",
+                occurred_at=event_time + timedelta(seconds=2),
+                source_sequence=3,
+            )
+            tool_started_event, inserted = await evidence_repository.append_event(
+                tool_started_draft
+            )
+            assert inserted is True
+            tool_started_projection = await evidence_repository.get_projection_for_run(
+                restricted_owner_id, first_run.id
+            )
+            assert tool_started_projection is not None
+            assert tool_started_projection.status == "running"
+            assert tool_started_projection.last_event_type == "run.tool_started"
             action_draft = replace(
                 event_draft,
                 event_id=uuid4(),
                 event_type="run.tool_action",
-                occurred_at=event_time + timedelta(seconds=1),
-                source_sequence=2,
+                occurred_at=event_time + timedelta(seconds=3),
+                source_sequence=4,
                 action_summary="Wrote a project file",
             )
             action_event, inserted = await evidence_repository.append_event(action_draft)
             assert inserted is True and action_event.action_summary == "Wrote a project file"
+            reviewing_draft = replace(
+                event_draft,
+                event_id=uuid4(),
+                event_type="run.reviewing",
+                occurred_at=event_time + timedelta(seconds=4),
+                source_sequence=5,
+            )
+            reviewing_event, inserted = await evidence_repository.append_event(
+                reviewing_draft
+            )
+            assert inserted is True
+            reviewing_projection = await evidence_repository.get_projection_for_run(
+                restricted_owner_id, first_run.id
+            )
+            assert reviewing_projection is not None
+            assert reviewing_projection.status == "running"
+            assert reviewing_projection.last_event_type == "run.reviewing"
+            heartbeat_event, inserted = await evidence_repository.append_event(
+                replace(
+                    event_draft,
+                    event_id=uuid4(),
+                    event_type="session.heartbeat",
+                    occurred_at=event_time + timedelta(seconds=5),
+                    source_sequence=6,
+                )
+            )
+            assert inserted is True
+            expired_availability = await execution_repository.list_agent_availability(
+                restricted_owner_id,
+                [restricted_instance.id],
+                now=event_time + timedelta(seconds=36),
+            )
+            assert len(expired_availability) == 1
+            assert expired_availability[0].availability == "offline"
             duplicate_event, inserted = await evidence_repository.append_event(event_draft)
             assert inserted is False
             assert duplicate_event.cursor == started_event.cursor
@@ -971,8 +1035,8 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                 event_draft,
                 event_id=uuid4(),
                 event_type="run.succeeded",
-                occurred_at=event_time + timedelta(seconds=2),
-                source_sequence=3,
+                occurred_at=event_time + timedelta(seconds=6),
+                source_sequence=7,
             )
             await evidence_repository.append_terminal_event(
                 succeeded_draft, runner_id
@@ -981,8 +1045,8 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                 event_draft,
                 event_id=uuid4(),
                 event_type="run.failed",
-                occurred_at=event_time + timedelta(seconds=3),
-                source_sequence=4,
+                occurred_at=event_time + timedelta(seconds=7),
+                source_sequence=8,
             )
             try:
                 await evidence_repository.append_terminal_event(
@@ -1004,7 +1068,11 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
             assert run_events is not None
             assert [item.event_id for item in run_events] == [
                 started_event.event_id,
+                working_event.event_id,
+                tool_started_event.event_id,
                 action_event.event_id,
+                reviewing_event.event_id,
+                heartbeat_event.event_id,
                 succeeded_draft.event_id,
             ]
             owner_snapshot = await evidence_repository.get_snapshot_for_owner(
@@ -1812,14 +1880,18 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                     DELETE FROM activity_event_outbox
                     WHERE owner_id = $1 AND cursor IN (
                         SELECT cursor FROM activity_events
-                        WHERE owner_id = $1 AND event_type LIKE 'approval.%'
+                        WHERE owner_id = $1 AND (
+                            event_type LIKE 'approval.%'
+                            OR event_type IN ('run.working', 'run.tool_started', 'run.reviewing')
+                        )
                     )
                     """,
                     restricted_owner_id,
                 )
                 await connection.execute(
-                    "DELETE FROM activity_events "
-                    "WHERE owner_id = $1 AND event_type LIKE 'approval.%'",
+                    "DELETE FROM activity_events WHERE owner_id = $1 AND "
+                    "(event_type LIKE 'approval.%' OR event_type IN "
+                    "('run.working', 'run.tool_started', 'run.reviewing'))",
                     restricted_owner_id,
                 )
                 await connection.execute(
@@ -1958,7 +2030,7 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
             ) == "blocked"
             assert await connection.fetchval(
                 "SELECT version_num FROM alembic_version"
-            ) == "gateway_0018"
+            ) == "activity_0019"
         finally:
             if restricted_pool is not None:
                 await restricted_pool.close()
@@ -2324,5 +2396,31 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                     )
             await pool.close()
             await engine.dispose()
+
+    async def verify() -> None:
+        test_database_name = f"agent_office_projects_{uuid4().hex}_test"
+        database_url_object = make_url(database_url)
+        admin_dsn = database_url_object.set(drivername="postgresql").render_as_string(
+            hide_password=False
+        )
+        admin_connection = await asyncpg.connect(dsn=admin_dsn, timeout=5)
+        try:
+            await admin_connection.execute(f'CREATE DATABASE "{test_database_name}"')
+        finally:
+            await admin_connection.close()
+
+        test_dsn = database_url_object.set(
+            drivername="postgresql", database=test_database_name
+        ).render_as_string(hide_password=False)
+        try:
+            await verify_database(test_dsn)
+        finally:
+            cleanup_connection = await asyncpg.connect(dsn=admin_dsn, timeout=5)
+            try:
+                await cleanup_connection.execute(
+                    f'DROP DATABASE "{test_database_name}"'
+                )
+            finally:
+                await cleanup_connection.close()
 
     asyncio.run(verify())

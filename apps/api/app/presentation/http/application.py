@@ -346,6 +346,9 @@ class RunnerEventRequest(BaseModel):
         "run.waiting_approval",
         "run.blocked",
         "run.tool_action",
+        "run.working",
+        "run.tool_started",
+        "run.reviewing",
         "run.cancellation_pending",
         "run.succeeded",
         "run.failed",
@@ -862,7 +865,7 @@ class AgentInstanceResponse(BaseModel):
 
 class AgentAvailabilityResponse(BaseModel):
     agent_instance_id: UUID
-    availability: Literal["idle", "working", "waiting", "unknown"]
+    availability: Literal["idle", "working", "waiting", "offline", "unknown"]
 
 
 def _agent_instance_response(instance: AgentInstance) -> AgentInstanceResponse:

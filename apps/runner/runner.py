@@ -77,6 +77,9 @@ CODEX_GATEWAY_TRANSPORT_REASONS = {
 
 RUNNER_ACTIVITY_EVENT_TYPES = {
     "run.started",
+    "run.working",
+    "run.tool_started",
+    "run.reviewing",
     "run.cancellation_pending",
     "run.succeeded",
     "run.failed",
@@ -85,7 +88,13 @@ RUNNER_ACTIVITY_EVENT_TYPES = {
     "run.tool_action",
     "session.heartbeat",
 }
-WORKER_ACTIVITY_EVENT_TYPES = {"run.tool_action", "session.heartbeat"}
+WORKER_ACTIVITY_EVENT_TYPES = {
+    "run.working",
+    "run.tool_started",
+    "run.reviewing",
+    "run.tool_action",
+    "session.heartbeat",
+}
 LEASE_SECONDS = 120
 
 
@@ -306,7 +315,13 @@ class RuntimeLauncherClient:
 class WorkerStreamAPI:
     """Translate the worker's narrow API contract into bounded stdout frames."""
 
-    _EVENT_TYPES = {"run.tool_action", "session.heartbeat"}
+    _EVENT_TYPES = {
+        "run.working",
+        "run.tool_started",
+        "run.reviewing",
+        "run.tool_action",
+        "session.heartbeat",
+    }
 
     def __init__(self, runner_id: str, run_id: str, stream: Any) -> None:
         self._runner_id = runner_id
@@ -382,7 +397,7 @@ class WorkerStreamAPI:
             if (
                 event_type not in self._EVENT_TYPES
                 or (event_type == "run.tool_action" and not isinstance(tool_name, str))
-                or (event_type == "session.heartbeat" and tool_name is not None)
+                or (event_type != "run.tool_action" and tool_name is not None)
             ):
                 raise RunnerTransportError("Worker event is not allowed")
             frame_payload: dict[str, Any] = {
@@ -1339,6 +1354,25 @@ class _RunnerHeartbeatHandler(BaseCallbackHandler):
         self._runner_id = runner_id
         self._run_id = run_id
 
+        self._review_pending = False
+        self._state_lock = threading.Lock()
+
+    def on_chat_model_start(self, serialized: Any, messages: Any, **kwargs: Any) -> None:
+        with self._state_lock:
+            event_type = "run.reviewing" if self._review_pending else "run.working"
+            self._review_pending = False
+        emit_event(
+            self._api,
+            self._outbox,
+            self._runner_id,
+            self._run_id,
+            event_type,
+        )
+
+    def on_tool_end(self, output: Any, **kwargs: Any) -> None:
+        with self._state_lock:
+            self._review_pending = True
+
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
         emit_event(
             self._api,
@@ -1686,6 +1720,9 @@ def execute_job(
                 api, outbox, runner_id, run_id, "run.tool_action", name
             ),
             max_tool_calls=max_tool_calls,
+            on_tool_started=lambda _name: emit_event(
+                api, outbox, runner_id, run_id, "run.tool_started"
+            ),
         )
         agent = build_agent(
             runtime_id=configuration.get("runtime_id"),

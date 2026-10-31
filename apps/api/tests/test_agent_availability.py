@@ -24,6 +24,9 @@ from app.domain.availability import AgentRunEvidence, derive_agent_availability
         ("leased", "waiting_approval", "run.waiting_approval", 1, "waiting"),
         ("leased", "running", "run.cancellation_pending", 1, "waiting"),
         ("leased", "running", "run.waiting_input", 1, "unknown"),
+        ("leased", "waiting_input", "run.working", 1, "unknown"),
+        ("leased", "waiting_input", "run.tool_started", 1, "unknown"),
+        ("leased", "waiting_input", "run.reviewing", 1, "unknown"),
         ("leased", "running", "run.started", 31, "unknown"),
         ("leased", None, None, None, "unknown"),
         ("leased", "succeeded", "run.succeeded", 1, "unknown"),
@@ -99,3 +102,38 @@ def test_recent_heartbeat_is_authoritative_when_the_last_event_is_old() -> None:
     assert derive_agent_availability(
         instance_id, [evidence], owned=True, now=now
     ).availability == "working"
+def test_expired_runtime_heartbeat_is_offline_but_missing_heartbeat_is_unknown() -> None:
+    now = datetime.now(UTC)
+    instance_id = uuid4()
+    old_event_at = now - timedelta(seconds=31)
+    expired = AgentRunEvidence(
+        instance_id, "leased", "running", "run.started",
+        old_event_at, old_event_at,
+    )
+    missing = AgentRunEvidence(
+        instance_id, "leased", "running", "run.started",
+        old_event_at, None,
+    )
+
+    assert derive_agent_availability(
+        instance_id, [expired], owned=True, now=now
+    ).availability == "offline"
+    assert derive_agent_availability(
+        instance_id, [missing], owned=True, now=now
+    ).availability == "unknown"
+
+
+def test_offline_and_live_run_evidence_is_conflicting() -> None:
+    now = datetime.now(UTC)
+    instance_id = uuid4()
+    live = AgentRunEvidence(
+        instance_id, "leased", "running", "run.started", now, now
+    )
+    expired = AgentRunEvidence(
+        instance_id, "leased", "running", "run.started",
+        now - timedelta(seconds=31), now - timedelta(seconds=31),
+    )
+
+    assert derive_agent_availability(
+        instance_id, [live, expired], owned=True, now=now
+    ).availability == "unknown"

@@ -6,7 +6,7 @@
 | **Author(s)** | Anjar |
 | **Reviewer(s)** | [perlu konfirmasi: reviewer] |
 | **Tanggal Dibuat** | 2026-10-27 |
-| **Terakhir Diupdate** | 2026-10-30 |
+| **Terakhir Diupdate** | 2026-11-01 |
 | **Service Terkait** | `apps/web`, React Three Fiber, Three.js, GLB assets, `apps/api` |
 | **Ticket / Issue** | N/A — tidak diberikan |
 
@@ -42,8 +42,8 @@ Aplikasi memakai scene React Three Fiber untuk `Agent Instance` persisted tanpa 
 - Layout menempatkan workstation di ruang kerja, area meeting bersama di depannya, dan Rest Room terpisah di bagian belakang. Koordinat dihitung dari daftar aktif `Agent Instance` terurut ID; seat-center clearance minimum 2.4m dipertahankan dengan room growth dan tidak disimpan.
 - Setiap instance mendapat workstation dan satu kursi Rest Room; jumlah baris dan kedalaman ruangan bertambah mengikuti roster. Posisi bukan `Office Scene Version`, assignment, koordinat Agent Instance, atau lokasi Run.
 - API memasok `Agent Availability` owner-scoped dari dispatch `Run / Attempt` unresolved dan Activity Event projection. Tidak ada unresolved dispatch berarti idle, termasuk setelah Run terminal; instance asing/archived atau data hilang menghasilkan unknown.
-- Availability mapping: `working` memerlukan dispatch `leased` dan projection `running` fresh; `waiting` mencakup queued/blocked, input/approval, atau cancellation pending; `unknown` mencakup stale, hilang, konflik, atau API unavailable. Hanya idle beristirahat; unknown tidak pernah diperlakukan sebagai idle.
-- Idle bergerak melalui waypoint ke kursi Rest Room; working bergerak melalui waypoint ke workstation dan menjalankan pose duduk/mengetik. Waiting/unknown berada pada workstation tanpa pose mengetik. State dibaca ulang tiap 5 detik; kegagalan refresh mengosongkan map sehingga tampilan menjadi unknown.
+- Availability mapping: `working` requires a `leased` dispatch and fresh `running` projection; `waiting` covers queued/blocked, input/approval, or cancellation pending; `offline` requires a `leased` dispatch, active projection, and persisted `session.heartbeat` older than 30 seconds with no later Activity Event; `unknown` covers missing/conflicting evidence, stale activity without a qualifying heartbeat, or API unavailable. Only idle rests; offline is inactive at the workstation; unknown never implies idle or offline.
+- Idle agents use waypoints to reach the Rest Room; working agents use waypoints to reach a workstation and sit/type. Waiting, offline, and unknown remain at the workstation without typing; offline uses the inactive pose while unknown stays neutral. State refreshes every five seconds; refresh failure clears availability so agents become unknown.
 - Project/Agent Definition chips memfilter daftar record aktual tanpa membuat Division atau zona visual terpisah. Pemilihan menggunakan `#<Agent Instance.id>`; ID tidak valid/arsip dibersihkan dari URL dengan pesan non-blocking. Owner session tetap diwajibkan oleh API.
 - CTA Create Task membuka `/tasks/new` dengan Agent Instance terpilih dan Project saat ini jika ada. Task baru tersimpan hanya setelah submit; Run tetap memerlukan preflight dan tindakan eksplisit.
 - Rig GLB rinci dibatasi 20 desktop/8 mobile; selebihnya marker tetap dapat dipilih. Tujuh GLB dipilih otomatis secara deterministik berdasarkan ID dan collision-resolved untuk roster hingga ukuran katalog; anchor marker juga tidak menyimpan assignment.
@@ -51,9 +51,9 @@ Aplikasi memakai scene React Three Fiber untuk `Agent Instance` persisted tanpa 
 
 ### Availability-to-animation
 
-Animasi karakter hanya mengikuti `Agent Availability`, bukan label event tunggal. `working` memerlukan dispatch `leased` dan projection `running` fresh; hanya state ini yang mengetik. `idle` berarti tidak ada dispatch unresolved dan menempatkan avatar di Rest Room, termasuk setelah Run terminal. `waiting` dan `unknown` tetap di workstation dalam pose netral; status hilang/stale/kontradiktif/API error tidak pernah menghasilkan idle. Cancellation pending adalah waiting.
+Penempatan scene (Rest Room/workstation), pergerakan, dan kelayakan pose kerja mengikuti `Agent Availability`. Di dalam state tersebut, `deriveOfficeVisualState(availability, projection)` hanya memakai projection fresh yang konsisten: `run.started` → planning; `run.working` → working; `run.tool_started` sebelum `workspace.call` → using tool; `run.reviewing` pada model call setelah hasil tool → reviewing; bukti approval saat waiting → waiting-approval; `run.succeeded`/`run.failed` fresh pada availability idle → completed/failed; offline yang dibuktikan heartbeat Runtime Session → inactive. Cue planning/tool-start/reviewing dibatasi 30 detik sejak `last_event_at`, terpisah dari freshness heartbeat; setelahnya pose kembali ke availability yang terverifikasi. `run.tool_action` tetap ringkasan aksi yang sudah selesai, bukan indikator tool sedang berjalan. Cue tidak mengubah availability atau lokasi. `unknown`, projection stale/hilang tanpa heartbeat Runtime Session kedaluwarsa yang valid, dan state kontradiktif tidak pernah ditafsirkan sebagai offline atau idle.
 
-Availability endpoint di-refresh setiap lima detik. Jika panggilan gagal, availability lokal dibersihkan dan karakter kembali ke workstation netral sampai bukti baru tersedia. Run terminal yang sudah tidak memiliki dispatch unresolved tidak mencegah status idle. Inspector tetap menampilkan projection event terpisah dari availability; Safe Tool-Action Summary adalah bukti historis, bukan klaim aktivitas saat ini.
+Availability endpoint di-refresh setiap lima detik. Jika panggilan gagal, availability lokal dibersihkan dan karakter kembali ke workstation netral sampai bukti baru tersedia. Run terminal tanpa dispatch unresolved tidak mencegah status idle. Inspector tetap menampilkan projection event terpisah dari availability; `Safe Tool-Action Summary` adalah bukti historis, bukan klaim aktivitas saat ini. `run.reviewing` hanya berarti model memproses hasil tool berikutnya, bukan code review. Offline berarti Runtime Session untuk dispatch `leased` kehilangan heartbeat persisted lebih dari 30 detik tanpa Activity Event yang lebih baru; idle tanpa Run tetap idle, bukan offline. State tidak menambah kolom pada `Agent Instance` atau menciptakan Runtime Session yang selalu hidup.
 
 Tujuh model Ultimate Modular Men Pack dan empat karakter [Cube World Kit](https://quaternius.com/packs/cubeworldkit.html) berasal dari Quaternius (CC0) dan di-host di `apps/web/public/assets/agents/`. Cube World dikonversi dari glTF ke GLB dengan tekstur PNG same-origin agar sesuai CSP; rig dan nama clip-nya berbeda. `Walk` dan `Wave` dipetakan per rig, sedangkan duduk/mengetik dibuat prosedural. Reduced motion melewati pergerakan berulang. Browser fixtures hanya untuk smoke visual; bukan runtime evidence.
 
@@ -63,7 +63,7 @@ OrbitControls mendukung orbit/pan/zoom, focus-agent, dan reset tanpa menggantika
 
 ### Performa
 
-Target PRD awal (render awal ≤5 detik, 20 rig, ≥30 FPS desktop) tetap provisional. Workstation furniture memakai instanced geometry per bagian; meja/chairs bersama juga memakai instancing untuk bagian berulang. Layout menyediakan shared strip tambahan tanpa mengurangi workstation, tetapi pengukuran FPS/draw-call, transfer/decode, serta perangkat pilot tetap belum dilakukan.
+Target PRD awal (render awal ≤5 detik, 20 rig, ≥30 FPS desktop) tetap provisional. Desktop Canvas sekarang meminta WebGL `high-performance`; viewport compact meminta `low-power`, DPR/shadow lebih rendah. Furniture tetap memakai instanced geometry. Satu browser-only synthetic working roster 20 agent mencapai 59.3 FPS pada profile saat ini; evidence dan batasnya dicatat di progress register. Profil pilot, cold render, draw-call, transfer/decode belum menjadi acceptance.
 
 ## Alternatif yang Dipertimbangkan
 
@@ -77,7 +77,7 @@ Target PRD awal (render awal ≤5 detik, 20 rig, ≥30 FPS desktop) tetap provis
 
 - **Backward compatibility**: katalog avatar berisi sebelas model; penambahan model dapat mengubah pemetaan visual deterministik, tetapi API Agent Instance dan ID tetap. Status scene memakai API Agent Availability owner-scoped.
 - **Migrasi data**: tidak ada skema lokasi scene/workstation/status yang ditambah atau diubah; anchors hanya presentasi.
-- **Performa**: GLB rinci dibatasi 20 desktop/8 mobile; sebelas model menambah transfer, decode, dan biaya GPU. Benchmark FPS/draw call, transfer/decode, dan perangkat pilot belum diukur.
+- **Performa**: GLB rinci dibatasi 20 desktop/8 mobile; sebelas model menambah transfer, decode, dan biaya GPU. Hasil 20-agent synthetic browser adalah eksplorasi pada profile yang belum disepakati, bukan bukti target pilot; GPU identifier tidak tersedia. Cold render, draw-call, transfer/decode, dan perangkat pilot tetap belum diukur/ditetapkan.
 - **Keamanan**: API membatasi availability ke owner session; client tidak dapat menyetel owner. Ruangan/anchor tidak memberi akses; GLB CC0 self-hosted tidak memuat credential atau data agent.
 - **Operasional**: kegagalan refresh availability menurunkan tampilan menjadi neutral `unknown`; kegagalan GLB same-origin memakai fallback list/WebGL yang tersedia. Browser smoke bukan bukti Run nyata atau kapasitas produksi.
 
@@ -87,13 +87,13 @@ Target PRD awal (render awal ≤5 detik, 20 rig, ≥30 FPS desktop) tetap provis
 2. Expose owner-scoped Agent Availability dari unresolved dispatch dan fresh Activity Event projection — implementasi ada; boundary tests dan isolated PostgreSQL integration pass.
 3. Sediakan workstation, kursi unik Rest Room, pose duduk/mengetik, dan perpindahan waypoint — implementasi ada; regression test cover anchor-seat equality dan ≥2.4m seat-center clearance pada roster 21, authenticated desktop/mobile smoke pass. Browser-only status override memperlihatkan work/wait movement; belum menjadi bukti Run nyata.
 4. Render tujuh GLB berbeda, deterministic per ID dan collision-resolved selama roster ≤ katalog — implementasi ada; tujuh asset requests HTTP 200 dan tujuh instance aktif mendapat model berbeda.
-5. Camera, accessibility, responsive simplification, filter/deep link, Task shortcut, dan WebGL fallback — authenticated desktop/mobile smoke pass; fallback WebGL dan reduced-motion path belum diverifikasi ulang setelah rebuild.
-6. Ukur render time, FPS, draw calls, transfer/decode, dan interaction pada desktop/mobile hardware profile — belum dilakukan; tetap gate Phase 4.
+5. Camera, accessibility, responsive simplification, filter/deep link, Task shortcut, dan WebGL fallback — final authenticated browser smoke; WebGL fallback dan reduced-motion telah diverifikasi ulang; viewport 390×844 CSS tidak overflow dan menggunakan cap 8 detailed avatars.
+6. Ukur render time, FPS, draw calls, transfer/decode, dan interaction pada desktop/mobile hardware profile — preliminary: 20 browser-only synthetic working agents menghasilkan satu foreground sample 59.3 FPS selama 3.5 detik setelah desktop meminta high-performance; sample low-power sebelumnya 1.7 FPS. Browser profile: 1867×931 CSS, DPR 1, Brave/Chrome 156, 6 logical CPUs, deviceMemory 8 GiB reported. GPU identity masked; belum menjadi target hardware yang disetujui. Cold render, draw calls, transfer/decode, mobile benchmark, dan persetujuan profile tetap gate Phase 4.
 
 ## Pertanyaan Terbuka
 
-- [perlu konfirmasi: hardware/browser/DPR/network profile untuk acceptance render, mobile, dan benchmark FPS] — terbuka.
-- Live Runner → API → browser: Run `beb9d554-b687-4109-8f05-0ba1e42794d8` menampilkan agent sementara sebagai `working` di workstation dengan safe action summary, lalu `idle` setelah sukses. Pose mengetik tertutup label pada screenshot; dua Run independen secara bersamaan di 3D dan failure/reconnect masih terbuka.
+- [perlu konfirmasi: hardware/browser/DPR/network profile untuk acceptance render, mobile, dan benchmark FPS] — browser profile saat ini tercatat di [progress register](../progress.md), tetapi belum disetujui Owner sebagai target pilot; GPU identifier masked.
+- Offline→Inactive is implemented from persisted Runtime Session evidence: an unresolved leased dispatch, active Run projection, `session.heartbeat` older than 30 seconds, and no later Activity Event. API unit/PostgreSQL tests cover the projection; browser rendering of an actual Offline instance remains unverified because the last API recreation invalidated the in-memory Owner session and `/office` now requires sign-in. `activity_0019` upgrade/downgrade/upgrade and event projection passed isolated PostgreSQL tests. Two independent cross-provider live Runs remain unverified; keep the same-account Codex Launcher guard. Current real failure/reconnect visual evidence and target-profile performance/hardware acceptance remain open. Earlier Phase 3 Redis outage/replay verification is separate evidence. FR-3D-007/008 workspace assignment/allocation remain deferred.
 - Workspace assignment tersimpan dan dynamic workspace allocation tetap P1 yang belum diimplementasikan; waypoint current hanya presentasi mengikuti `Agent Availability`.
 - [perlu konfirmasi: reviewer] — terbuka.
 

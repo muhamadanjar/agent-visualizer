@@ -6,7 +6,7 @@ from typing import Literal, Sequence
 from uuid import UUID
 
 
-AgentAvailabilityState = Literal["idle", "working", "waiting", "unknown"]
+AgentAvailabilityState = Literal["idle", "working", "waiting", "offline", "unknown"]
 
 TERMINAL_EVENT_TYPES = frozenset(
     {"run.succeeded", "run.failed", "run.canceled", "run.unknown"}
@@ -16,7 +16,14 @@ INCOMPATIBLE_RUNNING_EVENT_TYPES = frozenset(
     {"run.waiting_input", "run.waiting_approval", "run.blocked"}
 )
 INCOMPATIBLE_WAITING_EVENT_TYPES = frozenset(
-    {"run.started", "run.tool_action", "session.heartbeat"}
+    {
+        "run.started",
+        "run.working",
+        "run.tool_started",
+        "run.reviewing",
+        "run.tool_action",
+        "session.heartbeat",
+    }
 ) | TERMINAL_EVENT_TYPES
 
 
@@ -59,8 +66,24 @@ def _run_availability(evidence: AgentRunEvidence, now: datetime) -> AgentAvailab
         last_seen is None
         or now.tzinfo is None
         or last_seen.tzinfo is None
-        or (now - last_seen).total_seconds() > 30
     ):
+        return "unknown"
+    if (now - last_seen).total_seconds() > 30:
+        heartbeat_at = evidence.last_heartbeat_at
+        event_at = evidence.last_event_at
+        if (
+            heartbeat_at is not None
+            and event_at is not None
+            and event_at.tzinfo is not None
+            and heartbeat_at.tzinfo is not None
+            and event_at <= heartbeat_at
+            and evidence.projection_status in (
+                {"running"} | WAITING_PROJECTION_STATUSES
+            )
+            and evidence.last_event_type is not None
+            and evidence.last_event_type not in TERMINAL_EVENT_TYPES
+        ):
+            return "offline"
         return "unknown"
 
     if evidence.last_event_type == "run.cancellation_pending":
@@ -91,8 +114,10 @@ def derive_agent_availability(
         return AgentAvailability(instance_id, "idle")
 
     states = tuple(_run_availability(run, now) for run in evidence)
-    if "unknown" in states:
+    if "unknown" in states or ("offline" in states and len(set(states)) > 1):
         state: AgentAvailabilityState = "unknown"
+    elif "offline" in states:
+        state = "offline"
     elif "working" in states:
         state = "working"
     else:

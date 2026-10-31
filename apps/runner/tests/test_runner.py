@@ -666,11 +666,14 @@ def test_runner_executes_langchain_agent_with_scoped_file_actions(tmp_path: Path
         assert "Task worker" in received[0]["messages"][0]["content"]
         assert [tool["function"]["name"] for tool in received[0]["tools"]] == ["write_file"]
         assert [event["event_type"] for event in api.events] == [
+            "run.working",
             "session.heartbeat",
+            "run.tool_started",
             "run.tool_action",
+            "run.reviewing",
             "session.heartbeat",
         ]
-        assert api.events[1]["tool_name"] == "write_file"
+        assert api.events[3]["tool_name"] == "write_file"
         assert api.result == {
             "runner_id": "runner-1",
             "run_id": "run-1",
@@ -890,6 +893,7 @@ def test_runner_executes_without_any_workspace_tools(tmp_path: Path) -> None:
             execute_job(job, api, outbox, "runner-1", settings)  # type: ignore[arg-type]
         assert requests[0].get("tools", []) == []
         assert [event["event_type"] for event in api.events] == [
+            "run.working",
             "session.heartbeat",
         ]
         assert api.result is not None

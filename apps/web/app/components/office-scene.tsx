@@ -8,14 +8,15 @@ import type { Group, Object3D } from "three";
 import * as SkeletonUtils from "three/addons/utils/SkeletonUtils.js";
 import type { AgentAvailabilityState } from "../lib/activity";
 import { OFFICE_AVATAR_POSE_BONES } from "./office-avatar";
+import type { OfficeVisualAnimation } from "./office-visual-state";
 import { createOfficeLayout, type OfficeLayout, type OfficePosition } from "./office-layout";
 
-type AgentAnimation = "working" | "success" | "neutral";
 export type OfficeSceneAgent = {
   id: string;
   displayName: string;
   statusLabel: string;
-  animation: AgentAnimation;
+  activityCursor: number;
+  animation: OfficeVisualAnimation;
   availability: AgentAvailabilityState;
   modelUrl: string;
   fullAvatar: boolean;
@@ -34,6 +35,7 @@ type OfficeSceneProps = {
   agents: OfficeSceneAgent[];
   zoom: number;
   focusTarget: [number, number, number];
+  focusMode: boolean;
   reducedMotion: boolean;
   simplified: boolean;
   onSelectAgent: (agentId: string) => void;
@@ -44,7 +46,7 @@ const CAMERA_FOV = 42;
 function AvatarLabel({ agent }: { agent: OfficeSceneAgent }) {
   return (
     <Html position={[0, 2.05, 0]} center distanceFactor={16} style={{ pointerEvents: "none" }}>
-      <span className="scene-avatar-label" style={{ "--avatar-accent": agent.accent } as CSSProperties}>
+      <span className="scene-avatar-label" data-activity={agent.animation} style={{ "--avatar-accent": agent.accent } as CSSProperties}>
         <strong>{agent.displayName}</strong>
         <small>{agent.statusLabel}</small>
       </span>
@@ -99,6 +101,8 @@ function AnimatedAgent({ agent, reducedMotion, onSelectAgent }: {
   const [hovered, setHovered] = useState(false);
   const [walking, setWalking] = useState(false);
   const [successReactionFinished, setSuccessReactionFinished] = useState(false);
+  const failureReactionStartedAtRef = useRef<number | null>(null);
+  const failureReactionFinishedRef = useRef(false);
   const idleRoutineRef = useRef<{
     phase: "seated" | "outbound" | "away" | "returning";
     nextAt: number;
@@ -205,6 +209,10 @@ function AnimatedAgent({ agent, reducedMotion, onSelectAgent }: {
   useEffect(() => {
     setSuccessReactionFinished(false);
   }, [agent.animation]);
+  useEffect(() => {
+    failureReactionStartedAtRef.current = null;
+    failureReactionFinishedRef.current = false;
+  }, [agent.animation, agent.activityCursor]);
 
   const clip = walking ? (cubeWorld ? "Walk" : "CharacterArmature|Walk")
     : agent.animation === "success" && !successReactionFinished ? (cubeWorld ? "Wave" : "CharacterArmature|Wave") : null;
@@ -280,28 +288,51 @@ function AnimatedAgent({ agent, reducedMotion, onSelectAgent }: {
       return;
     }
 
-    if (agent.availability === "idle" && routine.phase === "away" && !reducedMotion) {
+    if (agent.availability === "idle" && routine.phase === "away" && !reducedMotion && agent.animation === "neutral") {
       for (const bone of Object.values(bones)) applyBonePose(bone);
       return;
     }
 
     if (agent.animation === "success" && !successReactionFinished && !reducedMotion) return;
-    const typing = agent.availability === "working";
+    const inactive = agent.animation === "inactive";
+    const typing = agent.animation === "working";
+    const toolAction = agent.animation === "tool-action";
+    const planning = agent.animation === "planning";
+    const reviewing = agent.animation === "reviewing";
+    const waitingApproval = agent.animation === "waiting-approval";
+    const waiting = agent.animation === "waiting" || waitingApproval;
+    const failed = agent.animation === "failure";
     const relaxed = agent.availability === "idle";
     const legBend = relaxed ? 1.32 : 1.38;
     const typingMotion = typing && !reducedMotion ? Math.sin(state.clock.elapsedTime * 13) * 0.08 : 0;
+    const toolMotion = toolAction && !reducedMotion ? Math.sin(state.clock.elapsedTime * 16) * 0.15 : 0;
+    const thinkingMotion = planning && !reducedMotion ? Math.sin(state.clock.elapsedTime * 1.6) * 0.025 : 0;
+    const readingMotion = reviewing && !reducedMotion ? Math.sin(state.clock.elapsedTime * 1.2) * 0.018 : 0;
+    const waitingMotion = waiting && !reducedMotion ? Math.sin(state.clock.elapsedTime * 1.1) * 0.015 : 0;
     applyBonePose(bones.hips);
     applyBonePose(bones.upperLegLeft, legBend, 0, 0);
     applyBonePose(bones.lowerLegLeft, -1.1, 0, 0);
     applyBonePose(bones.upperLegRight, legBend, 0, 0);
     applyBonePose(bones.lowerLegRight, -1.1, 0, 0);
-    applyBonePose(bones.upperArmLeft, 0, 0, -0.18);
-    applyBonePose(bones.body, typing ? 0.12 : -0.08, 0, reducedMotion ? 0 : Math.sin(state.clock.elapsedTime * 1.2) * 0.015);
-    applyBonePose(bones.lowerArmLeft, -0.42 + typingMotion, 0, 0);
-    applyBonePose(bones.upperArmRight, 0, 0, 0.18);
-    applyBonePose(bones.lowerArmRight, -0.42 - typingMotion, 0, 0);
-    applyBonePose(bones.wristLeft, typing && !reducedMotion ? Math.sin(state.clock.elapsedTime * 17) * 0.08 : 0, 0, 0);
-    applyBonePose(bones.wristRight, typing && !reducedMotion ? Math.sin(state.clock.elapsedTime * 17 + Math.PI) * 0.08 : 0, 0, 0);
+    applyBonePose(bones.upperArmLeft, 0, 0, planning ? -0.3 : reviewing ? -0.12 : failed ? -0.34 : waiting ? -0.08 : -0.18);
+    applyBonePose(
+      bones.body,
+      failed ? 0.12 : planning ? 0.04 : reviewing ? 0.08 : waiting ? -0.08 : typing || toolAction ? 0.12 : -0.08,
+      0,
+      reducedMotion || inactive ? 0 : Math.sin(state.clock.elapsedTime * 1.2) * 0.015 + thinkingMotion + waitingMotion,
+    );
+    applyBonePose(bones.lowerArmLeft, planning ? -0.86 : reviewing ? -0.62 : waitingApproval ? -0.6 : waiting ? -0.24 : failed ? -0.3 : -0.42 + typingMotion);
+    applyBonePose(bones.upperArmRight, 0, 0, planning ? 0.34 : reviewing ? 0.12 : failed ? 0.34 : waitingApproval ? 0.05 : 0.18);
+    applyBonePose(bones.lowerArmRight, planning ? -0.86 : reviewing ? -0.62 : waitingApproval ? -0.6 : waiting ? -0.24 : failed ? -0.3 : -0.42 - typingMotion - toolMotion);
+    applyBonePose(bones.wristLeft, typing && !reducedMotion ? Math.sin(state.clock.elapsedTime * 17) * 0.08 : readingMotion, 0, 0);
+    applyBonePose(bones.wristRight, typing && !reducedMotion ? Math.sin(state.clock.elapsedTime * 17 + Math.PI) * 0.08 : -readingMotion - toolMotion, 0, 0);
+    if (failed && !reducedMotion && !failureReactionFinishedRef.current) {
+      const startedAt = failureReactionStartedAtRef.current ?? state.clock.elapsedTime;
+      failureReactionStartedAtRef.current = startedAt;
+      const reactionTime = state.clock.elapsedTime - startedAt;
+      applyBonePose(bones.body, 0.12, 0, Math.sin(reactionTime * 28) * 0.12);
+      if (reactionTime >= 0.72) failureReactionFinishedRef.current = true;
+    }
   });
 
   return (
@@ -631,7 +662,7 @@ function OfficeSharedFurniture({ width, centerZ }: { width: number; centerZ: num
 }
 
 
-function SceneContents({ agents, zoom, focusTarget, reducedMotion, simplified, layout, onSelectAgent }: OfficeSceneProps & { layout: OfficeLayout }) {
+function SceneContents({ agents, zoom, focusTarget, focusMode, reducedMotion, simplified, layout, onSelectAgent }: OfficeSceneProps & { layout: OfficeLayout }) {
   const { size } = useThree();
   const floorWidth = layout.roomWidth;
   const floorDepth = layout.roomDepth;
@@ -642,7 +673,9 @@ function SceneContents({ agents, zoom, focusTarget, reducedMotion, simplified, l
     floorWidth / (2 * Math.tan(horizontalHalfFov)),
     floorDepth / (2 * Math.tan(verticalHalfFov)),
   ) * 1.2;
-  const cameraZoom = Math.max(7, fitDistance + zoom - 15);
+  const cameraZoom = focusMode
+    ? Math.max(7, 9 + zoom - 15)
+    : Math.max(7, fitDistance + zoom - 15);
   const fullAvatars = agents.filter((agent) => agent.fullAvatar);
   const staticAgents = agents.filter((agent) => !agent.fullAvatar);
   const selectedStaticAgent = staticAgents.find((agent) => agent.selected);
@@ -698,11 +731,11 @@ export function OfficeScene(props: OfficeSceneProps) {
         far: Math.max(250, Math.hypot(layout.roomWidth, layout.roomDepth) * 4),
       }}
       dpr={props.simplified ? [1, 1.1] : [1, 1.5]}
-      gl={{ antialias: false, alpha: false, powerPreference: "low-power" }}
+      gl={{ antialias: false, alpha: false, powerPreference: props.simplified ? "low-power" : "high-performance" }}
       shadows={!props.simplified}
       tabIndex={0}
       aria-label="Three-dimensional view of persisted Agent Instances. Positions are visual presentation anchors, not saved workspace locations."
-      onPointerDown={(event) => event.currentTarget.focus()}
+      onPointerDown={(event) => event.currentTarget.focus({ preventScroll: true })}
     >
       <SceneContents {...props} layout={layout} />
     </Canvas>

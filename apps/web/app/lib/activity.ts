@@ -36,7 +36,7 @@ export type ActivitySnapshot = {
   projections: RuntimeProjection[];
 };
 
-export type AgentAvailabilityState = "idle" | "working" | "waiting" | "unknown";
+export type AgentAvailabilityState = "idle" | "working" | "waiting" | "offline" | "unknown";
 
 export type AgentAvailability = {
   agent_instance_id: string;

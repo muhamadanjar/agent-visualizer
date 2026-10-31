@@ -101,7 +101,7 @@ One execution attempt for a Task. A retry creates a new attempt; runtime outcome
 _Avoid_: Task status
 
 **Agent Availability**:
-A current summary of whether an `Agent Instance` has active work, is waiting, is idle, or is uncertain. It is distinct from any individual Run status and from `Visual Agent State`; uncertainty is never represented as idle.
+A current summary of whether an `Agent Instance` has active work, is waiting, is idle, has an expired active `Runtime Session` heartbeat (`offline`), or is uncertain. It is distinct from any individual Run status and from `Visual Agent State`; uncertainty is never represented as idle.
 _Avoid_: Visual Agent State, Agent Status
 
 

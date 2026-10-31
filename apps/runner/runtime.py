@@ -50,6 +50,7 @@ def build_workspace_tools(
     on_tool_action: Callable[[str], None],
     *,
     max_tool_calls: int,
+    on_tool_started: Callable[[str], None],
 ) -> list[BaseTool]:
     if (
         max_tool_calls < 1
@@ -67,6 +68,7 @@ def build_workspace_tools(
             calls += 1
             if calls > max_tool_calls:
                 raise LangChainRuntimeError("tool_limit")
+            on_tool_started(name)
             try:
                 result = workspace.call(name, arguments)
             except (ValueError, OSError, UnicodeDecodeError):
