@@ -9,6 +9,7 @@ Dokumen-dokumen ini merinci keputusan arsitektur berdasarkan [PRD baru](../../PR
 | [03 — Event System](2026-10-27-03-event-system.md) | Event schema/persistence, Redis Streams, WebSocket, reconnect, state synchronization | In Review | 2026-10-28 |
 | [04 — Virtual Office 3D](2026-10-27-04-virtual-office-3d.md) | Three.js, karakter, animasi, workstation, kamera, performance | In Review | 2026-10-29 |
 | [05 — Multi-Agent Orchestration](2026-10-27-05-multi-agent-orchestration.md) | LangGraph supervisor, task dependencies, dynamic routing, agent collaboration | Draft | 2026-10-27 |
+| [06 — Codex Subscription via Model Gateway](2026-10-30-06-codex-subscription.md) | Usulan gateway/broker privat untuk provider Codex, LangChain dan 9Router tetap tersedia; auth, policy dan acceptance belum terbukti | In Review | 2026-10-30 |
 
 ## Status flow
 

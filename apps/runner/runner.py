@@ -13,6 +13,7 @@ import stat
 import tempfile
 import threading
 import time
+import http.client
 import uuid
 import sys
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -50,6 +51,28 @@ SAFE_WORKER_FAILURE_REASONS = {
     "workspace path cannot traverse a symlink",
     "workspace path escaped its root",
     "workspace tool allowlist is invalid",
+    "Codex gateway setup failed",
+    "Codex provider setup failed before HTTP request",
+    "Codex upstream request failed before HTTP response",
+    "Codex upstream transport configuration invalid",
+    "Codex upstream transport timed out",
+    "Codex upstream TLS connection failed",
+    "Codex upstream network connection failed",
+    "Codex upstream transport failed",
+    "Codex provider response failed",
+}
+CODEX_GATEWAY_FAILURE_REASONS = {
+    "gateway_setup": "Codex gateway setup failed",
+    "provider_request": "Codex provider setup failed before HTTP request",
+    "upstream_request": "Codex upstream request failed before HTTP response",
+    "upstream_response": "Codex provider response failed",
+}
+CODEX_GATEWAY_TRANSPORT_REASONS = {
+    "invalid_request": "Codex upstream transport configuration invalid",
+    "timeout": "Codex upstream transport timed out",
+    "tls": "Codex upstream TLS connection failed",
+    "network": "Codex upstream network connection failed",
+    "other": "Codex upstream transport failed",
 }
 
 RUNNER_ACTIVITY_EVENT_TYPES = {
@@ -102,6 +125,13 @@ def _safe_failure_status(error: BaseException) -> int | str:
     for candidate in (error, cause):
         if candidate is None:
             continue
+        response = getattr(candidate, "response", None)
+        headers = getattr(response, "headers", None)
+        get_header = getattr(headers, "get", None)
+        if callable(get_header):
+            upstream_status = get_header("x-agent-office-codex-upstream-status")
+            if isinstance(upstream_status, str) and re.fullmatch(r"[1-5][0-9]{2}", upstream_status):
+                return int(upstream_status)
         for attribute in ("status_code", "code"):
             status = getattr(candidate, attribute, None)
             if (
@@ -112,6 +142,21 @@ def _safe_failure_status(error: BaseException) -> int | str:
                 return status
     return "unavailable"
 
+def _safe_gateway_failure_reason(error: BaseException) -> str | None:
+    for candidate in (error, error.__cause__):
+        if candidate is None:
+            continue
+        response = getattr(candidate, "response", None)
+        headers = getattr(response, "headers", None)
+        get_header = getattr(headers, "get", None)
+        if callable(get_header):
+            transport_failure = get_header("x-agent-office-codex-transport-failure")
+            if isinstance(transport_failure, str):
+                return CODEX_GATEWAY_TRANSPORT_REASONS.get(transport_failure)
+            stage = get_header("x-agent-office-codex-failure-stage")
+            if isinstance(stage, str):
+                return CODEX_GATEWAY_FAILURE_REASONS.get(stage)
+    return None
 @dataclass(frozen=True, slots=True)
 class RunnerSettings:
     api_url: str
@@ -121,12 +166,14 @@ class RunnerSettings:
     state_root: Path
     launcher_url: str = "http://runtime-launcher:8001"
     launcher_token: str | None = None
+    gateway_key: str | None = None
 
     @classmethod
     def from_env(cls) -> RunnerSettings:
         return cls(
             api_url=os.environ.get("RUNNER_API_URL", "http://api:8000").rstrip("/"),
             shared_token=os.environ.get("RUNNER_SHARED_TOKEN", "").strip() or None,
+            gateway_key=os.environ.get("OMP_GATEWAY_KEY", "").strip() or None,
             provider_key=os.environ.get("NINEROUTER_KEY", "").strip() or None,
             workspace_root=Path(os.environ.get("RUNNER_WORKSPACE_ROOT", "/workspaces")),
             state_root=Path(os.environ.get("RUNNER_STATE_ROOT", "/state")),
@@ -196,7 +243,7 @@ class APIClient:
             if 400 <= error.code < 500:
                 raise PermanentAPIResponseError(error.code) from error
             raise APIResponseError(error.code) from error
-        except (URLError, TimeoutError, json.JSONDecodeError) as error:
+        except (URLError, TimeoutError, OSError, http.client.HTTPException, json.JSONDecodeError) as error:
             raise RunnerTransportError("API request failed") from error
 
 
@@ -210,6 +257,7 @@ class RuntimeLauncherClient:
             response.get("provider_ready"), bool
         ):
             raise RunnerTransportError("Runtime launcher readiness is invalid")
+        response["gateway_ready"] = response.get("gateway_ready") is True
         return response
 
     def start(self, payload: dict[str, Any]) -> Any:
@@ -1168,7 +1216,9 @@ class RunnerSupervisor:
                     self._terminal(run_id, "run.failed", cleanup=True)
                     return
                 elapsed = max(0.0, (finished_wall - started_wall).total_seconds())
-                if elapsed >= max_duration_seconds:
+                if stream.get("upstream_stop_verified") is False and (elapsed >= max_duration_seconds or stream.get("exit_code") != 0):
+                    self._terminal(run_id, "run.unknown", cleanup=True)
+                elif elapsed >= max_duration_seconds:
                     self._terminal(run_id, "run.failed", cleanup=True)
                 elif stream.get("exit_code") == 0 and result_saved:
                     self._terminal(run_id, "run.succeeded", cleanup=True)
@@ -1205,7 +1255,8 @@ class RunnerSupervisor:
                         )
                     stop = self._launcher.stop(run_id)
                     if stop["verified"]:
-                        self._terminal(run_id, "run.canceled", cleanup=True)
+                        terminal = "run.canceled" if stop.get("upstream_stop_verified", True) else "run.unknown"
+                        self._terminal(run_id, terminal, cleanup=True)
                     else:
                         self._unknown(run_id, "cancellation_stop_unverified", cleanup=False)
                     return
@@ -1219,7 +1270,8 @@ class RunnerSupervisor:
             if elapsed >= max_duration_seconds:
                 stop = self._launcher.stop(run_id)
                 if stop["verified"]:
-                    self._terminal(run_id, "run.failed", cleanup=True)
+                    terminal = "run.failed" if stop.get("upstream_stop_verified", True) else "run.unknown"
+                    self._terminal(run_id, terminal, cleanup=True)
                 else:
                     self._unknown(run_id, "timeout_stop_unverified", cleanup=False)
                 return
@@ -1574,11 +1626,10 @@ def execute_job(
         model_endpoint = snapshot.get("model_endpoint")
         if (
             not isinstance(model_endpoint, dict)
-            or model_endpoint.get("credential_env") != "NINEROUTER_KEY"
+            or model_endpoint.get("credential_env") not in {"NINEROUTER_KEY", "OMP_GATEWAY_KEY"}
             or not isinstance(model_endpoint.get("endpoint_url"), str)
             or not isinstance(configuration, dict)
             or not isinstance(configuration.get("model_id"), str)
-            or not settings.provider_key
         ):
             raise TaskExecutionError("Model Endpoint configuration is unavailable")
         configured_tools = configuration.get("allowed_tools")
@@ -1591,7 +1642,18 @@ def execute_job(
         ):
             raise TaskExecutionError("Run tool configuration is invalid")
         effective_tools = [tool for tool in project_tools if tool in configured_tools]
-        endpoint = _check_provider_endpoint(model_endpoint["endpoint_url"])
+        gateway = model_endpoint["credential_env"] == "OMP_GATEWAY_KEY"
+        selected_key = settings.gateway_key if gateway else settings.provider_key
+        if not selected_key:
+            raise TaskExecutionError("Model Endpoint configuration is unavailable")
+        if gateway:
+            if (model_endpoint["endpoint_url"] != "http://localhost:14000/v1"
+                or not re.fullmatch(r"openai-codex/[A-Za-z0-9._-]+", configuration["model_id"])
+                or configuration.get("route") is not None):
+                raise TaskExecutionError("Model Endpoint configuration is unavailable")
+            endpoint = "http://localhost:14000/v1"
+        else:
+            endpoint = _check_provider_endpoint(model_endpoint["endpoint_url"])
         base_url = _completion_url(endpoint).removesuffix("/chat/completions")
         model = configuration["model_id"]
         temperature = configuration.get("temperature")
@@ -1629,7 +1691,7 @@ def execute_job(
             runtime_id=configuration.get("runtime_id"),
             model_id=model,
             endpoint_url=base_url,
-            api_key=settings.provider_key,
+            api_key=selected_key,
             route=route,
             temperature=temperature,
             system_prompt=_system_message(snapshot),
@@ -1742,6 +1804,7 @@ def run_forever(settings: RunnerSettings) -> None:
                         {
                             "runner_id": runner_id,
                             "provider_ready": readiness["provider_ready"],
+                            "gateway_ready": readiness.get("gateway_ready") is True,
                         },
                     )
                     last_heartbeat = now
@@ -1762,7 +1825,7 @@ def run_forever(settings: RunnerSettings) -> None:
                             pool.shutdown_event,
                         )
                     last_reconcile = now
-                while readiness["provider_ready"] and pool.available_workers:
+                while (readiness["provider_ready"] or readiness.get("gateway_ready") is True) and pool.available_workers:
                     job = api.post(
                         "/internal/runner/claim", {"runner_id": runner_id}
                     )
@@ -1815,7 +1878,9 @@ def run_worker() -> int:
         return 1
     settings = RunnerSettings.from_env()
     stream_api = WorkerStreamAPI(runner_id, run_id, sys.stdout)
-    if not settings.provider_key:
+    credential = job["configuration_snapshot"].get("model_endpoint", {}).get("credential_env")
+    selected_key = settings.gateway_key if credential == "OMP_GATEWAY_KEY" else settings.provider_key
+    if credential not in {"OMP_GATEWAY_KEY", "NINEROUTER_KEY"} or not selected_key:
         stream_api.failure(
             error_type="TaskExecutionError",
             cause_type="none",
@@ -1841,7 +1906,7 @@ def run_worker() -> int:
         cause = error.__cause__
         cause_type = type(cause).__name__ if cause is not None else "none"
         cause_status = _safe_failure_status(error)
-        cause_reason = (
+        cause_reason = _safe_gateway_failure_reason(error) or (
             str(cause)
             if isinstance(cause, TaskExecutionError)
             and str(cause) in SAFE_WORKER_FAILURE_REASONS

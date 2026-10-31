@@ -1,0 +1,22 @@
+[Unit]
+Description=Agent Office isolated Codex credential broker
+
+[Service]
+ExecStart=%h/.bun/bin/bun %h/.bun/bin/omp auth-broker serve --bind=127.0.0.1:18765
+Environment=OMP_PROFILE=agent-office-codex
+Environment=OMP_LOG_LEVEL=error
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.omp/profiles/agent-office-codex
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+MemoryMax=512M
+TasksMax=128
+Restart=on-failure
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=default.target

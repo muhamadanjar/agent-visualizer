@@ -1,0 +1,15 @@
+# Use scripts/start-omp-gateway.py after the owner builds the integrated images.
+# This overlay does not publish a port or mount the broker or its credentials.
+services:
+  runtime-launcher:
+    group_add:
+      - ${OMP_RELAY_GID:?use scripts/start-omp-gateway.py}
+    environment:
+      OMP_GATEWAY_KEY: ${OMP_GATEWAY_KEY:?use scripts/start-omp-gateway.py}
+    volumes:
+      - type: bind
+        source: ${HOME}/.local/share/agent-office/omp-relay
+        target: /omp-relay
+        read_only: true
+        bind:
+          create_host_path: false

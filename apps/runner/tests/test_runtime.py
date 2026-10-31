@@ -17,7 +17,13 @@ from runtime import (
 )
 
 
-def test_factory_builds_agent_from_selected_model_route_and_tools() -> None:
+@pytest.mark.parametrize(
+    ("model_id", "route", "temperature"),
+    [("openrouter/example:free", "free", 0.2), ("openai-codex/gpt-5.6-luna", None, None)],
+)
+def test_factory_builds_agent_from_selected_model_route_and_tools(
+    model_id: str, route: str | None, temperature: float | None
+) -> None:
     requests: list[dict[str, Any]] = []
 
     class ProviderHandler(BaseHTTPRequestHandler):
@@ -78,11 +84,11 @@ def test_factory_builds_agent_from_selected_model_route_and_tools() -> None:
     try:
         agent = build_agent(
             runtime_id="langchain",
-            model_id="openrouter/example:free",
+            model_id=model_id,
             endpoint_url=f"http://127.0.0.1:{server.server_port}/v1",
             api_key="local-test-key",
-            route="free",
-            temperature=0.2,
+            route=route,
+            temperature=temperature,
             system_prompt="Use the selected workspace tool to complete the request.",
             tools=[read_file],
             max_model_calls=2,
@@ -94,9 +100,9 @@ def test_factory_builds_agent_from_selected_model_route_and_tools() -> None:
 
         assert result["messages"][-1].content == "Factory completed the task."
         assert len(requests) == 2
-        assert requests[0]["model"] == "openrouter/example:free"
-        assert requests[0]["route"] == "free"
-        assert requests[0]["temperature"] == 0.2
+        assert requests[0]["model"] == model_id
+        assert requests[0].get("route") == route
+        assert requests[0].get("temperature") == temperature
         assert [item["function"]["name"] for item in requests[0]["tools"]] == [
             "read_file"
         ]

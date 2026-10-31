@@ -7,3 +7,4 @@ backups/
 /workspaces/
 __pycache__**
 /docker-compose.override.yml
+.playwright-cli

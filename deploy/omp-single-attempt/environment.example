@@ -1,0 +1,2 @@
+OMP_AUTH_BROKER_TOKEN_FILE=/absolute/path/to/reviewed-broker-client-token
+OMP_GATEWAY_CLIENTS_FILE=/absolute/path/to/reviewed-scoped-clients.json

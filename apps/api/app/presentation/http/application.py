@@ -61,6 +61,7 @@ from app.domain.model_endpoints import (
     ModelEndpointDraft,
     ModelEndpointInputError,
     ModelEndpointRepository,
+    validate_provider_binding,
 )
 from app.domain.registry import (
     AgentDefinition,
@@ -324,6 +325,7 @@ class RunnerHeartbeatRequest(BaseModel):
 
     runner_id: UUID
     provider_ready: StrictBool
+    gateway_ready: StrictBool = False
 
 
 class RunnerClaimRequest(BaseModel):
@@ -1286,10 +1288,13 @@ def create_http_app(
         execution: ExecutionRepository = Depends(require_execution_repository),
     ) -> dict[str, object]:
         authenticate_runner(request)
-        await execution.register_runner(body.runner_id, provider_ready=body.provider_ready)
+        await execution.register_runner(
+            body.runner_id, provider_ready=body.provider_ready, gateway_ready=body.gateway_ready
+        )
         return {
             "runner_id": body.runner_id,
             "provider_ready": body.provider_ready,
+            "gateway_ready": body.gateway_ready,
             "heartbeat_at": datetime.now(UTC),
         }
 
@@ -1304,7 +1309,7 @@ def create_http_app(
     ) -> RunnerClaimResponse | None:
         authenticate_runner(request)
         status = await execution.get_runner_status(body.runner_id, max_age_seconds=30)
-        if status is None or not status.provider_ready:
+        if status is None or not (status.provider_ready or status.gateway_ready):
             return None
         job = await execution.claim_next(body.runner_id, lease_seconds=120)
         if job is None:
@@ -2321,6 +2326,13 @@ def create_http_app(
                 )
                 if endpoint is None or endpoint.archived_at is not None:
                     raise AgentConfigurationInputError("model_endpoint_id")
+                try:
+                    validate_provider_binding(
+                        endpoint.credential_env, endpoint.endpoint_url,
+                        configuration.model_id, configuration.route or endpoint.default_route,
+                    )
+                except ModelEndpointInputError as error:
+                    raise AgentConfigurationInputError(error.reason) from error
             definition = await repository.create(
                 principal.owner_id,
                 name,
@@ -2449,6 +2461,13 @@ def create_http_app(
                 )
                 if endpoint is None or endpoint.archived_at is not None:
                     raise AgentConfigurationInputError("model_endpoint_id")
+                try:
+                    validate_provider_binding(
+                        endpoint.credential_env, endpoint.endpoint_url,
+                        configuration.model_id, configuration.route or endpoint.default_route,
+                    )
+                except ModelEndpointInputError as error:
+                    raise AgentConfigurationInputError(error.reason) from error
                 changes["configuration"] = configuration
             definition = await repository.update_for_owner(
                 principal.owner_id, definition_id, changes

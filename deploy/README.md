@@ -27,9 +27,11 @@ service, and an Nginx reverse proxy on one private Linux host:
 - Runner has no Docker socket, provider key, or workspace bind. It holds only
   API/Launcher credentials and its durable event outbox state.
 - Runtime Launcher is the only service with Docker socket access and the
-  workspace-root bind mount. It is trusted host-control software; compromise
-  can affect the Docker host. It accepts fixed authenticated operations and
-  creates role-labeled per-Run resources only.
+  workspace-root bind mount. It runs as the configured workspace UID/GID and
+  receives the Docker socket's numeric group through `DOCKER_GID`; set this to
+  `stat -c %g /var/run/docker.sock` on the host. It remains trusted host-control
+  software because Docker socket access can affect the host. It accepts fixed
+  authenticated operations and creates role-labeled per-Run resources only.
 - Each worker runs non-root with a read-only root filesystem, dropped
   capabilities, no-new-privileges, CPU/memory/PID/time limits, and only its
   validated workspace mount. It has neither API/Runner credentials nor Docker
@@ -94,6 +96,46 @@ service, and an Nginx reverse proxy on one private Linux host:
 
 `docker compose down` stops services and keeps the `db_data` volume. Do not run
 `docker compose down -v` unless you intend to destroy the database.
+
+## Optional Codex Subscription gateway
+
+The Codex path is separate from 9Router and keeps the existing LangChain tools.
+It uses an isolated OMP OAuth broker profile and a private, pinned
+single-attempt gateway; it does not mount the broker's credentials into workers.
+The upstream Codex protocol is a community integration and may change. Account
+eligibility, subscription terms, quotas, and real inference are not established
+by a healthy gateway.
+
+On the private Linux host, provision the `agent-office-codex` OMP profile with
+the Owner's separate Codex login. Provision mode-600
+`~/.local/share/agent-office/omp-gateway/client.token` and `clients.json` with
+one scoped client, one `openai-codex` account and explicit
+`openai-codex/<model>` grants; the client token must differ from the broker
+bearer. The broker's token stays in its isolated profile. Never put credentials
+in the repository, `.env`, images, logs, or browser.
+
+With Bun, OMP, Docker Compose and user systemd available, build the images and
+apply the additive migration as described above. When no Runs are active, run:
+
+```bash
+rtk python scripts/start-omp-gateway.py
+```
+
+The script installs the frozen gateway dependencies and user services, checks
+authenticated single-attempt policy readiness, then recreates the idle Runner
+and Launcher. The Launcher runs with the configured workspace UID/GID and
+`DOCKER_GID`, the numeric group ID of the host Docker socket. It includes an
+existing `docker-compose.override.yml` so the configured workspace bind mount
+survives the restart. By default it refuses to overwrite differing installed
+files or restart an active Run. For an intentional gateway code update, pass
+`--update-managed-gateway-code`; this replaces only user-owned `gateway.ts`,
+`policy.ts`, and `transport.ts` before restarting the private gateway. For the
+Model Endpoint choose Codex Subscription with an explicit
+`openai-codex/<model>`; the endpoint and credential reference are fixed to the
+private gateway and `OMP_GATEWAY_KEY`.
+Gateway readiness is not evidence of successful inference. Stock OMP gateway
+retry behavior does not meet this integration's no-retry policy and must not
+replace this gateway.
 
 ## Runner and isolated API integration tests
 

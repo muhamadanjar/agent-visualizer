@@ -1,0 +1,14 @@
+[Unit]
+Description=Agent Office fixed loopback OMP gateway relay
+Requires=omp-gateway-relay.socket
+After=omp-gateway-relay.socket
+
+[Service]
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd 127.0.0.1:14000
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_UNIX AF_INET
+StandardOutput=null
+StandardError=null

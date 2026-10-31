@@ -411,7 +411,13 @@ class ModelEndpointTable(SQLModel, table=True):
         CheckConstraint("char_length(name) BETWEEN 1 AND 120"),
         CheckConstraint("adapter = 'openai_compatible_chat_completions'"),
         CheckConstraint("char_length(endpoint_url) BETWEEN 1 AND 2048"),
-        CheckConstraint("credential_env = 'NINEROUTER_KEY'"),
+        CheckConstraint(
+            "credential_env = 'NINEROUTER_KEY' OR "
+            "(credential_env = 'OMP_GATEWAY_KEY' AND endpoint_url = 'http://localhost:14000/v1' "
+            "AND default_model_id ~ '^openai-codex/[A-Za-z0-9][A-Za-z0-9._+-]*$' "
+            "AND default_route IS NULL)",
+            name="model_endpoints_credential_env_check",
+        ),
         CheckConstraint("char_length(default_model_id) BETWEEN 1 AND 200"),
         CheckConstraint("default_route IS NULL OR char_length(default_route) BETWEEN 1 AND 120"),
         UniqueConstraint("owner_id", "id"),
@@ -781,6 +787,7 @@ class RunnerConnectionTable(SQLModel, table=True):
 
     runner_id: UUID = Field(sa_column=Column(PGUUID(as_uuid=True), primary_key=True))
     provider_ready: bool = Field(sa_column=Column(Boolean, nullable=False))
+    gateway_ready: bool = Field(default=False, sa_column=Column(Boolean, nullable=False, server_default=text("false")))
     last_seen_at: datetime = Field(
         sa_column=Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     )

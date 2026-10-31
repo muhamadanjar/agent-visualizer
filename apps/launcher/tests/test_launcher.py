@@ -55,7 +55,7 @@ def test_worker_log_frames_accept_bounded_failure_diagnostics() -> None:
                 "error_type": "ProviderResponseError",
                 "cause_type": "HTTPError",
                 "cause_status": 429,
-                "cause_reason": "unavailable",
+                "cause_reason": "Codex upstream network connection failed",
             },
         },
     ]
@@ -282,6 +282,9 @@ def test_worker_container_configuration_has_fixed_resource_and_network_limits(mo
     job = {
         "runner_id": "0f00b7b5-d3ea-4c16-b952-e036a07de498",
         "run_id": "891e3b15-7408-4d39-91af-ff0ea5a06d18",
+        "configuration_snapshot": {
+            "model_endpoint": {"credential_env": "NINEROUTER_KEY"},
+        },
     }
 
     config = server._worker_container_config(

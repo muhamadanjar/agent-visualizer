@@ -105,6 +105,7 @@ class RunnerStatus:
     runner_id: UUID
     last_seen_at: datetime
     provider_ready: bool
+    gateway_ready: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,12 +156,12 @@ class ExecutionRepository(Protocol):
         self, owner_id: str, project_id: UUID, draft: WorkspacePolicyDraft
     ) -> WorkspacePolicy | None: ...
 
-    async def get_ready_runner(self, *, max_age_seconds: int) -> RunnerStatus | None: ...
+    async def get_ready_runner(self, *, max_age_seconds: int, credential_env: str = "NINEROUTER_KEY") -> RunnerStatus | None: ...
     async def get_runner_status(
         self, runner_id: UUID, *, max_age_seconds: int
     ) -> RunnerStatus | None: ...
 
-    async def register_runner(self, runner_id: UUID, *, provider_ready: bool) -> None: ...
+    async def register_runner(self, runner_id: UUID, *, provider_ready: bool, gateway_ready: bool = False) -> None: ...
 
 
     async def claim_next(

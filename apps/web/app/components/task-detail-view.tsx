@@ -286,7 +286,7 @@ export function TaskDetailView({ taskId }: { taskId: string }) {
           <TaskPreflightPanel key={task.id} taskId={task.id} />
           <section className="content-section">
             <h2>Run / Attempt history</h2>
-            <p>Run / Attempt creation records are append-only snapshots. No dispatcher, runtime execution, event stream, or Task-stage transition is connected.</p>
+            <p>Run / Attempt records preserve immutable configuration snapshots. Starting a Run queues it after preflight; persisted lifecycle events appear on Run detail. Task-stage transitions are not implemented.</p>
             <TaskRunHistory key={task.id} taskId={task.id} />
             <Link className="text-link" href="/runs">Open Runs index</Link>
           </section>

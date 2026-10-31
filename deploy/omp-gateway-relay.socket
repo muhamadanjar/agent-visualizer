@@ -1,0 +1,11 @@
+[Unit]
+Description=Agent Office private OMP gateway relay socket
+
+[Socket]
+ListenStream=%h/.local/share/agent-office/omp-relay/gateway.sock
+SocketMode=0660
+DirectoryMode=0710
+RemoveOnStop=true
+
+[Install]
+WantedBy=sockets.target

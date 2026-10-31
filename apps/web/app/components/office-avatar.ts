@@ -6,6 +6,10 @@ export const OFFICE_AVATAR_MODELS = [
   "/assets/agents/beach-character.glb",
   "/assets/agents/casual-character.glb",
   "/assets/agents/hoodie-character.glb",
+  "/assets/agents/Cube_Male_1.glb",
+  "/assets/agents/Cube_Male_2.glb",
+  "/assets/agents/Cube_Female_1.glb",
+  "/assets/agents/Cube_Female_2.glb",
 ] as const;
 
 export const OFFICE_AVATAR_POSE_BONES = {

@@ -26,6 +26,10 @@ MAX_RESULT_BYTES = 1_048_576
 WORKER_MEMORY_BYTES = 2 * 1024 * 1024 * 1024
 WORKER_NANO_CPUS = 1_000_000_000
 WORKER_PIDS_LIMIT = 128
+GATEWAY_ENDPOINT = "http://localhost:14000/v1"
+GATEWAY_SOCKET_ROOT = "/omp-relay"
+GATEWAY_SOCKET = GATEWAY_SOCKET_ROOT + "/gateway.sock"
+
 PROXY_NETWORK = os.environ.get("RUNTIME_EGRESS_NETWORK", "agent-office-runtime-egress")
 WORKSPACE_CONTAINER_ROOT = os.environ.get("WORKSPACE_ROOT", "/workspace-root")
 ALLOWED_TOOLS = {"list_files", "read_file", "write_file"}
@@ -39,6 +43,15 @@ SAFE_WORKER_FAILURE_REASONS = {
     "workspace path cannot traverse a symlink",
     "workspace path escaped its root",
     "workspace tool allowlist is invalid",
+    "Codex gateway setup failed",
+    "Codex provider setup failed before HTTP request",
+    "Codex upstream request failed before HTTP response",
+    "Codex upstream transport configuration invalid",
+    "Codex upstream transport timed out",
+    "Codex upstream TLS connection failed",
+    "Codex upstream network connection failed",
+    "Codex upstream transport failed",
+    "Codex provider response failed",
 }
 RUNNER_ID_LABEL = "agent-office.runner-id"
 RUN_ID_LABEL = "agent-office.run-id"
@@ -269,6 +282,72 @@ class DockerEngine:
         return result
 
 
+def _gateway_key() -> str:
+    # Scoped client key only; the launcher never receives broker credentials.
+    value = os.environ.get("OMP_GATEWAY_KEY", "").strip()
+    if not value or len(value) > 4096 or any(ord(c) < 33 or ord(c) > 126 for c in value):
+        return ""
+    return value
+
+
+def _gateway_ready(model_id: str | None = None) -> bool:
+    key = _gateway_key()
+    if not key:
+        return False
+    # A public model catalogue cannot serve as proof that the key is valid.
+    anonymous = _UnixHTTPConnection(GATEWAY_SOCKET, timeout=1)
+    try:
+        anonymous.request("GET", "/v1/models", headers={"Host": "localhost:14000"})
+        if anonymous.getresponse().status not in {401, 403}:
+            return False
+    except (OSError, ValueError, http.client.HTTPException):
+        return False
+    finally:
+        anonymous.close()
+    connection = _UnixHTTPConnection(GATEWAY_SOCKET, timeout=2)
+    try:
+        connection.request("GET", "/v1/models", headers={"Host": "localhost:14000", "Authorization": "Bearer " + key})
+        response = connection.getresponse()
+        body = response.read(262145)
+        if response.status != 200 or len(body) > 262144:
+            return False
+        data = json.loads(body).get("data")
+        scoped = isinstance(data, list) and bool(data) and all(
+            isinstance(item, dict) and isinstance(item.get("id"), str)
+            and re.fullmatch(r"openai-codex/[A-Za-z0-9._-]+", item["id"])
+            for item in data
+        )
+        if not scoped or (model_id is not None and not any(item["id"] == model_id for item in data)):
+            return False
+        # Stock OMP can retry uncertain inference requests. Admit only the
+        # bounded gateway, whose authenticated health endpoint declares the
+        # exact reviewed policy and rejects non-scoped client credentials.
+        capability = _UnixHTTPConnection(GATEWAY_SOCKET, timeout=2)
+        try:
+            capability.request(
+                "GET", "/healthz",
+                headers={"Host": "localhost:14000", "Authorization": "Bearer " + key},
+            )
+            response = capability.getresponse()
+            body = response.read(4097)
+            if response.status != 200 or len(body) > 4096:
+                return False
+            health = json.loads(body)
+            return (
+                isinstance(health, dict)
+                and health.get("policy") == "agent-office-codex-single-attempt-v1"
+                and health.get("ompVersion") == "18.12.3"
+                and health.get("maxUpstreamAttempts") == 1
+                and health.get("websockets") is False
+            )
+        finally:
+            capability.close()
+    except (OSError, ValueError, AttributeError, http.client.HTTPException):
+        return False
+    finally:
+        connection.close()
+
+
 class RuntimeLauncher:
     def __init__(self) -> None:
         self._engine = DockerEngine()
@@ -283,7 +362,7 @@ class RuntimeLauncher:
 
     def ready(self) -> dict[str, object]:
         if not self._token or not self._worker_image or not self._proxy_image:
-            return {"status": "not_ready", "provider_ready": False}
+            return {"status": "not_ready", "provider_ready": False, "gateway_ready": False}
         try:
             if self._host_workspace_root is None:
                 self._host_workspace_root = self._engine.inspect_self_workspace_root()
@@ -293,8 +372,9 @@ class RuntimeLauncher:
                     self._reconcile_orphans()
                     self._orphans_reconciled = True
         except EngineError:
-            return {"status": "not_ready", "provider_ready": False}
-        return {"status": "ready", "provider_ready": bool(self._model_key)}
+            return {"status": "not_ready", "provider_ready": False, "gateway_ready": False}
+        return {"status": "ready", "provider_ready": bool(self._model_key),
+                "gateway_ready": _gateway_ready()}
 
     def list_runs(self) -> list[dict[str, object]]:
         rows = self._engine.list_owned_workers()
@@ -366,7 +446,12 @@ class RuntimeLauncher:
 
     def start_run(self, payload: object) -> dict[str, object]:
         runner_id, run_id, workspace_path, job, target = _validate_start_payload(payload)
-        if not self._model_key:
+        credential = job["configuration_snapshot"]["model_endpoint"]["credential_env"]
+        if (credential == "OMP_GATEWAY_KEY" and not _gateway_ready(
+            job["configuration_snapshot"]["agent_definition"]["configuration"]["model_id"]
+        )) or (
+            credential == "NINEROUTER_KEY" and not self._model_key
+        ):
             raise LauncherError("Selected Model Endpoint is unavailable", 503)
         if self._host_workspace_root is None:
             self._host_workspace_root = self._engine.inspect_self_workspace_root()
@@ -383,6 +468,8 @@ class RuntimeLauncher:
             RUNNER_ID_LABEL: runner_id,
             RUN_ID_LABEL: run_id,
         }
+        if credential == "OMP_GATEWAY_KEY":
+            labels["agent-office.provider"] = "omp-gateway"
         network_name = "ao-run-" + UUID(run_id).hex
         worker_name = "ao-worker-" + UUID(run_id).hex
         proxy_name = "ao-proxy-" + UUID(run_id).hex
@@ -408,6 +495,13 @@ class RuntimeLauncher:
             for row in self._engine.list_owned_workers():
                 if row.get("State") == "running":
                     active += 1
+                    active_labels = row.get("Labels")
+                    if (
+                        credential == "OMP_GATEWAY_KEY"
+                        and isinstance(active_labels, dict)
+                        and active_labels.get("agent-office.provider") == "omp-gateway"
+                    ):
+                        raise LauncherError("Codex account already has an active Run", 429)
             if active >= MAX_ACTIVE_RUNS:
                 raise LauncherError("Runtime host is at its Run concurrency limit", 429)
             self.remove_run(run_id)
@@ -428,7 +522,8 @@ class RuntimeLauncher:
                 proxy = self._engine.create_container(proxy_name, proxy_config)
                 proxy_id = str(proxy["Id"])
                 self._engine.start_container(proxy_id)
-                self._engine.connect_network(network_id, proxy_id)
+                if credential != "OMP_GATEWAY_KEY":
+                    self._engine.connect_network(network_id, proxy_id)
                 worker_config = _worker_container_config(
                     self._worker_image,
                     {**labels, ROLE_LABEL: "worker"},
@@ -509,7 +604,7 @@ class RuntimeLauncher:
             "exit_code": state.get("ExitCode"),
             "started_at": _normalize_docker_time(state.get("StartedAt")),
             "finished_at": _normalize_docker_time(state.get("FinishedAt")),
-        }
+        } | ({"upstream_stop_verified": False} if inspection.get("Config", {}).get("Labels", {}).get("agent-office.provider") == "omp-gateway" else {})
 
     def stop_run(self, run_id: str) -> dict[str, object]:
         container_id = self._owned_container_id(run_id, "worker")
@@ -520,7 +615,9 @@ class RuntimeLauncher:
         except EngineError:
             pass
         try:
-            state = self._engine.inspect_container(container_id).get("State")
+            inspection = self._engine.inspect_container(container_id)
+            gateway = inspection.get("Config", {}).get("Labels", {}).get("agent-office.provider") == "omp-gateway"
+            state = inspection.get("State")
             if isinstance(state, dict) and state.get("Running") is True:
                 self._engine.kill_container(container_id)
                 state = self._engine.inspect_container(container_id).get("State")
@@ -529,7 +626,7 @@ class RuntimeLauncher:
                 "run_id": run_id,
                 "verified": verified,
                 "status": "stopped" if verified else "unknown",
-            }
+            } | ({"upstream_stop_verified": False} if gateway else {})
         except EngineError:
             return {"run_id": run_id, "verified": False, "status": "unknown"}
 
@@ -663,10 +760,21 @@ def _validate_start_payload(payload: object) -> tuple[str, str, str, dict[str, o
     if not isinstance(tool_calls, int) or isinstance(tool_calls, bool) or not 1 <= tool_calls <= 50:
         raise LauncherError("Run tool-call limit is invalid")
     endpoint = snapshot.get("model_endpoint")
-    if not isinstance(endpoint, dict) or endpoint.get("credential_env") != "NINEROUTER_KEY":
+    if not isinstance(endpoint, dict) or endpoint.get("credential_env") not in {"NINEROUTER_KEY", "OMP_GATEWAY_KEY"}:
         raise LauncherError("Selected Model Endpoint credential is invalid")
     endpoint_url = endpoint.get("endpoint_url")
-    target = _provider_target(endpoint_url)
+    if endpoint["credential_env"] == "OMP_GATEWAY_KEY":
+        definition = snapshot.get("agent_definition")
+        configuration = definition.get("configuration") if isinstance(definition, dict) else None
+        if (endpoint_url != GATEWAY_ENDPOINT or not isinstance(configuration, dict)
+            or configuration.get("runtime_id") != "langchain"
+            or not isinstance(configuration.get("model_id"), str)
+            or not re.fullmatch(r"openai-codex/[A-Za-z0-9._-]+", configuration["model_id"])
+            or configuration.get("route") is not None):
+            raise LauncherError("Selected gateway configuration is invalid")
+        target = ("localhost", 14000)
+    else:
+        target = _provider_target(endpoint_url)
     job = dict(payload)
     job["workspace_path"] = "."
     return runner_id, run_id, workspace_path, job, target
@@ -816,6 +924,28 @@ def _proxy_container_config(
         )
         | {"ExtraHosts": ["host.docker.internal:host-gateway"]},
     }
+    if target == ("localhost", 14000):
+        # Resolve only our own mounted relay directory, never a payload-supplied path.
+        engine = DockerEngine()
+        inspection = engine.inspect_container(socket.gethostname())
+        mounts = inspection.get("Mounts", [])
+        source = next((m.get("Source") for m in mounts
+                       if m.get("Destination") == GATEWAY_SOCKET_ROOT), None)
+        if not isinstance(source, str) or not os.path.isabs(source):
+            raise LauncherError("Gateway relay mount is unavailable", 503)
+        config["Env"].append("GATEWAY_UNIX_SOCKET=" + GATEWAY_SOCKET)
+        config["HostConfig"]["GroupAdd"] = [str(os.stat(GATEWAY_SOCKET_ROOT).st_gid)]
+        config["HostConfig"]["Mounts"] = [{
+            "Type": "bind", "Source": source, "Target": GATEWAY_SOCKET_ROOT,
+            "ReadOnly": True, "BindOptions": {"Propagation": "rprivate"},
+        }]
+        config["HostConfig"].pop("ExtraHosts", None)
+        # Unlike an HTTPS provider proxy, the gateway proxy needs no IP egress.
+        run_network = "ao-run-" + UUID(labels[RUN_ID_LABEL]).hex
+        config["HostConfig"]["NetworkMode"] = run_network
+        config["NetworkingConfig"] = {
+            "EndpointsConfig": {run_network: {"Aliases": ["egress-proxy"]}}
+        }
     return config
 
 
@@ -842,9 +972,11 @@ def _worker_container_config(
         "RUNTIME_PROXY_URL=http://egress-proxy:3128",
         "LOG_LEVEL=WARNING",
     ]
-    model_key = os.environ.get("NINEROUTER_KEY", "").strip()
-    if model_key:
-        env.append("NINEROUTER_KEY=" + model_key)
+    credential = job["configuration_snapshot"]["model_endpoint"]["credential_env"]
+    model_key = _gateway_key() if credential == "OMP_GATEWAY_KEY" else os.environ.get("NINEROUTER_KEY", "").strip()
+    if not model_key:
+        raise LauncherError("Selected Model Endpoint is unavailable", 503)
+    env.append(credential + "=" + model_key)
     config: dict[str, object] = {
         "Image": image,
         "Cmd": ["worker"],

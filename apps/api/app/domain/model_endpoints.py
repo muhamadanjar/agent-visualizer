@@ -11,7 +11,9 @@ from uuid import UUID
 
 ADAPTER = "openai_compatible_chat_completions"
 LOCAL_PROVIDER_PORT = 20128
-CREDENTIAL_ENVIRONMENTS = frozenset({"NINEROUTER_KEY"})
+GATEWAY_ENDPOINT = "http://localhost:14000/v1"
+GATEWAY_CREDENTIAL = "OMP_GATEWAY_KEY"
+CREDENTIAL_ENVIRONMENTS = frozenset({"NINEROUTER_KEY", GATEWAY_CREDENTIAL})
 ENDPOINT_NAME_RE = re.compile(r"[^\x00-\x1f]{1,120}\Z")
 MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,199}\Z")
 ROUTE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,119}\Z")
@@ -94,6 +96,21 @@ def normalize_route(value: str | None) -> str | None:
     return route
 
 
+def validate_provider_binding(
+    credential_env: str, endpoint_url: str, model_id: str, route: str | None
+) -> None:
+    """Bind gateway credentials to one local endpoint and explicit Codex model."""
+    if credential_env == GATEWAY_CREDENTIAL:
+        if endpoint_url != GATEWAY_ENDPOINT:
+            raise ModelEndpointInputError("endpoint_url")
+        if not re.fullmatch(r"openai-codex/[A-Za-z0-9][A-Za-z0-9._+-]{0,186}", model_id):
+            raise ModelEndpointInputError("model_id")
+        if route is not None:
+            raise ModelEndpointInputError("route")
+    elif credential_env != "NINEROUTER_KEY":
+        raise ModelEndpointInputError("credential_env")
+
+
 @dataclass(frozen=True, slots=True)
 class ModelEndpointDraft:
     name: str
@@ -116,12 +133,20 @@ class ModelEndpointDraft:
             raise ModelEndpointInputError("name")
         if credential_env not in CREDENTIAL_ENVIRONMENTS:
             raise ModelEndpointInputError("credential_env")
+        normalized_endpoint = (
+            GATEWAY_ENDPOINT
+            if credential_env == GATEWAY_CREDENTIAL and endpoint_url == GATEWAY_ENDPOINT
+            else normalize_endpoint_url(endpoint_url)
+        )
+        model_id = normalize_model_id(default_model_id)
+        route = normalize_route(default_route)
+        validate_provider_binding(credential_env, normalized_endpoint, model_id, route)
         return cls(
             name=normalized_name,
-            endpoint_url=normalize_endpoint_url(endpoint_url),
+            endpoint_url=normalized_endpoint,
             credential_env=credential_env,
-            default_model_id=normalize_model_id(default_model_id),
-            default_route=normalize_route(default_route),
+            default_model_id=model_id,
+            default_route=route,
         )
 
 

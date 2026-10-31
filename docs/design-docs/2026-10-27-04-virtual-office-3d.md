@@ -22,7 +22,7 @@ Aplikasi memakai scene React Three Fiber untuk `Agent Instance` persisted tanpa 
 
 - Satu workstation per persisted `Agent Instance` aktif serta Rest Room terpisah dengan kursi unik untuk tiap instance; posisi avatar idle tepat di pusat kursinya dan jarak minimum antarpusat kursi 2.4m untuk menghindari tumpang-tindih saat roster membesar.
 - `Agent Availability` tetap sinkron dengan Run dispatch unresolved dan projection Activity Event fresh: hanya `idle` masuk Rest Room; `working` berjalan ke workstation dan mengetik; `waiting`/`unknown` tetap di workstation tanpa pose mengetik.
-- Menggunakan tujuh model humanoid GLB Quaternius CC0 dengan rig/clip sama; pilihan model deterministik per roster ID, benturan indeks dihindari bila jumlah instance tidak melebihi katalog.
+- Menggunakan sebelas model humanoid Quaternius CC0 dari dua rig; pilihan model deterministik per roster ID, benturan indeks dihindari bila jumlah instance tidak melebihi katalog.
 - Menjaga identitas `Agent Instance`, Run state, Visual Agent State, Agent Availability, dan presentasi scene terpisah; anchor 3D bukan lokasi workspace tersimpan.
 - Menyediakan orbit, zoom, pan, focus-agent, reset, reduced motion, pemilihan HTML yang dapat diakses, serta fallback WebGL yang mempertahankan list/detail.
 - Menyediakan filter Project/Agent Definition, deep link `#<Agent Instance.id>`, dan CTA Create Task yang mengisi agent serta Project yang tersedia; Run tetap tindakan eksplisit.
@@ -55,7 +55,7 @@ Animasi karakter hanya mengikuti `Agent Availability`, bukan label event tunggal
 
 Availability endpoint di-refresh setiap lima detik. Jika panggilan gagal, availability lokal dibersihkan dan karakter kembali ke workstation netral sampai bukti baru tersedia. Run terminal yang sudah tidak memiliki dispatch unresolved tidak mencegah status idle. Inspector tetap menampilkan projection event terpisah dari availability; Safe Tool-Action Summary adalah bukti historis, bukan klaim aktivitas saat ini.
 
-Rig Business Man, Worker, Farmer, Punk, Beach Character, Casual Character, dan Hoodie Character berasal dari Quaternius Ultimate Modular Men Pack, berlisensi CC0 dan di-host di `apps/web/public/assets/agents/`. Model memiliki rig dan clip yang sama; tersedia `Walk`, `Idle`, `Interact`, dan `Wave`, tetapi tidak ada clip duduk/mengetik. Pose duduk dan gerak tangan bekerja dibuat prosedural dari tulang rig; `Walk` dipakai untuk waypoint. Reduced motion melewati pergerakan/gerak berulang. Browser fixtures hanya untuk smoke visual; tidak menjadi data atau runtime evidence.
+Tujuh model Ultimate Modular Men Pack dan empat karakter [Cube World Kit](https://quaternius.com/packs/cubeworldkit.html) berasal dari Quaternius (CC0) dan di-host di `apps/web/public/assets/agents/`. Cube World dikonversi dari glTF ke GLB dengan tekstur PNG same-origin agar sesuai CSP; rig dan nama clip-nya berbeda. `Walk` dan `Wave` dipetakan per rig, sedangkan duduk/mengetik dibuat prosedural. Reduced motion melewati pergerakan berulang. Browser fixtures hanya untuk smoke visual; bukan runtime evidence.
 
 ### Kamera, interaksi, dan fallback
 
@@ -75,9 +75,9 @@ Target PRD awal (render awal ≤5 detik, 20 rig, ≥30 FPS desktop) tetap provis
 
 ## Dampak & Risiko
 
-- **Backward compatibility**: satu GLB/aksen diganti variasi tujuh model; API Agent Instance dan ID tetap. Status scene kini memakai API Agent Availability owner-scoped.
+- **Backward compatibility**: katalog avatar berisi sebelas model; penambahan model dapat mengubah pemetaan visual deterministik, tetapi API Agent Instance dan ID tetap. Status scene memakai API Agent Availability owner-scoped.
 - **Migrasi data**: tidak ada skema lokasi scene/workstation/status yang ditambah atau diubah; anchors hanya presentasi.
-- **Performa**: GLB rinci dibatasi 20 desktop/8 mobile; tujuh model menambah transfer, decode, dan biaya GPU. Benchmark FPS/draw call, transfer/decode, dan perangkat pilot belum diukur.
+- **Performa**: GLB rinci dibatasi 20 desktop/8 mobile; sebelas model menambah transfer, decode, dan biaya GPU. Benchmark FPS/draw call, transfer/decode, dan perangkat pilot belum diukur.
 - **Keamanan**: API membatasi availability ke owner session; client tidak dapat menyetel owner. Ruangan/anchor tidak memberi akses; GLB CC0 self-hosted tidak memuat credential atau data agent.
 - **Operasional**: kegagalan refresh availability menurunkan tampilan menjadi neutral `unknown`; kegagalan GLB same-origin memakai fallback list/WebGL yang tersedia. Browser smoke bukan bukti Run nyata atau kapasitas produksi.
 
@@ -93,7 +93,7 @@ Target PRD awal (render awal ≤5 detik, 20 rig, ≥30 FPS desktop) tetap provis
 ## Pertanyaan Terbuka
 
 - [perlu konfirmasi: hardware/browser/DPR/network profile untuk acceptance render, mobile, dan benchmark FPS] — terbuka.
-- Owner-scoped availability API dan authenticated browser memperlihatkan 6 idle, 1 unknown dari 7 persisted instances. [perlu konfirmasi: live Runner → API → browser untuk status `working`] — belum diverifikasi karena Run nyata tidak dijalankan.
+- Live Runner → API → browser: Run `beb9d554-b687-4109-8f05-0ba1e42794d8` menampilkan agent sementara sebagai `working` di workstation dengan safe action summary, lalu `idle` setelah sukses. Pose mengetik tertutup label pada screenshot; dua Run independen secara bersamaan di 3D dan failure/reconnect masih terbuka.
 - Workspace assignment tersimpan dan dynamic workspace allocation tetap P1 yang belum diimplementasikan; waypoint current hanya presentasi mengikuti `Agent Availability`.
 - [perlu konfirmasi: reviewer] — terbuka.
 

@@ -121,7 +121,7 @@ export function TaskBoard() {
                     {!stageTasks.length ? (
                       <div className="task-column-empty">
                         <strong>{emptyMessage ?? "No tasks in this stage"}</strong>
-                        <span>{stage === "Backlog" && tasks.length === 0 ? "Persisted task specifications appear here." : stage === "Backlog" ? "Change the search or filters to view saved tasks." : "Tasks currently remain in Backlog; no stage transitions or work execution are available."}</span>
+                      <span>{stage === "Backlog" && tasks.length === 0 ? "Persisted task specifications appear here." : stage === "Backlog" ? "Change the search or filters to view saved tasks." : "Task stage changes are not implemented. Start a Run from task detail after its preflight checks pass."}</span>
                         {stage === "Backlog" && tasks.length === 0 ? <Link className="text-link" href="/tasks/new">Create task</Link> : null}
                       </div>
                     ) : null}
@@ -133,7 +133,7 @@ export function TaskBoard() {
         </>
       ) : null}
       {hasMore ? <button className="button button-secondary" type="button" onClick={() => void loadMore()} disabled={loadingMore}>{loadingMore ? "Loading…" : "Load more tasks"}</button> : null}
-      <p className="field-note">The six stages are shown for orientation. On narrow screens, scroll horizontally to inspect all six. Persisted tasks currently remain in Backlog; Runs are inspectable from task detail, but stage changes and runtime execution are unavailable.</p>
+      <p className="field-note">The six stages are shown for orientation; task stage transitions remain unimplemented. Runs can be started explicitly from Task detail after preflight passes, then monitored independently in Run detail.</p>
     </section>
   );
 }

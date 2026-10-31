@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import socket
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -17,6 +18,7 @@ from runner import (
     RunnerSupervisor,
     RunnerSettings,
     RunnerTransportError,
+    APIClient,
     TaskExecutionError,
     WorkerStreamAPI,
     WorkspaceTools,
@@ -128,6 +130,147 @@ def test_safe_failure_status_reads_wrapped_provider_status() -> None:
     error.__cause__ = OpenAIAPIError("private response text")
 
     assert _safe_failure_status(error) == 429
+
+def test_safe_failure_status_prefers_sanitized_codex_gateway_header() -> None:
+    from runner import TaskExecutionError, _safe_failure_status
+
+    class OpenAIAPIError(Exception):
+        status_code = 502
+        response = type("Response", (), {"headers": {
+            "x-agent-office-codex-upstream-status": "401",
+        }})()
+
+    error = TaskExecutionError("LangChain runtime failed")
+    error.__cause__ = OpenAIAPIError("provider error text must not be surfaced")
+
+    assert _safe_failure_status(error) == 401
+
+def test_safe_gateway_failure_reason_uses_only_allowlisted_stage() -> None:
+    from runner import TaskExecutionError, _safe_gateway_failure_reason
+
+    class OpenAIAPIError(Exception):
+        response = type("Response", (), {"headers": {
+            "x-agent-office-codex-failure-stage": "upstream_request",
+        }})()
+
+    error = TaskExecutionError("LangChain runtime failed")
+    error.__cause__ = OpenAIAPIError("untrusted provider message")
+
+    assert _safe_gateway_failure_reason(error) == "Codex upstream request failed before HTTP response"
+
+def test_safe_gateway_failure_reason_classifies_only_known_transport_kinds() -> None:
+    from runner import TaskExecutionError, _safe_gateway_failure_reason
+
+    class OpenAIAPIError(Exception):
+        response = type("Response", (), {"headers": {
+            "x-agent-office-codex-failure-stage": "upstream_request",
+            "x-agent-office-codex-transport-failure": "network",
+        }})()
+
+    error = TaskExecutionError("LangChain runtime failed")
+    error.__cause__ = OpenAIAPIError("untrusted transport details")
+
+    assert _safe_gateway_failure_reason(error) == "Codex upstream network connection failed"
+
+def test_safe_gateway_failure_reason_maps_invalid_transport_contract() -> None:
+    from runner import TaskExecutionError, _safe_gateway_failure_reason
+
+    class OpenAIAPIError(Exception):
+        response = type("Response", (), {"headers": {
+            "x-agent-office-codex-transport-failure": "invalid_request",
+        }})()
+
+    error = TaskExecutionError("LangChain runtime failed")
+    error.__cause__ = OpenAIAPIError("untrusted transport details")
+
+    assert _safe_gateway_failure_reason(error) == "Codex upstream transport configuration invalid"
+
+def test_api_client_wraps_connection_disconnect_as_transport_error() -> None:
+    class DisconnectHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            self.connection.shutdown(socket.SHUT_RDWR)
+            self.connection.close()
+
+        def log_message(self, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), DisconnectHandler)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    try:
+        client = APIClient(f"http://127.0.0.1:{server.server_port}", "test-token")
+        with pytest.raises(RunnerTransportError, match="API request failed"):
+            client.post("/internal/runs", {})
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=2)
+
+def test_run_start_disconnect_recovers_and_records_failure_when_no_worker_exists(
+    tmp_path: Path,
+) -> None:
+    from runner import RuntimeLauncherClient
+
+    run_id = "55c8c175-e809-4d36-8802-06d99bea8412"
+    event_types: list[str] = []
+
+    class LauncherHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            self.connection.shutdown(socket.SHUT_RDWR)
+            self.connection.close()
+
+        def do_GET(self) -> None:
+            body = json.dumps({"runs": []}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args: object) -> None:
+            return
+
+    class API:
+        def post(self, path: str, payload: dict[str, object], **_kwargs: object):
+            assert path == "/internal/runner/events"
+            event_types.append(str(payload["event_type"]))
+            return {
+                "acknowledged": True,
+                "event_id": payload["event_id"],
+                "cursor": len(event_types),
+            }
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), LauncherHandler)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    outbox = EventOutbox(tmp_path / "events.sqlite3")
+    supervisor = RunnerSupervisor(
+        "aa4a0d2b-cdbc-4583-8988-2dadcd58d328",
+        API(),  # type: ignore[arg-type]
+        RuntimeLauncherClient(
+            f"http://127.0.0.1:{server.server_port}", "test-token"
+        ),
+        outbox,
+    )
+    try:
+        supervisor.run_job(
+            {
+                "run_id": run_id,
+                "configuration_snapshot": {},
+                "workspace_path": "workspace",
+                "allowed_tools": ["list_files"],
+                "max_duration_seconds": 120,
+                "max_inference_turns": 2,
+                "max_tool_calls": 1,
+            }
+        )
+        assert event_types == ["run.failed"]
+        assert outbox.pending() == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=2)
+        outbox.close()
 
 
 def test_runner_pool_shutdown_signals_monitor_workers() -> None:

@@ -563,8 +563,8 @@ export function OfficeExperience() {
           ) : null}
         </div>
         <div className="scene-bottom-row">
-          <p className="scene-hint" role="status">Select an Agent Instance to inspect its status. Verified idle instances rest in the separate room; verified working instances sit at their workstation. Furniture and positions remain presentation-only.</p>
-          <span className="scene-motion-label">{reducedMotion ? "Reduced motion enabled" : "Verified availability drives movement; fresh work evidence drives typing"}</span>
+          <p className="scene-hint" role="status">Select an Agent Instance to inspect its status. Idle agents take short visual breaks in the rest room; working agents use their workstation. Movement and furniture are presentation-only.</p>
+          <span className="scene-motion-label">{reducedMotion ? "Reduced motion enabled" : "Idle movement is decorative; fresh work evidence drives typing"}</span>
         </div>
       </div>
 

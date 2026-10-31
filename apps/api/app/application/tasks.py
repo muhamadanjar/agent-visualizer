@@ -173,10 +173,11 @@ class TaskWorkflow:
                             "Effective tools: " + ", ".join(resolved.effective_tools) + ".",
                         )
 
+        credential_env = "NINEROUTER_KEY" if resolved is None else resolved.model_endpoint.credential_env
         runner = (
             None
             if self._execution is None
-            else await self._execution.get_ready_runner(max_age_seconds=30)
+            else await self._execution.get_ready_runner(max_age_seconds=30, credential_env=credential_env)
         )
         if self._execution is None or runner is None:
             runner_check = PreflightCheck(
@@ -193,13 +194,14 @@ class TaskWorkflow:
             runner_check = PreflightCheck(
                 "runner_connection", "ready", "An authenticated Runner heartbeat is current."
             )
+            provider_ready = runner.gateway_ready if credential_env == "OMP_GATEWAY_KEY" else runner.provider_ready
             credentials_check = PreflightCheck(
                 "provider_credentials",
-                "ready" if runner.provider_ready else "blocked",
+                "ready" if provider_ready else "blocked",
                 (
-                    "Runner has the configured provider credential required for inference."
-                    if runner.provider_ready
-                    else "Set NINEROUTER_KEY in the Runner environment before executing."
+                    "Runner reports readiness for the selected provider; upstream acceptance is not verified."
+                    if provider_ready
+                    else "The selected provider is not ready. Check its server-side configuration."
                 ),
             )
 

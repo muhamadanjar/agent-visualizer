@@ -87,7 +87,7 @@ class MemoryExecution:
         )
         return self.policy
 
-    async def get_ready_runner(self, *, max_age_seconds: int) -> RunnerStatus:
+    async def get_ready_runner(self, *, max_age_seconds: int, credential_env: str = "NINEROUTER_KEY") -> RunnerStatus:
         return RunnerStatus(self.runner_id, datetime.now(UTC), True)
     async def get_runner_status(
         self, runner_id: UUID, *, max_age_seconds: int
@@ -98,8 +98,8 @@ class MemoryExecution:
             return RunnerStatus(runner_id, datetime.now(UTC), False)
         return None
 
-    async def register_runner(self, runner_id: UUID, *, provider_ready: bool) -> None:
-        return None
+    async def register_runner(self, runner_id: UUID, *, provider_ready: bool, gateway_ready: bool = False) -> None:
+        self.registered_status = RunnerStatus(runner_id, datetime.now(UTC), provider_ready, gateway_ready)
 
     async def claim_next(self, runner_id: UUID, *, lease_seconds: int):
         return None
@@ -332,3 +332,64 @@ def test_runner_claim_checks_that_claimants_own_provider_readiness() -> None:
         )
         assert response.status_code == 200
         assert response.json() is None
+
+
+def test_runner_heartbeat_defaults_gateway_readiness_to_false() -> None:
+    project = Project(uuid4(), "owner", "Atlas", "", datetime.now(UTC))
+    execution = MemoryExecution(project.id, uuid4(), uuid4())
+    with _client(project, execution, MemoryEvents()) as client:
+        headers = {"authorization": f"Bearer {RUNNER_TOKEN}"}
+        payload = {"runner_id": str(execution.runner_id), "provider_ready": True}
+        response = client.post("/internal/runner/heartbeat", json=payload, headers=headers)
+        assert response.status_code == 200
+        assert response.json()["provider_ready"] is True
+        assert response.json()["gateway_ready"] is False
+        assert execution.registered_status.gateway_ready is False
+        response = client.post("/internal/runner/heartbeat", json={
+            **payload, "provider_ready": False, "gateway_ready": True,
+        }, headers=headers)
+        assert response.status_code == 200
+        assert execution.registered_status.provider_ready is False
+        assert execution.registered_status.gateway_ready is True
+        client.post("/internal/runner/heartbeat", json=payload, headers=headers)
+        assert execution.registered_status.gateway_ready is False
+
+
+def test_preflight_uses_only_the_selected_provider_readiness() -> None:
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from app.application.tasks import TaskWorkflow
+
+    async def scenario(credential_env: str, provider_ready: bool, gateway_ready: bool) -> None:
+        task_id, project_id, instance_id, definition_id = uuid4(), uuid4(), uuid4(), uuid4()
+        task = SimpleNamespace(id=task_id, project_id=project_id, agent_instance_id=instance_id)
+        instance = SimpleNamespace(definition_id=definition_id, archived_at=None)
+        policy = SimpleNamespace(enabled=True, workspace_path="project", allowed_tools=("read_file",))
+        execution = SimpleNamespace(
+            get_policy_for_project=AsyncMock(return_value=policy),
+            get_ready_runner=AsyncMock(return_value=RunnerStatus(
+                uuid4(), datetime.now(UTC), provider_ready, gateway_ready,
+            )),
+        )
+        workflow = TaskWorkflow(
+            SimpleNamespace(get_for_owner=AsyncMock(return_value=task)),
+            SimpleNamespace(get_for_owner=AsyncMock(return_value=instance)),
+            None, None, execution,
+        )
+        workflow._factory = SimpleNamespace(resolve=AsyncMock(return_value=SimpleNamespace(
+            model_endpoint=SimpleNamespace(credential_env=credential_env),
+            configuration=SimpleNamespace(allowed_tools=("read_file",)),
+            effective_tools=("read_file",),
+        )))
+        preflight = await workflow.preflight("owner", task_id)
+        assert preflight is not None
+        assert preflight.ready is (gateway_ready if credential_env == "OMP_GATEWAY_KEY" else provider_ready)
+        execution.get_ready_runner.assert_awaited_once_with(
+            max_age_seconds=30, credential_env=credential_env,
+        )
+
+    for credential_env in ("NINEROUTER_KEY", "OMP_GATEWAY_KEY"):
+        for provider_ready, gateway_ready in ((True, False), (False, True), (False, False), (True, True)):
+            asyncio.run(scenario(credential_env, provider_ready, gateway_ready))

@@ -4,9 +4,10 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
-from app.domain.model_endpoints import ADAPTER, ModelEndpoint, ModelEndpointDraft
+from app.domain.model_endpoints import ADAPTER, ModelEndpoint, ModelEndpointDraft, ModelEndpointInputError
 from app.main import create_app
 from test_api import ORIGIN, database_ready, login, settings
 
@@ -124,3 +125,50 @@ def test_model_endpoints_are_owner_authenticated_immutable_and_secret_free() -> 
             f"/api/v1/model-endpoints/{uuid4()}/archive",
             headers={"origin": ORIGIN},
         ).status_code == 404
+
+
+def test_gateway_binding_is_explicit_and_has_no_route_override() -> None:
+    draft = ModelEndpointDraft.create(
+        "Codex Subscription", "http://localhost:14000/v1", "OMP_GATEWAY_KEY",
+        "openai-codex/gpt-5.1-codex",
+    )
+    assert draft.default_model_id == "openai-codex/gpt-5.1-codex"
+    assert draft.default_route is None
+
+
+@pytest.mark.parametrize(("endpoint", "model", "route"), [
+    ("http://localhost:20128/v1", "openai-codex/example", None),
+    ("https://example.com/v1", "openai-codex/example", None),
+    ("http://127.0.0.1:14000/v1", "openai-codex/example", None),
+    ("http://localhost:14000/v1", "example", None),
+    ("http://localhost:14000/v1", "openai/example", None),
+    ("http://localhost:14000/v1", "openai-codex/", None),
+    ("http://localhost:14000/v1", "openai-codex/example/other", None),
+    ("http://localhost:14000/v1", "openai-codex/example", "fallback"),
+])
+def test_gateway_rejects_other_endpoints_models_and_routes(endpoint, model, route) -> None:
+    with pytest.raises(ModelEndpointInputError):
+        ModelEndpointDraft.create("Codex", endpoint, "OMP_GATEWAY_KEY", model, route)
+
+
+def test_gateway_endpoint_creation_is_authenticated_and_owner_scoped() -> None:
+    repository = MemoryModelEndpointRepository()
+    payload = {
+        "name": "Codex Subscription",
+        "endpoint_url": "http://localhost:14000/v1",
+        "credential_env": "OMP_GATEWAY_KEY",
+        "default_model_id": "openai-codex/example",
+    }
+    with TestClient(create_app(
+        settings(), database_check=database_ready, model_endpoint_repository=repository,
+    )) as client:
+        assert client.post("/api/v1/model-endpoints", json=payload, headers={"origin": ORIGIN}).status_code == 401
+        assert login(client).status_code == 200
+        response = client.post("/api/v1/model-endpoints", json=payload, headers={"origin": ORIGIN})
+        assert response.status_code == 201
+        saved = response.json()
+        assert saved["credential_env"] == "OMP_GATEWAY_KEY"
+        assert repository.endpoints[("owner", UUID(saved["id"]))].endpoint_url == payload["endpoint_url"]
+        assert all(owner == "owner" for owner, _ in repository.endpoints)
+        denied = client.post("/api/v1/model-endpoints", json={**payload, "default_model_id": "other/model"}, headers={"origin": ORIGIN})
+        assert denied.status_code == 422

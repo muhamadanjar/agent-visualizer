@@ -21,6 +21,7 @@ type ModelEndpointOption = {
   id: string;
   name: string;
   endpoint_url: string;
+  credential_env: string;
   default_model_id: string;
   default_route: string | null;
   archived: boolean;
@@ -87,6 +88,7 @@ function ModelConfigurationFields({
   const preserveConfiguration = initialEndpointId === configuration?.model_endpoint_id;
   const [endpointId, setEndpointId] = useState(initialEndpointId);
   const selectedEndpoint = endpoints.find((endpoint) => endpoint.id === endpointId);
+  const isCodex = selectedEndpoint?.credential_env === "OMP_GATEWAY_KEY";
   const [modelId, setModelId] = useState(
     preserveConfiguration ? configuration?.model_id ?? "" : selectedEndpoint?.default_model_id ?? "",
   );
@@ -113,12 +115,12 @@ function ModelConfigurationFields({
           }
         }}>
           {currentArchived ? <option value={currentArchived.id} disabled={currentArchived.id !== endpointId}>{currentArchived.name} · archived</option> : null}
-          {available.map((endpoint) => <option key={endpoint.id} value={endpoint.id}>{endpoint.name} · {endpoint.default_model_id}</option>)}
+          {available.map((endpoint) => <option key={endpoint.id} value={endpoint.id}>{endpoint.name} · {endpoint.credential_env === "OMP_GATEWAY_KEY" ? "Codex Subscription" : "9Router"} · {endpoint.default_model_id}</option>)}
         </select>
       </label>
       {available.length === 0 && !currentArchived ? <p className="field-note">Create a Model Endpoint before saving this Agent Definition.</p> : null}
       <label className="preview-field">Model ID<input name="model_id" value={modelId} onChange={(event) => setModelId(event.target.value)} maxLength={200} required disabled={disabled} /></label>
-      <label className="preview-field">Route (optional)<input name="route" value={route} onChange={(event) => setRoute(event.target.value)} maxLength={120} disabled={disabled} /></label>
+      <label className="preview-field">Route (optional)<input name="route" value={route} onChange={(event) => setRoute(event.target.value)} maxLength={120} disabled={disabled || isCodex} /></label>
       <label className="preview-field">Temperature (optional)<input name="temperature" type="number" min="0" max="2" step="0.1" defaultValue={configuration?.temperature ?? ""} disabled={disabled} /></label>
       <label className="preview-field">Maximum iterations<input name="max_iterations" type="number" min="1" max="100" defaultValue={configuration?.max_iterations ?? 10} required disabled={disabled} /></label>
       <label className="preview-field">Concurrency limit<input name="concurrency_limit" type="number" min="1" max="20" defaultValue={configuration?.concurrency_limit ?? 1} required disabled={disabled} /></label>

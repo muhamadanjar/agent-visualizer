@@ -131,3 +131,35 @@ def test_factory_scopes_endpoint_and_intersects_tools_with_project_policy() -> N
     endpoints.endpoint = replace(endpoint, archived_at=datetime.now(UTC))
     with pytest.raises(AgentFactoryError, match="model_endpoint"):
         asyncio.run(factory.resolve(owner_id, definition_id, ("read_file",)))
+
+
+def test_factory_rejects_unqualified_gateway_definition_model() -> None:
+    from test_model_endpoints import MemoryModelEndpointRepository
+    from app.domain.model_endpoints import ModelEndpointDraft
+
+    async def scenario() -> None:
+        endpoints = MemoryModelEndpointRepository()
+        endpoint = await endpoints.create("owner", ModelEndpointDraft.create(
+            "Codex", "http://localhost:14000/v1", "OMP_GATEWAY_KEY", "openai-codex/example",
+        ))
+        configuration = AgentDefinitionConfiguration.create(
+            role="Reader", model_endpoint_id=endpoint.id, model_id="openai-codex/example",
+        )
+        definition = AgentDefinition(
+            id=uuid4(), owner_id="owner", version=1, name="Reader", description="",
+            source_markdown="# Reader", unmapped_metadata={}, configuration=configuration,
+            enabled=True, archived_at=None, created_at=datetime.now(UTC),
+        )
+        definitions = MemoryDefinitions(definition)
+        factory = AgentFactory(definitions, endpoints)
+        resolved = await factory.resolve("owner", definition.id, ())
+        assert resolved.configuration.runtime_id == "langchain"
+        assert resolved.model_endpoint.credential_env == "OMP_GATEWAY_KEY"
+        for changed in (
+            replace(configuration, model_id="other/model"),
+            replace(configuration, route="fallback"),
+        ):
+            definitions.definition = replace(definition, configuration=changed)
+            with pytest.raises(AgentFactoryError, match="model_endpoint"):
+                await factory.resolve("owner", definition.id, ())
+    asyncio.run(scenario())

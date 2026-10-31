@@ -117,7 +117,7 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
             await apply_alembic_migrations(dsn)
             assert await connection.fetchval(
                 "SELECT version_num FROM alembic_version"
-            ) == "events_0017"
+            ) == "gateway_0018"
             migrated_endpoint = await connection.fetchrow(
                 "SELECT name, credential_env, default_model_id, default_route "
                 "FROM model_endpoints WHERE owner_id = $1",
@@ -334,6 +334,15 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                 ),
             )
             assert await restricted_endpoints.get_for_owner("another-owner", restricted_endpoint.id) is None
+            gateway_endpoint = await restricted_endpoints.create(
+                restricted_owner_id,
+                ModelEndpointDraft.create(
+                    "Codex Subscription", "http://localhost:14000/v1",
+                    "OMP_GATEWAY_KEY", "openai-codex/example",
+                ),
+            )
+            assert gateway_endpoint.credential_env == "OMP_GATEWAY_KEY"
+            assert await restricted_endpoints.get_for_owner("another-owner", gateway_endpoint.id) is None
             restricted_configuration = AgentDefinitionConfiguration.create(
                 role="Restricted worker",
                 model_endpoint_id=restricted_endpoint.id,
@@ -786,6 +795,22 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                 unready_runner_id, max_age_seconds=30
             )
             assert unready_status is not None and not unready_status.provider_ready
+            assert unready_status.gateway_ready is False
+            await execution_repository.register_runner(
+                unready_runner_id, provider_ready=False, gateway_ready=True
+            )
+            gateway_status = await execution_repository.get_ready_runner(
+                max_age_seconds=30, credential_env="OMP_GATEWAY_KEY"
+            )
+            assert gateway_status is not None and gateway_status.runner_id == unready_runner_id
+            assert not gateway_status.provider_ready and gateway_status.gateway_ready
+            ready_status = await execution_repository.get_ready_runner(max_age_seconds=30)
+            assert ready_status is not None and ready_status.runner_id == runner_id
+            # A legacy heartbeat must clear a previously reported gateway readiness.
+            await execution_repository.register_runner(unready_runner_id, provider_ready=False)
+            assert await execution_repository.get_ready_runner(
+                max_age_seconds=30, credential_env="OMP_GATEWAY_KEY"
+            ) is None
             workspace_instance = await restricted_instances.create(
                 restricted_owner_id,
                 "Second workspace instance",
@@ -1933,7 +1958,7 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
             ) == "blocked"
             assert await connection.fetchval(
                 "SELECT version_num FROM alembic_version"
-            ) == "events_0017"
+            ) == "gateway_0018"
         finally:
             if restricted_pool is not None:
                 await restricted_pool.close()

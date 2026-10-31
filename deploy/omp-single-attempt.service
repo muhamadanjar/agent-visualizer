@@ -1,0 +1,33 @@
+# Install the reviewed application and frozen dependencies under the WorkingDirectory.
+# The EnvironmentFile contains ONLY absolute paths for OMP_AUTH_BROKER_TOKEN_FILE
+# and OMP_GATEWAY_CLIENTS_FILE. Do not put credential values in it.
+# Stop the stock gateway before starting this replacement on the same port.
+[Unit]
+Description=Agent Office pinned single-attempt Codex gateway
+Requires=omp-codex-broker.service
+After=omp-codex-broker.service
+
+[Service]
+WorkingDirectory=%h/.local/lib/agent-office/omp-single-attempt
+ExecStartPre=/usr/bin/test -f %h/.local/lib/agent-office/omp-single-attempt/bun.lock
+ExecStart=%h/.bun/bin/bun main.ts
+EnvironmentFile=%h/.config/agent-office/omp-single-attempt.env
+Environment=HOME=%h/.local/state/agent-office/omp-single-attempt
+Environment=OMP_LOG_LEVEL=error
+UnsetEnvironment=HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy BUN_OPTIONS NODE_OPTIONS PI_CODEX_WEBSOCKET
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state/agent-office/omp-single-attempt
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+MemoryMax=512M
+TasksMax=128
+Restart=on-failure
+RestartSec=2
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=default.target

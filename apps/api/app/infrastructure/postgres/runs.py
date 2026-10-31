@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.domain.model_endpoints import ModelEndpointInputError, validate_provider_binding
 from app.domain.agent_configuration import AgentDefinitionConfiguration
 from app.domain.runs import Run, RunInputError, RunRepository
 from app.infrastructure.postgres.models import RunTable, TaskTable
@@ -266,6 +267,13 @@ class PostgresRunRepository:
                     definition_configuration = replace(
                         definition_configuration, route=model_endpoint["default_route"]
                     )
+                try:
+                    validate_provider_binding(
+                        model_endpoint["credential_env"], model_endpoint["endpoint_url"],
+                        definition_configuration.model_id, definition_configuration.route,
+                    )
+                except ModelEndpointInputError as error:
+                    raise RunInputError("model_endpoint") from error
                 snapshot = {
                     "task": {
                         "id": str(task_id),

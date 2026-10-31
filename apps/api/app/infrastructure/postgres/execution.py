@@ -165,14 +165,15 @@ class PostgresExecutionRepository:
             row = (await session.execute(statement)).scalar_one_or_none()
         return None if row is None else _workspace_policy(row)
 
-    async def get_ready_runner(self, *, max_age_seconds: int) -> RunnerStatus | None:
+    async def get_ready_runner(self, *, max_age_seconds: int, credential_env: str = "NINEROUTER_KEY") -> RunnerStatus | None:
         threshold = datetime.now(UTC) - timedelta(seconds=max_age_seconds)
         async with self._sessions() as session:
             row = await session.scalar(
                 select(RunnerConnectionTable)
                 .where(
                     RunnerConnectionTable.last_seen_at >= threshold,
-                    RunnerConnectionTable.provider_ready.is_(True),
+                    (RunnerConnectionTable.gateway_ready if credential_env == "OMP_GATEWAY_KEY"
+                     else RunnerConnectionTable.provider_ready).is_(True),
                 )
                 .order_by(RunnerConnectionTable.last_seen_at.desc())
                 .limit(1)
@@ -183,6 +184,7 @@ class PostgresExecutionRepository:
                 runner_id=row.runner_id,
                 last_seen_at=row.last_seen_at,
                 provider_ready=row.provider_ready,
+                gateway_ready=row.gateway_ready,
             )
 
     async def get_runner_status(
@@ -202,15 +204,16 @@ class PostgresExecutionRepository:
                 runner_id=row.runner_id,
                 last_seen_at=row.last_seen_at,
                 provider_ready=row.provider_ready,
+                gateway_ready=row.gateway_ready,
             )
 
-    async def register_runner(self, runner_id: UUID, *, provider_ready: bool) -> None:
+    async def register_runner(self, runner_id: UUID, *, provider_ready: bool, gateway_ready: bool = False) -> None:
         statement = (
             insert(RunnerConnectionTable)
-            .values(runner_id=runner_id, provider_ready=provider_ready)
+            .values(runner_id=runner_id, provider_ready=provider_ready, gateway_ready=gateway_ready)
             .on_conflict_do_update(
                 index_elements=[RunnerConnectionTable.runner_id],
-                set_={"provider_ready": provider_ready, "last_seen_at": func.now()},
+                set_={"provider_ready": provider_ready, "gateway_ready": gateway_ready, "last_seen_at": func.now()},
             )
         )
         async with self._sessions.begin() as session:
@@ -274,6 +277,17 @@ class PostgresExecutionRepository:
                 )
                 .where(
                     RunDispatchTable.state == "queued",
+                    select(RunnerConnectionTable.runner_id).where(
+                        RunnerConnectionTable.runner_id == runner_id,
+                        RunnerConnectionTable.last_seen_at >= now - timedelta(seconds=30),
+                        (
+                            (queued_run.configuration_snapshot["model_endpoint"]["credential_env"].astext == "OMP_GATEWAY_KEY")
+                            & RunnerConnectionTable.gateway_ready.is_(True)
+                        ) | (
+                            (queued_run.configuration_snapshot["model_endpoint"]["credential_env"].astext == "NINEROUTER_KEY")
+                            & RunnerConnectionTable.provider_ready.is_(True)
+                        ),
+                    ).correlate(queued_run).exists(),
                     ~select(active_workspace.run_id)
                     .where(
                         active_workspace.owner_id == RunDispatchTable.owner_id,

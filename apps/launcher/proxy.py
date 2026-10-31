@@ -19,6 +19,10 @@ def _destination(host: str, port: int) -> tuple[str, int]:
     except ValueError as error:
         raise ValueError("proxy destination configuration is invalid") from error
     normalized = host.lower().rstrip(".")
+    if allowed_host == "localhost" and allowed_port == 14000:
+        if normalized != "localhost" or port != 14000 or os.environ.get("GATEWAY_UNIX_SOCKET") != "/omp-relay/gateway.sock":
+            raise ValueError("gateway destination is not allowlisted")
+        return "localhost", 14000
     if not allowed_host or normalized != allowed_host or port != allowed_port:
         raise ValueError("destination is not allowlisted")
     if normalized == LOCAL_GATEWAY_HOST and port == 20128:
@@ -125,6 +129,9 @@ class EgressProxyHandler(socketserver.StreamRequestHandler):
             if b":" not in line:
                 self._reject(400, "Bad Request")
                 return
+        if os.environ.get("GATEWAY_UNIX_SOCKET"):
+            self._reject(403, "Forbidden")
+            return
         host, port = _parse_authority(target, 443)
         host, port = _destination(host, port)
         upstream = socket.create_connection((host, port), timeout=15)
@@ -180,7 +187,15 @@ class EgressProxyHandler(socketserver.StreamRequestHandler):
         if body_length > MAX_REQUEST_BYTES:
             self._reject(413, "Payload Too Large")
             return
-        upstream = socket.create_connection((host, port), timeout=15)
+        if os.environ.get("GATEWAY_UNIX_SOCKET"):
+            if method != "POST" or path != "/v1/chat/completions":
+                self._reject(403, "Forbidden")
+                return
+            upstream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            upstream.settimeout(15)
+            upstream.connect("/omp-relay/gateway.sock")
+        else:
+            upstream = socket.create_connection((host, port), timeout=15)
         upstream.settimeout(30)
         upstream.sendall(f"{method} {path} {version}\r\n".encode("ascii"))
         for header in headers:

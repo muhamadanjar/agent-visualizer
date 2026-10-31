@@ -48,6 +48,8 @@ export function ModelEndpointsView() {
   const [includeArchived, setIncludeArchived] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [saving, setSaving] = useState(false);
+  const [provider, setProvider] = useState("ninerouter");
+  const isCodex = provider === "codex";
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -77,10 +79,10 @@ export function ModelEndpointsView() {
     const form = new FormData(event.currentTarget);
     const draft: ModelEndpointDraft = {
       name: String(form.get("name")),
-      endpoint_url: String(form.get("endpoint_url")),
-      credential_env: "NINEROUTER_KEY",
+      endpoint_url: isCodex ? "http://localhost:14000/v1" : String(form.get("endpoint_url")),
+      credential_env: isCodex ? "OMP_GATEWAY_KEY" : "NINEROUTER_KEY",
       default_model_id: String(form.get("default_model_id")),
-      default_route: String(form.get("default_route") || "") || null,
+      default_route: isCodex ? null : String(form.get("default_route") || "") || null,
     };
     setSaving(true);
     setError(null);
@@ -132,12 +134,20 @@ export function ModelEndpointsView() {
       </div>
       <p className="field-note">Endpoints are owner-scoped, reusable, and archived rather than deleted. Saved configuration is not proof of provider availability or runtime execution.</p>
       <form className="draft-form" onSubmit={(event) => void create(event)}>
+        <label className="preview-field">Provider
+          <select value={provider} onChange={(event) => setProvider(event.target.value)} disabled={saving}>
+            <option value="ninerouter">9Router</option>
+            <option value="codex">Codex Subscription · OMP gateway</option>
+          </select>
+          <span className="field-note">Runtime: LangChain. Each Run uses only its selected provider.</span>
+        </label>
         <label className="preview-field">Endpoint name<input name="name" maxLength={120} required disabled={saving} /></label>
-        <label className="preview-field">Endpoint URL<input name="endpoint_url" type="url" maxLength={2048} placeholder="http://localhost:20128/v1" required disabled={saving} /></label>
-        <label className="preview-field">Default model ID<input name="default_model_id" maxLength={200} placeholder="openrouter/provider/model:free" required disabled={saving} /></label>
-        <label className="preview-field">Default route <span className="field-note">Optional provider routing identifier.</span><input name="default_route" maxLength={120} disabled={saving} /></label>
+        <label className="preview-field">Endpoint URL<input key={provider} name="endpoint_url" defaultValue={isCodex ? "http://localhost:14000/v1" : ""} readOnly={isCodex} type="url" maxLength={2048} placeholder="http://localhost:20128/v1" required disabled={saving} /></label>
+        <label className="preview-field">Default model ID<input name="default_model_id" maxLength={200} placeholder={isCodex ? "openai-codex/<model-id>" : "openrouter/provider/model:free"} required disabled={saving} /></label>
+        <label className="preview-field">Default route <span className="field-note">Optional provider routing identifier.</span><input name="default_route" maxLength={120} disabled={saving || isCodex} /></label>
         <label className="preview-field">Credential environment reference
-          <select name="credential_env" value="NINEROUTER_KEY" disabled>
+          <select name="credential_env" value={isCodex ? "OMP_GATEWAY_KEY" : "NINEROUTER_KEY"} disabled>
+            <option value="OMP_GATEWAY_KEY">OMP_GATEWAY_KEY</option>
             <option value="NINEROUTER_KEY">NINEROUTER_KEY</option>
           </select>
           <span className="field-note">This is an environment variable name, not a secret value. The API and browser never receive the credential value.</span>
@@ -157,7 +167,7 @@ export function ModelEndpointsView() {
           <li className="resource-list-item" key={endpoint.id}>
             <div>
               <strong>{endpoint.name}</strong>
-              <p className="muted">{endpoint.adapter} · {endpoint.endpoint_url}</p>
+              <p className="muted">{endpoint.credential_env === "OMP_GATEWAY_KEY" ? "Codex Subscription · OMP gateway" : "9Router"} · {endpoint.adapter} · {endpoint.endpoint_url}</p>
               <p className="muted">Default model: {endpoint.default_model_id}{endpoint.default_route ? ` · route ${endpoint.default_route}` : ""} · credential reference: {endpoint.credential_env}</p>
             </div>
             <div className="list-item-actions">

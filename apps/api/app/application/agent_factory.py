@@ -4,7 +4,9 @@ from dataclasses import dataclass, replace
 from uuid import UUID
 
 from app.domain.agent_configuration import AgentDefinitionConfiguration, REGISTERED_TOOLS
-from app.domain.model_endpoints import ModelEndpoint, ModelEndpointRepository
+from app.domain.model_endpoints import (
+    ModelEndpoint, ModelEndpointRepository, ModelEndpointInputError, validate_provider_binding,
+)
 from app.domain.registry import AgentDefinition, AgentRegistryRepository
 
 
@@ -59,6 +61,13 @@ class AgentFactory:
             raise AgentFactoryError("model_endpoint")
         if configuration.route is None and endpoint.default_route is not None:
             configuration = replace(configuration, route=endpoint.default_route)
+        try:
+            validate_provider_binding(
+                endpoint.credential_env, endpoint.endpoint_url,
+                configuration.model_id, configuration.route,
+            )
+        except ModelEndpointInputError as error:
+            raise AgentFactoryError("model_endpoint") from error
         if configuration.runtime_id != "langchain":
             raise AgentFactoryError("runtime")
         if any(tool not in REGISTERED_TOOLS for tool in configuration.allowed_tools):

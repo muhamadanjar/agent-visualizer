@@ -172,6 +172,7 @@ def build_agent(
         "base_url": endpoint_url,
         "api_key": api_key,
         "max_retries": 0,
+        "use_responses_api": False,
         "max_tokens": 1024,
         "timeout": timeout_seconds,
         "http_client": PROVIDER_HTTP_CLIENT,

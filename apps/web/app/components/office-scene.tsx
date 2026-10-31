@@ -40,8 +40,6 @@ type OfficeSceneProps = {
 };
 
 const CAMERA_FOV = 42;
-const WALKING_CLIP = "CharacterArmature|Walk";
-const SUCCESS_CLIP = "CharacterArmature|Wave";
 
 function AvatarLabel({ agent }: { agent: OfficeSceneAgent }) {
   return (
@@ -96,10 +94,15 @@ function AnimatedAgent({ agent, reducedMotion, onSelectAgent }: {
   onSelectAgent: (agentId: string) => void;
 }) {
   const { scene, animations } = useGLTF(agent.modelUrl, false, false);
+  const cubeWorld = agent.modelUrl.includes("/Cube_");
   const groupRef = useRef<Group>(null);
   const [hovered, setHovered] = useState(false);
   const [walking, setWalking] = useState(false);
   const [successReactionFinished, setSuccessReactionFinished] = useState(false);
+  const idleRoutineRef = useRef<{
+    phase: "seated" | "outbound" | "away" | "returning";
+    nextAt: number;
+  }>({ phase: "seated", nextAt: 2 + [...agent.id].reduce((sum, char) => sum + char.charCodeAt(0), 0) % 5 });
   const mountedRef = useRef(false);
   const availabilityRef = useRef(agent.availability);
   const initialPosition = useRef<OfficePosition>(
@@ -140,9 +143,9 @@ function AnimatedAgent({ agent, reducedMotion, onSelectAgent }: {
     lowerArmLeft: captureBone(model, OFFICE_AVATAR_POSE_BONES.lowerArmLeft),
     upperArmRight: captureBone(model, OFFICE_AVATAR_POSE_BONES.upperArmRight),
     lowerArmRight: captureBone(model, OFFICE_AVATAR_POSE_BONES.lowerArmRight),
-    wristLeft: captureBone(model, OFFICE_AVATAR_POSE_BONES.wristLeft),
-    wristRight: captureBone(model, OFFICE_AVATAR_POSE_BONES.wristRight),
-  }), [model]);
+    wristLeft: captureBone(model, cubeWorld ? "FistL" : OFFICE_AVATAR_POSE_BONES.wristLeft),
+    wristRight: captureBone(model, cubeWorld ? "FistR" : OFFICE_AVATAR_POSE_BONES.wristRight),
+  }), [model, cubeWorld]);
   const { actions, mixer } = useAnimations(animations, groupRef);
 
   useEffect(() => () => {
@@ -161,17 +164,22 @@ function AnimatedAgent({ agent, reducedMotion, onSelectAgent }: {
       return;
     }
 
-    if (reducedMotion && waypointsRef.current.length > 0) {
-      const target = waypointsRef.current[waypointsRef.current.length - 1]!;
+    if (reducedMotion) {
+      const target = agent.availability === "idle" ? agent.restPosition : agent.chairPosition;
       groupRef.current?.position.set(target[0], target[1], target[2]);
+      if (groupRef.current) groupRef.current.rotation.y = agent.availability === "idle" ? 0 : Math.PI;
       waypointsRef.current = [];
       waypointIndexRef.current = 0;
+      idleRoutineRef.current.phase = "seated";
+      idleRoutineRef.current.nextAt = 0;
       setWalking(false);
     }
 
     if (availabilityRef.current === agent.availability) return;
     const previousAvailability = availabilityRef.current;
     availabilityRef.current = agent.availability;
+    idleRoutineRef.current.phase = "seated";
+    idleRoutineRef.current.nextAt = 0;
     if ((previousAvailability === "idle") === (agent.availability === "idle")) return;
 
     const route = agent.availability === "idle" ? agent.routeToRest : agent.routeToWork;
@@ -198,13 +206,13 @@ function AnimatedAgent({ agent, reducedMotion, onSelectAgent }: {
     setSuccessReactionFinished(false);
   }, [agent.animation]);
 
-  const clip = walking ? WALKING_CLIP
-    : agent.animation === "success" && !successReactionFinished ? SUCCESS_CLIP : null;
+  const clip = walking ? (cubeWorld ? "Walk" : "CharacterArmature|Walk")
+    : agent.animation === "success" && !successReactionFinished ? (cubeWorld ? "Wave" : "CharacterArmature|Wave") : null;
   useEffect(() => {
     if (!clip || reducedMotion) return;
     const action = actions[clip];
     if (!action) return;
-    const isSuccess = clip === SUCCESS_CLIP;
+    const isSuccess = clip === (cubeWorld ? "Wave" : "CharacterArmature|Wave");
     const onFinished = () => setSuccessReactionFinished(true);
     if (isSuccess) mixer.addEventListener("finished", onFinished);
     action.reset();
@@ -216,17 +224,41 @@ function AnimatedAgent({ agent, reducedMotion, onSelectAgent }: {
       if (isSuccess) mixer.removeEventListener("finished", onFinished);
       action.fadeOut(0.12);
     };
-  }, [actions, clip, mixer, reducedMotion]);
+  }, [actions, clip, mixer, reducedMotion, cubeWorld]);
 
   useFrame((state, delta) => {
     const group = groupRef.current;
     if (!group) return;
+    const routine = idleRoutineRef.current;
+    if (agent.availability === "idle" && !reducedMotion && waypointsRef.current.length === 0) {
+      if (routine.nextAt === 0) routine.nextAt = state.clock.elapsedTime + 3;
+      if (state.clock.elapsedTime >= routine.nextAt) {
+        if (routine.phase === "seated") {
+          routine.phase = "outbound";
+          waypointsRef.current = [[agent.restPosition[0], agent.restPosition[1], agent.restPosition[2] + 0.85]];
+          waypointIndexRef.current = 0;
+          setWalking(true);
+        } else if (routine.phase === "away") {
+          routine.phase = "returning";
+          waypointsRef.current = [agent.restPosition];
+          waypointIndexRef.current = 0;
+          setWalking(true);
+        }
+      }
+    }
     const route = waypointsRef.current;
     if (route.length > 0) {
       const target = route[waypointIndexRef.current];
       if (!target) {
         waypointsRef.current = [];
         waypointIndexRef.current = 0;
+        if (routine.phase === "outbound") {
+          routine.phase = "away";
+          routine.nextAt = state.clock.elapsedTime + 3;
+        } else if (routine.phase === "returning") {
+          routine.phase = "seated";
+          routine.nextAt = state.clock.elapsedTime + 12;
+        }
         group.rotation.y = agent.availability === "idle" ? 0 : Math.PI;
         setWalking(false);
       } else {
@@ -245,6 +277,11 @@ function AnimatedAgent({ agent, reducedMotion, onSelectAgent }: {
           group.rotation.y = Math.atan2(dx, dz);
         }
       }
+      return;
+    }
+
+    if (agent.availability === "idle" && routine.phase === "away" && !reducedMotion) {
+      for (const bone of Object.values(bones)) applyBonePose(bone);
       return;
     }
 
@@ -277,7 +314,7 @@ function AnimatedAgent({ agent, reducedMotion, onSelectAgent }: {
       onPointerOver={() => setHovered(true)}
       onPointerOut={() => setHovered(false)}
     >
-      <primitive object={model} />
+      <primitive object={model} scale={cubeWorld ? 0.674 : 1} />
       <mesh position={[0, 0.025, 0]} rotation={[-Math.PI / 2, 0, 0]}>
         <ringGeometry args={[0.43, 0.51, 24]} />
         <meshBasicMaterial color={agent.accent} />

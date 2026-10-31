@@ -105,6 +105,9 @@ services:
     image: agent-office-runtime-launcher:local
     build:
       context: ./apps/launcher
+    user: "${RUNNER_UID:-1000}:${RUNNER_GID:-1000}"
+    group_add:
+      - "${DOCKER_GID:?set DOCKER_GID to the host Docker socket group ID}"
     environment:
       RUNTIME_LAUNCHER_TOKEN: ${RUNTIME_LAUNCHER_TOKEN:?set RUNTIME_LAUNCHER_TOKEN in .env}
       RUN_WORKER_IMAGE: agent-office-runner:local
