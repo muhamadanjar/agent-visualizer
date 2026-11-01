@@ -2,13 +2,17 @@
 
 | | |
 |---|---|
-| **Status** | In-Review |
+| **Status** | Implemented — roadmap Phase 2 (P0) scope only |
 | **Author(s)** | Muhamad Anjar |
 | **Reviewer(s)** | [perlu konfirmasi: reviewer] |
 | **Tanggal Dibuat** | 2026-10-27 |
-| **Terakhir Diupdate** | 2026-10-29 |
+| **Terakhir Diupdate** | 2026-11-01 |
 | **Service Terkait** | `apps/api`, `apps/dispatcher`, `apps/runner`, Docker Compose, `apps/web` |
 | **Ticket / Issue** | N/A — tidak diberikan |
+
+## Status implementasi saat ini (2026-11-01)
+
+Roadmap Phase 2 (P0) selesai: LangChain per-Run worker containers, Runtime Launcher, bounded Runner, lifecycle/result/event delivery, cancellation acknowledgement, dan recovery telah diimplementasikan. Progress register mencatat cancellation live (Attempt 26), Run sukses setelah restart Runtime Launcher/Runner/API (Attempts 27/40/41), serta dua overlapping Runs pada workspace berbeda. Status ini hanya untuk roadmap Phase 2, bukan seluruh P1/P2 atau setiap proposal runtime; streaming dan pause/resume tidak diklaim. Verifikasi browser/UI pasca-refresh/reconnect dicatat sebagai workstream lanjutan, bukan gate Phase 2.
 
 ## Ringkasan (TL;DR)
 
@@ -87,7 +91,7 @@ Run hanya menjadi `canceled` setelah stop proses/container terverifikasi. Bila s
 
 ### Cutover dan API
 
-LangChain menggantikan loop custom secara langsung. API contract boleh breaking; web dan Runner diperbarui serentak dan tidak ada compatibility shim. Migrasi database tetap additive dan mempertahankan Run lama sebagai histori; old Run tidak dieksekusi ulang dengan konfigurasi runtime baru. Rollback berarti mengembalikan deployment sebelum start Run baru, bukan menjalankan ulang attempt yang statusnya tidak pasti.
+P0 capability implementation includes create/start, bounded tool calls, normalized lifecycle/safe-action events, result/error, timeout, cancellation acknowledgement, and no-browser dependency. Streaming and pause/resume remain unclaimed and outside the completed roadmap Phase 2 P0 scope.
 
 Dependency implementasi dipatok pada `langchain==1.4.7` dan `langchain-openai==1.7.3`. Verifikasi automated terdokumentasi: Runner `35 passed`, API `68 passed, 1 skipped`, Launcher `27 passed, 2 skipped` dengan opt-in Docker integration; compileall, Runner Docker image build, Compose config, dan graph update berhasil. Live API-created cancellation berhasil pada Attempt 26. Attempt 27 berhasil saat Runtime Launcher restart memakai `openrouter/cohere/north-mini-code:free`; Attempt 40 dengan `ag/gemini-3.8-flash` berhasil setelah Runner restart; Attempt 41 dengan model yang sama berhasil setelah API restart dan menyimpan `run.succeeded` serta satu Run Result. Runs `53bf4f84-c174-4b15-9870-c34fa1c5896b` dan `37590e3e-d958-40af-9cd5-011b7c4262f2` berhasil dengan overlap pada workspace berbeda menggunakan `ag/gemini-3.8-flash`. Test policy dinonaktifkan kembali dan concurrency Definition dipulihkan ke 1. Sebelumnya ada provider-route, model-call-limit, dan timeout failures; acceptance terlewati pada probe read-only yang dibatasi.
 
@@ -109,12 +113,9 @@ P0 capability implementation includes create/start, bounded tool calls, normaliz
 - **Keamanan**: risiko tertinggi adalah container escape, secret exposure, SSRF/private-address egress, dan tool permission bypass. Deny-by-default, no privileged mode, per-Run filesystem, environment-secret allowlist, serta review keamanan menjadi gate.
 - **Operasional**: butuh lifecycle cleanup, orphan-container reconciliation, health/heartbeat, logs ber-redaksi, dan backup. Rollback deployment tidak boleh menandai Run aktif selesai atau mengulang side effect.
 
-## Rencana Implementasi (opsional)
+## Rencana implementasi (historis; roadmap Phase 2 selesai)
 
-1. Contracts and typed Runtime Launcher operations are implemented; verify remaining capability gates against acceptance.
-2. Runner supervisor and authenticated Launcher create bounded isolated worker containers without placing the Docker socket in the agent process.
-3. Direct cutover to per-Run LangChain workers, with the API and web callers migrated.
-4. Remaining verification: API-created real Run, selected-endpoint success/denial, success/failure, allowlisted tool, timeout, verified/unknown cancellation, browser disconnect, process restart/reconciliation, and downstream persisted event/3D observation.
+Cutover LangChain per-Run dan implementasi Runner/Launcher telah dilaksanakan untuk scope roadmap Phase 2 (P0). Verifikasi e2e yang tercatat dan batas yang belum menjadi klaim ditampilkan pada bagian **Status implementasi saat ini** serta `docs/progress.md`.
 
 ## Pertanyaan Terbuka
 

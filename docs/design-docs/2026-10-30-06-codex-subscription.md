@@ -2,14 +2,20 @@
 
 | | |
 |---|---|
-| **Status** | In Review — one authorized live read-only subscription Run succeeded; broader acceptance remains open |
-| **Tanggal** | 2026-10-30 |
+| **Status** | In Review — roadmap Phase 6 In Progress; authorized read-only Codex Runs succeeded, broader acceptance remains open |
+| **Tanggal** | 2026-11-01 |
 | **Roadmap** | Integrasi provider kandidat Phase 6; override sequencing dicatat di Phase Plan |
 | **Referensi internal** | [PRD](../../PRD%20%E2%80%94%20Dynamic%20AI%20Agent%20Virtual%20Office.md), [Runtime Design](2026-10-27-02-agent-runtime.md), [Event Design](2026-10-27-03-event-system.md), [Phase Plan](../phase-plan.md) |
 
+## Kondisi implementasi saat ini (2026-11-01)
+
+Slice gateway privat yang sempit telah berjalan: OMP auth broker, scoped client, gateway single-attempt, private relay/provider readiness, dan integrasi LangChain Chat Completions. Authorized read-only Attempt 10 menggunakan `openai-codex/gpt-6-luna`, menjalankan satu `list_files`, lalu mempersist `run.succeeded` dan result berisi hanya nama tingkat atas. Dua Run Codex read-only berikutnya (`e82e65e7-95f3-4a5e-b943-d202616fdc0b` dan `134c124d-2d1f-4d04-8db1-0fb19405f0b8`) sukses secara berurutan dengan `run.started`, `run.tool_action`, dan `run.succeeded`. Bukti ini tidak mengklaim konkurensi same-account atau pemenuhan seluruh COD-AC.
+
+Roadmap Phase 6 tetap In Progress. Pada 2026-11-01, satu pasangan Run read-only Codex+NineRouter pada workspace terpisah berjalan overlap dan keduanya sukses; ini tidak membuktikan konkurensi beberapa Run pada akun Codex yang sama. Runtime Launcher mempertahankan guard HTTP 429 untuk worker aktif dengan `OMP_GATEWAY_KEY` yang sama. Acceptance yang masih terbuka mencakup provider-only egress (belum ada firewall OS/container yang membuktikannya), cancellation dan penghentian upstream, restart/recovery lintas layanan, refresh/expiry/revocation credential, serta quota/cost controls. Pengujian fake-upstream bukan pengganti acceptance live/security.
+
 ## Tujuan dan status
 
-Tambahkan **Codex Subscription** sebagai pilihan provider/model untuk Task melalui gateway privat, tanpa mengganti 9Router. Arah yang dipilih Owner adalah mempertahankan runtime LangChain dan tool Agent Office, serta mengevaluasi Oh My Pi (OMP) auth broker dan gateway sebagai adapter inference. Ini bukan lagi desain yang mensyaratkan Codex CLI atau Runtime Adapter Codex terpisah pada setiap worker. Agent Definition, Task, Run dan riwayat yang ada tetap berfungsi.
+Tambahkan **Codex Subscription** sebagai pilihan provider/model untuk Task melalui gateway privat, tanpa mengganti 9Router. Implementasi mempertahankan runtime LangChain dan tool Agent Office, dengan OMP auth broker dan gateway sebagai adapter inference. Ini bukan jalur yang mensyaratkan Codex CLI atau Runtime Adapter Codex terpisah pada setiap worker; Agent Definition, Task, Run, dan riwayat yang ada tetap berfungsi.
 
 Owner mengizinkan pekerjaan sebelum Phase 4 selesai, memilih login Codex terpisah, dan mengizinkan satu Task sintetis read-only maksimal dua menit. Owner juga mengizinkan command Codex, tetapi izin tersebut **tidak** menambahkan shell ke LangChain atau mengubah policy tools yang ada. Shell tidak menjadi deliverable jalur gateway ini; penambahan shell memerlukan implementasi dan enforcement tersendiri. Override tidak menutup gate Phase 4 atau acceptance Phase 6. Implementasi menggunakan broker OMP dan gateway khusus single-attempt, bukan gateway OMP standar yang memiliki retry. Attempt 10 berhasil menjalankan satu `list_files` read-only Task melalui subscription dan menyimpan `run.succeeded` serta result. Ini membuktikan satu alur end-to-end sempit, bukan seluruh COD-AC-03–14; cost/quota, egress isolation, cancellation, restart, refresh/revocation dan concurrency masih belum terverifikasi.
 

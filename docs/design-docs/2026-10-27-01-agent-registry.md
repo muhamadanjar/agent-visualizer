@@ -2,13 +2,17 @@
 
 | | |
 |---|---|
-| **Status** | In Review |
+| **Status** | Implemented — roadmap Phase 1 (P0) scope only |
 | **Author(s)** | Anjar |
 | **Reviewer(s)** | [perlu konfirmasi: reviewer] |
 | **Tanggal Dibuat** | 2026-10-27 |
-| **Terakhir Diupdate** | 2026-10-28 |
+| **Terakhir Diupdate** | 2026-11-01 |
 | **Service Terkait** | `apps/api`, `apps/runner`, PostgreSQL, `apps/web` |
 | **Ticket / Issue** | N/A — tidak diberikan |
+
+## Status implementasi saat ini (2026-11-01)
+
+Roadmap Phase 1 (P0) selesai: owner-scoped Registry/Model Endpoint, immutable Definition Versions, effective tool-policy resolution, validasi/preflight, dan konstruksi LangChain runtime dinamis telah diimplementasikan. Progress register mencatat focused API (23 passed), PostgreSQL persistence (1 passed), Runner execution (2 passed), dan Attempts 24–25 sebagai bukti Run provider-backed dengan hasil persisted. Status ini hanya untuk roadmap Phase 1; PRD Phase 1 mencakup Phase 1–4, sedangkan P1/P2 di dokumen ini tidak ikut dinyatakan selesai. Provider-only egress/DNS rebinding, retensi/purge, dan pertanyaan terbuka lainnya tetap terbuka.
 
 ## Ringkasan (TL;DR)
 
@@ -21,7 +25,7 @@ definisi yang dinonaktifkan atau diarsipkan tidak memperoleh izin baru melalui p
 Sebelum implementasi Registry, API sudah membedakan Agent Definition, Agent Definition Version, Agent Instance, Task, dan Run; 
 CRUD definisi Markdown, versi, archive, dan Instance owner-scoped sudah tersedia. 
 Provider Configuration lama berada pada tingkat owner. Implementasi Registry menambahkan Model Endpoint reusable dan konfigurasi executable per Definition Version. 
-Agent Factory memvalidasi dan menyelesaikan konfigurasi untuk preflight dan Run snapshot. Runner kini membangun LangChain agent baru untuk setiap Run dari konfigurasi immutable tersebut; isolasi container per Run dan lifecycle runtime lainnya masih menjadi pekerjaan terbuka pada Agent Runtime Design Doc 02.
+Agent Factory memvalidasi dan menyelesaikan konfigurasi untuk preflight dan Run snapshot. Runner membangun LangChain agent baru untuk setiap Run dari konfigurasi immutable tersebut; isolasi container per Run dan lifecycle runtime merupakan tanggung jawab Agent Runtime (Design Doc 02), yang roadmap Phase 2-nya kini selesai.
 
 ## Tujuan
 
@@ -103,12 +107,9 @@ Constraint unik `(owner_id, slug)` pada Agent Definition dihapus agar nama dupli
 - **Keamanan**: server-side owner/project scope; secret hanya melalui reference environment yang di-allowlist; prompt/metadata tidak memberi permission; approval terikat aksi dan parameter.
 - **Operasional**: migrasi 0011 mempertahankan record tetapi menghapus uniqueness nama; migrasi 0012 memblokir queued Run lama yang tak dapat dieksekusi dan menyimpan bukti owner-visible. Rollback aplikasi/skema lama tidak aman setelah nama duplikat dibuat. Downgrade migration ditolak. Pemulihan memerlukan backup atau rekonsiliasi duplikat terencana sebelum schema rollback manual. Provider-only egress dan perlindungan DNS rebinding belum terverifikasi; Runner memeriksa alamat DNS sebelum request tetapi tidak mematok koneksi ke alamat tersebut.
 
-## Rencana Implementasi (opsional)
+## Rencana implementasi (historis; roadmap Phase 1 selesai)
 
-1. Bekukan schema Agent Definition Version, Model Endpoint, secret reference, dan effective-permission contract.
-2. Tambahkan migrasi additive serta mapping konfigurasi provider lama; verifikasi histori tidak berubah.
-3. Implementasikan Factory/preflight dan kontrak API baru; migrasikan web/Runner pada breaking cutover.
-4. Buktikan create/update/archive, snapshot immutability, penolakan tool tak dikenal, dan secret redaction sebelum status dokumen berubah dari Draft.
+Langkah-langkah schema, migrasi additive, Factory/preflight, dan cutover telah dilaksanakan untuk scope roadmap Phase 1 (P0). Evidence dan batas scope terkini ada pada bagian **Status implementasi saat ini** dan `docs/progress.md`; pertanyaan terbuka di bawah tetap berlaku.
 
 ## Pertanyaan Terbuka
 

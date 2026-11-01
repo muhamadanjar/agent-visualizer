@@ -6,9 +6,13 @@
 | **Author(s)** | [perlu konfirmasi: nama/email author] |
 | **Reviewer(s)** | [perlu konfirmasi: reviewer] |
 | **Tanggal Dibuat** | 2026-10-27 |
-| **Terakhir Diupdate** | 2026-10-27 |
+| **Terakhir Diupdate** | 2026-11-01 |
 | **Service Terkait** | `apps/api`, LangGraph, `apps/dispatcher`, `apps/runner`, PostgreSQL, `apps/web` |
 | **Ticket / Issue** | N/A — tidak diberikan |
+
+## Status implementasi saat ini (2026-11-01)
+
+Roadmap Phase 5 masih Not started. Tidak ada LangGraph supervisor, orchestration DAG/child Run yang persisted, ataupun eksekusi approval per child yang diimplementasikan atau diklaim. Proposal di bawah tetap rancangan P1; jalur manual Task/Run yang sudah tersedia bukan bukti implementasi orchestration.
 
 ## Ringkasan (TL;DR)
 

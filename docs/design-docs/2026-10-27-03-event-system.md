@@ -2,13 +2,17 @@
 
 | | |
 |---|---|
-| **Status** | In Review |
+| **Status** | Implemented — roadmap Phase 3 (P0) scope only |
 | **Author(s)** | Anjar |
 | **Reviewer(s)** | [perlu konfirmasi: reviewer] |
 | **Tanggal Dibuat** | 2026-10-27 |
-| **Terakhir Diupdate** | 2026-10-30 |
+| **Terakhir Diupdate** | 2026-11-01 |
 | **Service Terkait** | `apps/api`, `apps/runner`, Redis Streams, PostgreSQL, `apps/web` |
 | **Ticket / Issue** | N/A — tidak diberikan |
+
+## Status implementasi saat ini (2026-11-01)
+
+Roadmap Phase 3 (P0) selesai: PostgreSQL event/projection/outbox, Redis Streams fan-out, authenticated snapshot/replay WebSocket, dan frontend cursor/reconnect telah diimplementasikan. Bukti mencakup Redis outage recovery, post-restart browser session/replay, dan dua isolated TCP fan-out measurements di bawah profil lokal. Status ini hanya Phase 3, bukan seluruh taksonomi PRD atau usulan P1/P2. Approval decision tersimpan, tetapi belum ada caller Run yang membuat `approval.requested`; event workflow/delegation tetap deferred. Partitioning/consumer-group pada skala lebih besar dan batas backlog/alert tetap terbuka.
 
 ## Ringkasan (TL;DR)
 
@@ -18,10 +22,7 @@ dan reconnect membangun ulang snapshot/delta dari cursor persisted—bukan dari 
 
 ## Latar Belakang & Masalah
 
-API saat ini sudah menyimpan Activity Event dengan `event_id`, `schema_version`, `source_sequence`, owner cursor, dan Run projection. 
-WebSocket terautentikasi mengirim snapshot/delta dengan polling repository; 
-Redis Streams belum ada di Compose. PRD baru mengusulkan event envelope bernomor versi, ordering, event persistence, reconnect, 
-serta synchronization yang tetap benar bila API/Redis/browser restart.
+Sebelum cutover, API sudah menyimpan Activity Event dengan `event_id`, `schema_version`, `source_sequence`, owner cursor, dan Run projection. Pada kondisi tersebut WebSocket terautentikasi mengirim snapshot/delta melalui polling repository, sedangkan Redis Streams belum tersedia di Compose. Implementasi roadmap Phase 3 yang kini berjalan menambahkan event envelope bernomor versi, persistence, reconnect, dan synchronization lintas restart API/Redis/browser sebagaimana dirangkum di bagian status saat ini.
 
 ## Tujuan
 
@@ -77,7 +78,7 @@ sequenceDiagram
 
 The visual-activity events remain `running` in the Run projection. `run.working` is emitted at an actual model-call start; `run.tool_started` precedes a workspace side effect; `run.reviewing` marks the next model call after tool output and does not claim human/code review. The post-call `run.tool_action` remains a backend-derived safe summary. Planning/tool-start/reviewing cues expire 30 seconds after `last_event_at` even if a later heartbeat keeps overall projection freshness current. No per-Agent Runtime Session/presence source currently proves `Offline`; missing or stale evidence remains `unknown`.
 
-### Implementasi saat ini (2026-10-31)
+### Implementasi saat ini (2026-11-01)
 
 - API menulis `Activity Event`, projection, dan row outbox PostgreSQL dalam transaksi yang sama; publisher hanya mengakui row setelah `XADD` berhasil. Redis Streams dipakai sebagai fan-out, dengan satu stream dan pembacaan `XREAD` independen per replica API, bukan consumer group.
 - WebSocket memakai antrean lokal terbatas per koneksi; snapshot dan replay dari PostgreSQL memulihkan cursor saat subscribe/reconnect dan saat sequence gap. Frontend mengirim cursor terakhir, mendeduplikasi event, dan membedakan keadaan sinkronisasi dari status koneksi.
@@ -111,12 +112,9 @@ The visual-activity events remain `running` in the Run projection. `run.working`
 - **Keamanan**: validasi sumber, owner/project scope, redaction, WebSocket/origin terautentikasi, tanpa hidden reasoning/raw content; Redis memakai private network/ACL/TLS sesuai deployment.
 - **Operasional**: perlu retry outbox, Redis stream retention, pemantauan consumer lag, replay gap metrics, drill restart/reconnect, dan backup PostgreSQL. Gangguan Redis menunda live fan-out, bukan menghapus event atau mengubah Run state.
 
-## Rencana Implementasi (opsional)
+## Rencana implementasi (historis; roadmap Phase 3 selesai)
 
-1. Finalisasi taxonomy event, wire envelope (`event_version`), scope/cursor, dan legacy mapping.
-2. Tambahkan PostgreSQL fan-out outbox serta publisher/consumer Redis Streams; commit event sebelum publish/ack.
-3. Migrasikan WebSocket API dan frontend pada breaking cutover; snapshot/delta berasal dari persisted cursor.
-4. Uji duplicate, out-of-order, gangguan/pemulihan Redis, API restart, browser reconnect, auth expiry, dan stale event display.
+PostgreSQL persistence/outbox, Redis fan-out, WebSocket replay, dan frontend cursor/reconnect telah dilaksanakan untuk scope roadmap Phase 3 (P0). Bukti serta batas yang tersisa dirangkum pada bagian **Status implementasi saat ini** dan `docs/progress.md`.
 
 ## Pertanyaan Terbuka
 

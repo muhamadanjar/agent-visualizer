@@ -2,13 +2,17 @@
 
 | | |
 |---|---|
-| **Status** | In Review |
+| **Status** | Implemented — roadmap Phase 4 (P0) scope only |
 | **Author(s)** | Anjar |
 | **Reviewer(s)** | [perlu konfirmasi: reviewer] |
 | **Tanggal Dibuat** | 2026-10-27 |
 | **Terakhir Diupdate** | 2026-11-01 |
 | **Service Terkait** | `apps/web`, React Three Fiber, Three.js, GLB assets, `apps/api` |
 | **Ticket / Issue** | N/A — tidak diberikan |
+
+## Status implementasi saat ini (2026-11-01)
+
+Roadmap Phase 4 (P0) selesai, termasuk Office Area persisten dan alokasi dinamis, Reception bersama, lifecycle/availability live, scene responsif, serta batas aksesibilitas yang dijelaskan di bawah. Progress register mencatat 21 web tests / 530 assertions, TypeScript check/build, dan sample synthetic focused 34.3 FPS selama 5.099 detik pada profil referensi. Status ini terbatas pada Phase 4; bukan jaminan performa pilot/mobile atau penyelesaian setiap proposal. Tidak ada pengukuran perangkat fisik pilot/mobile, uncached cold-load/transfer, draw calls, maupun GPU identity.
 
 ## Ringkasan (TL;DR)
 
@@ -84,7 +88,7 @@ Diagnostik browser sebelumnya pada 7 instance tersimpan (6 idle, 1 unknown) teta
 - **Keamanan**: API membatasi availability ke owner session; client tidak dapat menyetel owner. Ruangan/anchor tidak memberi akses; GLB CC0 self-hosted tidak memuat credential atau data agent.
 - **Operasional**: kegagalan refresh availability menurunkan tampilan menjadi neutral `unknown`; kegagalan GLB same-origin memakai fallback list/WebGL yang tersedia. Browser smoke bukan bukti Run nyata atau kapasitas produksi.
 
-## Rencana Implementasi (opsional)
+## Implementasi dan bukti (roadmap Phase 4 selesai)
 
 1. Verifikasi asset source/lisensi dan clip set — selesai: Quaternius Ultimate Modular Men Pack, tujuh model CC0 dengan rig yang sama.
 2. Expose owner-scoped Agent Availability dari unresolved dispatch dan fresh Activity Event projection — implementasi ada; boundary tests dan isolated PostgreSQL integration pass.
@@ -100,7 +104,7 @@ Diagnostik browser sebelumnya pada 7 instance tersimpan (6 idle, 1 unknown) teta
 - Dua Runs live lintas Codex+NineRouter overlap dan sukses. Guard same-account Codex HTTP 429 tetap dipertahankan di Phase 6.
 - FR-3D-007/008 telah diimplementasikan: assignment `office_area` persisten, area least-populated deterministic, workstation unik dan layout elastis. Migration `office_area_0020`, owner/archive boundary, legacy backfill, dan layout diuji; browser fixture menampilkan enam nama area.
 - Keputusan Owner (2026-11-01): Reception adalah ruang fisik bersama, bukan Office Area ketujuh, lokasi default, atau assignment Agent Instance. PRD §14.1 dan FR-3D-007 kini konsisten: enam Office Area tetap menjadi pilihan persistensi; Reception hanya berada pada scene bersama.
-- Independent code review menemukan geometri Reception awalnya hanya diuji lewat jalur balanced-count; regression test kini mencakup juga layout dari persisted Office Area array. Re-review: no findings. Design doc tetap `In Review` sampai human review sesuai status flow di `README.md`.
+- Independent code review menemukan geometri Reception awalnya hanya diuji lewat jalur balanced-count; regression test kini mencakup juga layout dari persisted Office Area array. Re-review: no findings. Penyelesaian roadmap Phase 4 tidak mengubah status persetujuan desain; reviewer tetap belum ditetapkan.
 ## Referensi
 
 - [PRD — Dynamic AI Agent Virtual Office](../../PRD%20%E2%80%94%20Dynamic%20AI%20Agent%20Virtual%20Office.md), §13–16, §24, §26.
