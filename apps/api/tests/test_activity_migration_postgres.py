@@ -64,7 +64,7 @@ def test_postgres_activity_phase_migration_round_trips_safely() -> None:
             try:
                 async with engine.connect() as connection:
                     version = await connection.scalar(text("SELECT version_num FROM alembic_version"))
-                    assert version == "activity_0019"
+                    assert version == "office_area_0020"
                     constraint = await connection.scalar(
                         text(
                             "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
@@ -102,7 +102,7 @@ def test_postgres_activity_phase_migration_round_trips_safely() -> None:
                 async with engine.connect() as connection:
                     assert await connection.scalar(
                         text("SELECT version_num FROM alembic_version")
-                    ) == "activity_0019"
+                    ) == "office_area_0020"
                     upgraded_constraint = await connection.scalar(
                         text(
                             "SELECT pg_get_constraintdef(oid) FROM pg_constraint "

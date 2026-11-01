@@ -54,7 +54,12 @@ from app.domain.evidence import (
     RunActivityProjection,
     activity_event_envelope,
 )
-from app.domain.instances import AgentInstance, AgentInstanceInputError, AgentInstanceRepository
+from app.domain.instances import (
+    AgentInstance,
+    AgentInstanceInputError,
+    AgentInstanceRepository,
+    OfficeArea,
+)
 from app.domain.projects import Project, ProjectRepository
 from app.domain.model_endpoints import (
     ModelEndpoint,
@@ -823,6 +828,7 @@ class AgentInstanceCreate(BaseModel):
     display_name: StrictStr = Field(min_length=1, max_length=120)
     definition_id: UUID
     project_id: UUID | None = None
+    office_area: OfficeArea | None = None
 
     @field_validator("display_name")
     @classmethod
@@ -839,6 +845,7 @@ class AgentInstanceUpdate(BaseModel):
     display_name: StrictStr | None = Field(default=None, min_length=1, max_length=120)
     definition_id: UUID | None = None
     project_id: UUID | None = None
+    office_area: OfficeArea | None = None
 
     @field_validator("display_name")
     @classmethod
@@ -858,6 +865,7 @@ class AgentInstanceResponse(BaseModel):
     definition_name: str
     project_id: UUID | None
     project_name: str | None
+    office_area: OfficeArea
     archived: bool
     created_at: datetime
     updated_at: datetime
@@ -877,6 +885,7 @@ def _agent_instance_response(instance: AgentInstance) -> AgentInstanceResponse:
         project_id=instance.project_id,
         project_name=instance.project_name,
         archived=instance.archived_at is not None,
+        office_area=instance.office_area,
         created_at=instance.created_at,
         updated_at=instance.updated_at,
     )
@@ -2162,6 +2171,7 @@ def create_http_app(
                 body.display_name,
                 body.definition_id,
                 body.project_id,
+                body.office_area,
             )
         except AgentInstanceInputError as error:
             raise HTTPException(status_code=404, detail="Resource not found") from error

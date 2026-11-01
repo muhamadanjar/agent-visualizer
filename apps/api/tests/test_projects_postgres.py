@@ -110,12 +110,43 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                     legacy_definition_id,
                     restricted_owner_id,
                 )
+            legacy_instance_ids = [uuid4(), uuid4(), uuid4()]
+            legacy_created_at = datetime.now(timezone.utc)
+            await connection.executemany(
+                """
+                INSERT INTO agent_instances (
+                    id, owner_id, display_name, definition_id, archived_at, created_at
+                ) VALUES ($1, $2, $3, $4, $5, $6)
+                """,
+                [
+                    (
+                        instance_id,
+                        restricted_owner_id,
+                        f"Legacy instance {index}",
+                        legacy_definition_id,
+                        legacy_created_at if index == 2 else None,
+                        legacy_created_at - timedelta(days=3 - index),
+                    )
+                    for index, instance_id in enumerate(legacy_instance_ids)
+                ],
+            )
             assert await apply_migrations(connection) == []
             await apply_alembic_migrations(dsn)
             await apply_alembic_migrations(dsn)
             assert await connection.fetchval(
                 "SELECT version_num FROM alembic_version"
-            ) == "activity_0019"
+            ) == "office_area_0020"
+            backfilled_areas = await connection.fetch(
+                "SELECT id, office_area FROM agent_instances "
+                "WHERE owner_id = $1 AND id = ANY($2::uuid[])",
+                restricted_owner_id,
+                legacy_instance_ids,
+            )
+            assert {(row["id"], row["office_area"]) for row in backfilled_areas} == {
+                (legacy_instance_ids[0], "architecture"),
+                (legacy_instance_ids[1], "engineering"),
+                (legacy_instance_ids[2], "engineering"),
+            }
             migrated_endpoint = await connection.fetchrow(
                 "SELECT name, credential_env, default_model_id, default_route "
                 "FROM model_endpoints WHERE owner_id = $1",
@@ -1921,6 +1952,11 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                 await connection.execute("DROP TABLE activity_event_outbox")
                 await connection.execute("DROP TABLE run_results")
                 await connection.execute(
+                    "ALTER TABLE agent_instances "
+                    "DROP CONSTRAINT agent_instances_office_area_check, "
+                    "DROP COLUMN office_area"
+                )
+                await connection.execute(
                     "ALTER TABLE run_dispatches "
                     "DROP CONSTRAINT run_dispatches_max_duration_check, "
                     "DROP COLUMN cancellation_requested_at, "
@@ -2030,7 +2066,7 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
             ) == "blocked"
             assert await connection.fetchval(
                 "SELECT version_num FROM alembic_version"
-            ) == "activity_0019"
+            ) == "office_area_0020"
         finally:
             if restricted_pool is not None:
                 await restricted_pool.close()
@@ -2114,11 +2150,17 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                         "AND NOT EXISTS (SELECT 1 FROM activity_events "
                         "WHERE owner_id = 'owner')"
                     )
+                    if await connection.fetchval(
+                        "SELECT to_regclass('public.activity_event_outbox') IS NOT NULL"
+                    ):
+                        await connection.execute(
+                            "DELETE FROM activity_event_outbox WHERE owner_id = $1",
+                            restricted_owner_id,
+                        )
                     for table in (
                         "approval_decisions",
                         "artifacts",
                         "run_activity_projections",
-                        "activity_event_outbox",
                         "activity_events",
                         "approval_requests",
                         "owner_event_cursors",
@@ -2312,6 +2354,13 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
             assert await repository.list_for_owner(
                 owner_id, include_archived=False, limit=10, offset=0
             ) == [instance]
+            assert instance.office_area == "architecture"
+            second = await repository.create(
+                owner_id, "Second instance", own_definition.id, None
+            )
+            assert second.office_area == "engineering"
+            archived_second = await repository.archive_for_owner(owner_id, second.id)
+            assert archived_second is not None
 
             await definition_repository.update_for_owner(
                 owner_id, own_definition.id, {"name": "Researcher v2"}
@@ -2322,12 +2371,19 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
             assert linked.definition_name == "Researcher v2"
 
             unassigned = await repository.update_for_owner(
-                owner_id, instance.id, {"display_name": "Mira 2", "project_id": None}
+                owner_id,
+                instance.id,
+                {
+                    "display_name": "Mira 2",
+                    "project_id": None,
+                    "office_area": "security",
+                },
             )
             assert unassigned is not None
             assert unassigned.display_name == "Mira 2"
             assert unassigned.project_id is None
             assert unassigned.project_name is None
+            assert unassigned.office_area == "security"
 
             with pytest.raises(AgentInstanceInputError):
                 await repository.create(
@@ -2343,9 +2399,13 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
             assert await repository.list_for_owner(
                 owner_id, include_archived=False, limit=10, offset=0
             ) == []
-            assert await repository.list_for_owner(
+            archived_instances = await repository.list_for_owner(
                 owner_id, include_archived=True, limit=10, offset=0
-            ) == [archived]
+            )
+            assert {item.id for item in archived_instances} == {
+                archived.id,
+                archived_second.id,
+            }
             assert await repository.get_for_owner(owner_id, foreign.id) is None
             archived_definition = await definition_repository.archive_for_owner(
                 owner_id, own_definition.id
@@ -2418,7 +2478,7 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
             cleanup_connection = await asyncpg.connect(dsn=admin_dsn, timeout=5)
             try:
                 await cleanup_connection.execute(
-                    f'DROP DATABASE "{test_database_name}"'
+                    f'DROP DATABASE "{test_database_name}" WITH (FORCE)'
                 )
             finally:
                 await cleanup_connection.close()

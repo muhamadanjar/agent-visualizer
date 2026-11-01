@@ -33,8 +33,12 @@ Provider adapters may use different protocols; no one protocol defines the Model
 ## Agent definitions
 
 **Agent Instance**:
-A persistent office identity created from an Agent Definition. It may remain idle without a Task, Run, or active execution; creating the instance does not start work. Project association identifies context, not access grants; physical office location belongs to the scene layout.
+A persistent office identity created from an Agent Definition. It may remain idle without a Task, Run, or active execution; creating the instance does not start work. Project association identifies context, not access grants; its Office Area Assignment selects a visual zone, while exact workstation coordinates are derived from the scene layout.
 _Avoid_: Running agent, runtime session
+
+**Office Area Assignment**:
+A persisted visual-zone choice for an Agent Instance. It does not identify a filesystem workspace, confer project access, or change Run policy; workstation and rest-seat coordinates are derived from the scene layout. Reception is a separate shared physical room, not an assignable Office Area.
+_Avoid_: Workspace path, permission assignment
 
 **Agent Definition**:
 A reusable role and system-prompt template with references to skills; it is distinct from an Agent Instance, Task, and Run.

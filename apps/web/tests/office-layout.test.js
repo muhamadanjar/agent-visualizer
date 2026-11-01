@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createOfficeLayout } from "../app/components/office-layout.ts";
-
+import { calculateOfficeCameraFitDistance } from "../app/components/office-camera.ts";
 function positionKey([x, y, z]) {
   return `${x}:${y}:${z}`;
 }
@@ -69,6 +69,59 @@ test("the room grows with every agent rather than dropping overflow workstations
   expect(new Set(layout.stations.map(({ restSeatPosition }) => positionKey(restSeatPosition))).size).toBe(21);
 });
 
+test("assigned office areas create distinct named zones without losing stations", () => {
+  const officeAreas = [
+    "architecture", "engineering", "review", "security", "meeting", "lounge",
+    "architecture", "engineering", "review", "security", "meeting", "lounge",
+    "architecture", "engineering", "review", "security", "meeting", "lounge",
+    "architecture", "engineering", "review",
+  ];
+  const layout = createOfficeLayout(officeAreas);
+
+  expect(layout.stations).toHaveLength(officeAreas.length);
+  expect(layout.areas).toHaveLength(6);
+  expect(layout.stations.map(({ officeArea }) => officeArea)).toEqual(officeAreas);
+  expect(new Set(layout.stations.map(({ workstationPosition }) => positionKey(workstationPosition))).size)
+    .toBe(officeAreas.length);
+  for (const station of layout.stations) {
+    const zone = layout.areas.find((area) => area.officeArea === station.officeArea);
+    expect(zone).toBeDefined();
+    expect(Math.abs(station.workstationPosition[0] - zone.center[0])).toBeLessThan(zone.width / 2);
+    expect(Math.abs(station.workstationPosition[2] - zone.center[2])).toBeLessThan(zone.depth / 2);
+  }
+});
+
+test("Reception furniture stays in a separate shared room within the elastic envelope", () => {
+  const areas = ["architecture", "engineering", "review", "security", "meeting", "lounge"];
+  for (const count of [0, 1, 7, 21, 60]) {
+    const layouts = [
+      createOfficeLayout(count),
+      createOfficeLayout(Array.from({ length: count }, (_, index) => areas[index % areas.length])),
+    ];
+    for (const layout of layouts) {
+      const reception = layout.receptionArea;
+      const receptionLeft = reception.center[0] - reception.width / 2;
+      const receptionRight = reception.center[0] + reception.width / 2;
+      const receptionFront = reception.center[2] - reception.depth / 2;
+      const receptionBack = reception.center[2] + reception.depth / 2;
+      const meetingBoardRight = -layout.roomWidth * 0.24 + 1.31;
+
+      expect("officeArea" in reception).toBe(false);
+      expect(reception.center[2]).toBe(layout.sharedAreaCenter[2]);
+      expect(reception.depth).toBeLessThan(layout.sharedAreaDepth);
+      expect(reception.width).toBeGreaterThanOrEqual(3.55);
+      expect(reception.depth).toBeGreaterThanOrEqual(3.22);
+      expect(receptionLeft).toBeGreaterThan(meetingBoardRight);
+      expect(receptionRight).toBeLessThan(layout.roomWidth / 2 - 0.2);
+      expect(reception.center[0] - 3.55 / 2).toBeGreaterThan(receptionLeft);
+      expect(reception.center[0] + 3.55 / 2).toBeLessThan(receptionRight);
+      expect(reception.center[2] - 1.42).toBeGreaterThan(receptionFront);
+      expect(reception.center[2] + 1.61).toBeLessThan(receptionBack);
+      expect(receptionBack).toBeLessThan(layout.roomDepth / 2);
+    }
+  }
+});
+
 test("an empty office stays empty while retaining a usable room envelope", () => {
   const layout = createOfficeLayout(0);
 
@@ -77,4 +130,12 @@ test("an empty office stays empty while retaining a usable room envelope", () =>
   expect(layout.roomDepth).toBeGreaterThan(0);
   expect(layout.sharedAreaCenter[2] - layout.sharedAreaDepth / 2).toBeGreaterThan(-layout.roomDepth / 2);
   expect(layout.sharedAreaCenter[2] + layout.sharedAreaDepth / 2).toBeLessThan(layout.roomDepth / 2);
+});
+
+test("portrait camera framing fits the diagonal office footprint and shared-room walls", () => {
+  const mobileDistance = calculateOfficeCameraFitDistance(32.8, 34, 362 / 490);
+  const desktopDistance = calculateOfficeCameraFitDistance(32.8, 34, 805 / 558);
+
+  expect(mobileDistance).toBeGreaterThanOrEqual(98);
+  expect(desktopDistance).toBeGreaterThanOrEqual(60);
 });

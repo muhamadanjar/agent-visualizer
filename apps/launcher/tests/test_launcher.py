@@ -177,10 +177,37 @@ def test_worker_log_frames_reject_reordered_or_invalid_protocol() -> None:
 
 
 @pytest.mark.parametrize(
+    "event_type",
+    ["run.working", "run.tool_started", "run.reviewing"],
+)
+def test_worker_log_frames_accepts_office_activity_phases(event_type: str) -> None:
+    started = {"sequence": 1, "kind": "started", "payload": {}}
+    event = {
+        "sequence": 2,
+        "kind": "event",
+        "payload": {
+            "event_type": event_type,
+            "event_id": "891e3b15-7408-4d39-91af-ff0ea5a06d18",
+            "occurred_at": "2026-01-01T00:00:00+00:00",
+            "source_sequence": 1,
+        },
+    }
+    frames = server._worker_frames(
+        _docker_frame(
+            1,
+            b"".join(
+                json.dumps(frame).encode() + b"\n" for frame in (started, event)
+            ),
+        )
+    )
+
+    assert frames == [started, event]
+
+@pytest.mark.parametrize(
     ("event_type", "tool_name"),
     [("run.canceled", None), ("run.succeeded", None), ("run.tool_action", "shell")],
 )
-def test_worker_frames_reject_lifecycle_events_and_unknown_tools(
+def test_worker_frames_reject_terminal_events_and_unknown_tools(
     event_type: str, tool_name: str | None
 ) -> None:
     payload = {

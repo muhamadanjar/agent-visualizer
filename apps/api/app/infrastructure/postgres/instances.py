@@ -9,6 +9,8 @@ from app.domain.instances import (
     AgentInstance,
     AgentInstanceInputError,
     AgentInstanceRepository,
+    OfficeArea,
+    least_populated_office_area,
 )
 from app.infrastructure.postgres.models import (
     AgentDefinitionTable,
@@ -16,7 +18,6 @@ from app.infrastructure.postgres.models import (
     AgentInstanceTable,
     ProjectTable,
 )
-
 
 def _instance(row) -> AgentInstance:
     return AgentInstance(
@@ -27,6 +28,7 @@ def _instance(row) -> AgentInstance:
         definition_name=row["definition_name"],
         project_id=row["project_id"],
         project_name=row["project_name"],
+        office_area=row["office_area"],
         archived_at=row["archived_at"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -43,6 +45,7 @@ def _instance_query():
             AgentDefinitionVersionTable.name.label("definition_name"),
             AgentInstanceTable.project_id.label("project_id"),
             ProjectTable.name.label("project_name"),
+            AgentInstanceTable.office_area.label("office_area"),
             AgentInstanceTable.archived_at.label("archived_at"),
             AgentInstanceTable.created_at.label("created_at"),
             AgentInstanceTable.updated_at.label("updated_at"),
@@ -118,11 +121,25 @@ class PostgresAgentInstanceRepository:
         display_name: str,
         definition_id: UUID,
         project_id: UUID | None,
+        office_area: OfficeArea | None = None,
     ) -> AgentInstance:
         instance_id = uuid4()
         async with self._sessions.begin() as session:
             await self._check_definition(session, owner_id, definition_id)
             await self._check_project(session, owner_id, project_id)
+            if office_area is None:
+                rows = (
+                    await session.execute(
+                        select(AgentInstanceTable.office_area, func.count())
+                        .where(
+                            AgentInstanceTable.owner_id == owner_id,
+                            AgentInstanceTable.archived_at.is_(None),
+                        )
+                        .group_by(AgentInstanceTable.office_area)
+                    )
+                ).all()
+                counts = {area: count for area, count in rows}
+                office_area = least_populated_office_area(counts)
             session.add(
                 AgentInstanceTable(
                     id=instance_id,
@@ -130,6 +147,7 @@ class PostgresAgentInstanceRepository:
                     display_name=display_name,
                     definition_id=definition_id,
                     project_id=project_id,
+                    office_area=office_area,
                 )
             )
             await session.flush()
@@ -165,9 +183,7 @@ class PostgresAgentInstanceRepository:
     async def update_for_owner(
         self, owner_id: str, instance_id: UUID, changes: dict[str, object]
     ) -> AgentInstance | None:
-        allowed = {"display_name", "definition_id", "project_id"}
-        if not changes or changes.keys() - allowed:
-            raise ValueError("invalid agent-instance update fields")
+        allowed = {"display_name", "definition_id", "project_id", "office_area"}
         async with self._sessions.begin() as session:
             instance = await session.scalar(
                 select(AgentInstanceTable)

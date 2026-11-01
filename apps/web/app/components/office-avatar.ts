@@ -58,3 +58,9 @@ export function assignOfficeAvatarModels(agentIds: string[]): Map<string, string
 
   return assignments;
 }
+export function selectDetailedOfficeAvatarIds(
+  prioritizedAgentIds: readonly string[],
+  limit: number,
+): Set<string> {
+  return new Set(prioritizedAgentIds.slice(0, Math.max(0, Math.floor(limit))));
+}

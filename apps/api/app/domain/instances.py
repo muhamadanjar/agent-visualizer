@@ -2,8 +2,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+from typing import Literal, Mapping, Protocol
 from uuid import UUID
+
+
+OfficeArea = Literal["architecture", "engineering", "review", "security", "meeting", "lounge"]
+OFFICE_AREAS: tuple[OfficeArea, ...] = (
+    "architecture",
+    "engineering",
+    "review",
+    "security",
+    "meeting",
+    "lounge",
+)
+
+
+def least_populated_office_area(counts: Mapping[str, int]) -> OfficeArea:
+    return min(OFFICE_AREAS, key=lambda area: counts.get(area, 0))
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,6 +30,7 @@ class AgentInstance:
     definition_name: str
     project_id: UUID | None
     project_name: str | None
+    office_area: OfficeArea
     archived_at: datetime | None
     created_at: datetime
     updated_at: datetime
@@ -31,6 +47,7 @@ class AgentInstanceRepository(Protocol):
         display_name: str,
         definition_id: UUID,
         project_id: UUID | None,
+        office_area: OfficeArea | None = None,
     ) -> AgentInstance: ...
 
     async def list_for_owner(
@@ -52,3 +69,5 @@ class AgentInstanceRepository(Protocol):
     async def archive_for_owner(
         self, owner_id: str, instance_id: UUID
     ) -> AgentInstance | None: ...
+
+

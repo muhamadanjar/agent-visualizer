@@ -1103,7 +1103,13 @@ def _worker_frames(raw_logs: bytes) -> list[dict[str, object]]:
             tool_name = payload.get("tool_name")
             if (
                 not isinstance(event_type, str)
-                or event_type not in {"run.tool_action", "session.heartbeat"}
+                or event_type not in {
+                    "run.tool_action",
+                    "run.working",
+                    "run.tool_started",
+                    "run.reviewing",
+                    "session.heartbeat",
+                }
                 or not isinstance(event_id, str)
                 or not _UUID_RE.fullmatch(event_id)
                 or not isinstance(occurred_at, str)

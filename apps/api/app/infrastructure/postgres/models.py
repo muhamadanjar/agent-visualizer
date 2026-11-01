@@ -226,7 +226,10 @@ class AgentInstanceTable(SQLModel, table=True):
     __table_args__ = (
         CheckConstraint("char_length(owner_id) BETWEEN 1 AND 128"),
         CheckConstraint("char_length(display_name) BETWEEN 1 AND 120 AND display_name = btrim(display_name)"),
-        UniqueConstraint("owner_id", "id"),
+        CheckConstraint(
+            "office_area IN ('architecture', 'engineering', 'review', 'security', 'meeting', 'lounge')",
+            name="agent_instances_office_area_check",
+        ),
         ForeignKeyConstraint(
             ["owner_id", "definition_id"],
             ["agent_definitions.owner_id", "agent_definitions.id"], ondelete="RESTRICT"
@@ -246,6 +249,7 @@ class AgentInstanceTable(SQLModel, table=True):
     display_name: str = Field(sa_column=Column(Text, nullable=False))
     definition_id: UUID = Field(sa_column=Column(PGUUID(as_uuid=True), nullable=False))
     project_id: UUID | None = Field(default=None, sa_column=Column(PGUUID(as_uuid=True)))
+    office_area: str = Field(sa_column=Column(Text, nullable=False))
     archived_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True)))
     created_at: datetime = Field(
         sa_column=Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))

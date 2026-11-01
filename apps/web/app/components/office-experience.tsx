@@ -3,8 +3,8 @@
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { Component, useCallback, useEffect, useMemo, useState, type CSSProperties, type ErrorInfo, type ReactNode } from "react";
-import { createOfficeLayout } from "./office-layout";
-import { assignOfficeAvatarModels } from "./office-avatar";
+import { OFFICE_AREAS, OFFICE_AREA_LABELS, createOfficeLayout, type OfficeArea } from "./office-layout";
+import { assignOfficeAvatarModels, selectDetailedOfficeAvatarIds } from "./office-avatar";
 import { deriveOfficeVisualState } from "./office-visual-state";
 import type { OfficeSceneAgent } from "./office-scene";
 import { StatusPill } from "./workspace-components";
@@ -30,15 +30,19 @@ type OfficeAgentInstance = {
   definition_name: string;
   project_id: string | null;
   project_name: string | null;
+  office_area: OfficeArea;
   archived: boolean;
   created_at: string;
   updated_at: string;
 };
-type OfficeAgentInstancePage = { records: OfficeAgentInstance[]; paginationLimitReached: boolean };
+type OfficeAgentInstancePage = {
+  records: OfficeAgentInstance[];
+  paginationLimitReached: boolean;
+};
 
 const OFFICE_AGENT_PAGE_SIZE = 200;
 const OFFICE_AGENT_MAX_OFFSET = 1_000_000;
-const MAX_DETAILED_AVATARS = 20;
+const MAX_DETAILED_AVATARS = 8;
 const MAX_MOBILE_AVATARS = 8;
 const AGENT_ACCENTS = ["#477b78", "#946a43", "#6c719b", "#a35b4d", "#557c59", "#7d6391", "#417892"];
 
@@ -54,6 +58,8 @@ function isOfficeAgentInstance(value: unknown): value is OfficeAgentInstance {
     && typeof record.definition_name === "string"
     && (typeof record.project_id === "string" || record.project_id === null)
     && (typeof record.project_name === "string" || record.project_name === null)
+    && typeof record.office_area === "string"
+    && OFFICE_AREAS.includes(record.office_area as OfficeArea)
     && typeof record.archived === "boolean"
     && typeof record.created_at === "string"
     && typeof record.updated_at === "string";
@@ -375,14 +381,18 @@ export function OfficeExperience() {
       if (leftCursor !== rightCursor) return rightCursor - leftCursor;
       return left.id.localeCompare(right.id);
     });
-    const fullAvatarIds = new Set(priority.slice(0, simplifiedScene ? MAX_MOBILE_AVATARS : MAX_DETAILED_AVATARS).map((agent) => agent.id));
-    const layout = createOfficeLayout(sortedById.length);
+    const fullAvatarIds = selectDetailedOfficeAvatarIds(
+      priority.map((agent) => agent.id),
+      simplifiedScene ? MAX_MOBILE_AVATARS : MAX_DETAILED_AVATARS,
+    );
+    const layout = createOfficeLayout(sortedById.map((agent) => agent.office_area));
     return sortedById.map((agent, index) => {
       const projection = runtimeByAgent.get(agent.id);
       const availability = availabilityByAgent.get(agent.id) ?? "unknown";
       const station = layout.stations[index]!;
       const visualState = deriveOfficeVisualState(availability, projection);
       return {
+        officeArea: agent.office_area,
         id: agent.id,
         displayName: agent.display_name,
         statusLabel: visualState.statusLabel,
@@ -439,10 +449,9 @@ export function OfficeExperience() {
       const agent = agentRecords.find((record) => record.id === agentId);
       if (agent) {
         setSelectedAgentId(agent.id);
-        const agentIndex = [...agentRecords]
-          .sort((left, right) => left.id.localeCompare(right.id))
-          .findIndex((record) => record.id === agent.id);
-        const station = createOfficeLayout(agentRecords.length).stations[agentIndex];
+        const sortedAgents = [...agentRecords].sort((left, right) => left.id.localeCompare(right.id));
+        const agentIndex = sortedAgents.findIndex((record) => record.id === agent.id);
+        const station = createOfficeLayout(sortedAgents.map((record) => record.office_area)).stations[agentIndex];
         if (station) {
           const availability = availabilityByAgent.get(agent.id) ?? "unknown";
           const position = availability === "idle" ? station.restPosition : station.chairPosition;
@@ -525,7 +534,13 @@ export function OfficeExperience() {
             <button type="button" className="quiet-button" disabled={sceneFailed || !sceneReady} onClick={focusSelectedAgent}>Focus selected</button>
             <button type="button" className="quiet-button" disabled={sceneFailed || !sceneReady} onClick={resetCamera}>Reset view</button>
           </div>
-          <span className="layout-version">{simplifiedScene ? "Dedicated rest room · up to 8 detailed agents" : "Dedicated rest room · up to 20 detailed agents"}</span>
+          <span className="layout-version">Detailed avatars · up to 8; all Agent Instances remain visible</span>
+        </div>
+        <div className="office-area-key" role="group" aria-label="Office spaces">
+          <div className="office-area-assignment-key" role="list" aria-label="Assignable Office Areas">
+            {OFFICE_AREAS.map((area) => <span key={area} role="listitem">{OFFICE_AREA_LABELS[area]}</span>)}
+          </div>
+          <span className="office-common-area-key">Reception · shared room</span>
         </div>
         <div className="office-canvas-wrap">
           {!sceneReady ? <div className="scene-loading" role="status">Preparing Agent Instance view…</div> : sceneFailed ? (

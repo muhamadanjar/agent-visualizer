@@ -4,14 +4,17 @@ import { Html, Instance, Instances, OrbitControls, useAnimations, useGLTF } from
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Suspense, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { LoopOnce, LoopRepeat, Mesh, MeshStandardMaterial } from "three";
+import type { ThreeEvent } from "@react-three/fiber";
 import type { Group, Object3D } from "three";
 import * as SkeletonUtils from "three/addons/utils/SkeletonUtils.js";
 import type { AgentAvailabilityState } from "../lib/activity";
 import { OFFICE_AVATAR_POSE_BONES } from "./office-avatar";
 import type { OfficeVisualAnimation } from "./office-visual-state";
-import { createOfficeLayout, type OfficeLayout, type OfficePosition } from "./office-layout";
+import { OFFICE_AREA_LABELS, createOfficeLayout, type OfficeAreaLayout, type OfficeCommonAreaLayout, type OfficeLayout, type OfficePosition } from "./office-layout";
+import { calculateOfficeCameraFitDistance, OFFICE_CAMERA_FOV, OFFICE_CAMERA_OFFSET, OFFICE_CAMERA_OFFSET_LENGTH } from "./office-camera";
 
 export type OfficeSceneAgent = {
+  officeArea: keyof typeof OFFICE_AREA_LABELS;
   id: string;
   displayName: string;
   statusLabel: string;
@@ -41,7 +44,6 @@ type OfficeSceneProps = {
   onSelectAgent: (agentId: string) => void;
 };
 
-const CAMERA_FOV = 42;
 
 function AvatarLabel({ agent }: { agent: OfficeSceneAgent }) {
   return (
@@ -103,6 +105,7 @@ function AnimatedAgent({ agent, reducedMotion, onSelectAgent }: {
   const [successReactionFinished, setSuccessReactionFinished] = useState(false);
   const failureReactionStartedAtRef = useRef<number | null>(null);
   const failureReactionFinishedRef = useRef(false);
+  const staticPoseAppliedRef = useRef(false);
   const idleRoutineRef = useRef<{
     phase: "seated" | "outbound" | "away" | "returning";
     nextAt: number;
@@ -213,6 +216,9 @@ function AnimatedAgent({ agent, reducedMotion, onSelectAgent }: {
     failureReactionStartedAtRef.current = null;
     failureReactionFinishedRef.current = false;
   }, [agent.animation, agent.activityCursor]);
+  useEffect(() => {
+    staticPoseAppliedRef.current = false;
+  }, [agent.animation, agent.availability, agent.activityCursor, reducedMotion]);
 
   const clip = walking ? (cubeWorld ? "Walk" : "CharacterArmature|Walk")
     : agent.animation === "success" && !successReactionFinished ? (cubeWorld ? "Wave" : "CharacterArmature|Wave") : null;
@@ -256,6 +262,7 @@ function AnimatedAgent({ agent, reducedMotion, onSelectAgent }: {
     }
     const route = waypointsRef.current;
     if (route.length > 0) {
+      staticPoseAppliedRef.current = false;
       const target = route[waypointIndexRef.current];
       if (!target) {
         waypointsRef.current = [];
@@ -289,7 +296,10 @@ function AnimatedAgent({ agent, reducedMotion, onSelectAgent }: {
     }
 
     if (agent.availability === "idle" && routine.phase === "away" && !reducedMotion && agent.animation === "neutral") {
-      for (const bone of Object.values(bones)) applyBonePose(bone);
+      if (!staticPoseAppliedRef.current) {
+        for (const bone of Object.values(bones)) applyBonePose(bone);
+        staticPoseAppliedRef.current = true;
+      }
       return;
     }
 
@@ -303,6 +313,11 @@ function AnimatedAgent({ agent, reducedMotion, onSelectAgent }: {
     const waiting = agent.animation === "waiting" || waitingApproval;
     const failed = agent.animation === "failure";
     const relaxed = agent.availability === "idle";
+    if (agent.animation === "neutral" && !reducedMotion && staticPoseAppliedRef.current) {
+      applyBonePose(bones.body, -0.08, 0, Math.sin(state.clock.elapsedTime * 1.2) * 0.015);
+      return;
+    }
+    if ((agent.animation === "inactive" || reducedMotion) && staticPoseAppliedRef.current) return;
     const legBend = relaxed ? 1.32 : 1.38;
     const typingMotion = typing && !reducedMotion ? Math.sin(state.clock.elapsedTime * 13) * 0.08 : 0;
     const toolMotion = toolAction && !reducedMotion ? Math.sin(state.clock.elapsedTime * 16) * 0.15 : 0;
@@ -333,6 +348,9 @@ function AnimatedAgent({ agent, reducedMotion, onSelectAgent }: {
       applyBonePose(bones.body, 0.12, 0, Math.sin(reactionTime * 28) * 0.12);
       if (reactionTime >= 0.72) failureReactionFinishedRef.current = true;
     }
+    if (agent.animation === "neutral" || agent.animation === "inactive" || reducedMotion) {
+      staticPoseAppliedRef.current = true;
+    }
   });
 
   return (
@@ -360,19 +378,62 @@ function StaticAgentMarkers({ agents, onSelectAgent }: {
   onSelectAgent: (agentId: string) => void;
 }) {
   if (!agents.length) return null;
+  const handleSelect = (agentId: string) => (event: ThreeEvent<MouseEvent>) => {
+    event.stopPropagation();
+    onSelectAgent(agentId);
+  };
+
   return (
-    <Instances limit={agents.length} range={agents.length}>
-      <dodecahedronGeometry args={[0.24, 0]} />
-      <meshStandardMaterial roughness={0.62} />
-      {agents.map((agent) => (
-        <Instance
-          key={agent.id}
-          position={[agent.position[0], 0.25, agent.position[2]]}
-          color={agent.accent}
-          onClick={(event) => { event.stopPropagation(); onSelectAgent(agent.id); }}
-        />
-      ))}
-    </Instances>
+    <group>
+      <Instances limit={agents.length} range={agents.length}>
+        <capsuleGeometry args={[0.105, 0.22, 2, 5]} />
+        <meshStandardMaterial roughness={0.72} />
+        {agents.map((agent) => (
+          <Instance
+            key={`${agent.id}-body`}
+            position={[agent.position[0], 0.43, agent.position[2]]}
+            color={agent.accent}
+            onClick={handleSelect(agent.id)}
+          />
+        ))}
+      </Instances>
+      <Instances limit={agents.length} range={agents.length}>
+        <sphereGeometry args={[0.12, 6, 4]} />
+        <meshStandardMaterial color="#c6a47e" roughness={0.78} />
+        {agents.map((agent) => (
+          <Instance
+            key={`${agent.id}-head`}
+            position={[agent.position[0], 0.72, agent.position[2]]}
+            onClick={handleSelect(agent.id)}
+          />
+        ))}
+      </Instances>
+      <Instances limit={agents.length * 2} range={agents.length * 2}>
+        <capsuleGeometry args={[0.045, 0.19, 1, 4]} />
+        <meshStandardMaterial roughness={0.76} />
+        {agents.flatMap((agent) => [-1, 1].map((side) => (
+          <Instance
+            key={`${agent.id}-arm-${side}`}
+            position={[agent.position[0] + side * 0.16, 0.45, agent.position[2]]}
+            rotation={[0, 0, side * -0.3]}
+            color={agent.accent}
+            onClick={handleSelect(agent.id)}
+          />
+        )))}
+      </Instances>
+      <Instances limit={agents.length * 2} range={agents.length * 2}>
+        <capsuleGeometry args={[0.05, 0.18, 1, 4]} />
+        <meshStandardMaterial roughness={0.76} />
+        {agents.flatMap((agent) => [-1, 1].map((side) => (
+          <Instance
+            key={`${agent.id}-leg-${side}`}
+            position={[agent.position[0] + side * 0.075, 0.16, agent.position[2]]}
+            color={agent.accent}
+            onClick={handleSelect(agent.id)}
+          />
+        )))}
+      </Instances>
+    </group>
   );
 }
 
@@ -389,14 +450,13 @@ function SelectedMarkerLabel({ agent }: { agent: OfficeSceneAgent }) {
   );
 }
 
-const CAMERA_OFFSET_LENGTH = Math.hypot(0.48, 0.86, 0.62);
 function CameraRig({ zoom, focusTarget }: { zoom: number; focusTarget: [number, number, number] }) {
   const { camera } = useThree();
   useEffect(() => {
     camera.position.set(
-      focusTarget[0] + zoom * 0.48 / CAMERA_OFFSET_LENGTH,
-      focusTarget[1] + zoom * 0.86 / CAMERA_OFFSET_LENGTH,
-      focusTarget[2] + zoom * 0.62 / CAMERA_OFFSET_LENGTH,
+      focusTarget[0] + zoom * OFFICE_CAMERA_OFFSET[0] / OFFICE_CAMERA_OFFSET_LENGTH,
+      focusTarget[1] + zoom * OFFICE_CAMERA_OFFSET[1] / OFFICE_CAMERA_OFFSET_LENGTH,
+      focusTarget[2] + zoom * OFFICE_CAMERA_OFFSET[2] / OFFICE_CAMERA_OFFSET_LENGTH,
     );
     camera.up.set(0, 1, 0);
     camera.lookAt(...focusTarget);
@@ -422,6 +482,24 @@ function InstancedBoxes({ items, dimensions, color, unlit = false }: {
         <Instance key={index} position={item.position} rotation={item.rotation} />
       ))}
     </Instances>
+  );
+}
+
+function OfficeAreaFloors({ areas }: { areas: OfficeAreaLayout[] }) {
+  return (
+    <group>
+      {areas.map((area) => (
+        <group key={area.officeArea}>
+          <mesh position={[area.center[0], 0.012, area.center[2]]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+            <planeGeometry args={[area.width, area.depth]} />
+            <meshLambertMaterial color="#ded9c9" />
+          </mesh>
+          <Html position={[area.center[0], 0.08, area.center[2] - area.depth / 2 + 0.55]} center style={{ pointerEvents: "none" }}>
+            <span className="scene-area-label">{OFFICE_AREA_LABELS[area.officeArea]}</span>
+          </Html>
+        </group>
+      ))}
+    </group>
   );
 }
 
@@ -662,20 +740,60 @@ function OfficeSharedFurniture({ width, centerZ }: { width: number; centerZ: num
 }
 
 
+function OfficeReception({ area }: { area: OfficeCommonAreaLayout }) {
+  const [x, , z] = area.center;
+  const deskZ = z - 0.45;
+  const waitingZ = z + 1.3;
+  const benchLegs: FurnitureItem[] = [];
+
+  for (const dx of [-1, 1]) {
+    for (const dz of [-0.22, 0.22]) benchLegs.push({ position: [x + dx, 0.22, waitingZ + dz] });
+  }
+
+  return (
+    <group>
+      <mesh position={[x, 0.03, z]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+        <planeGeometry args={[area.width, area.depth]} />
+        <meshLambertMaterial color="#d0c7b5" />
+      </mesh>
+      <mesh position={[x, 0.51, deskZ]} castShadow receiveShadow>
+        <boxGeometry args={[3.2, 1, 0.72]} />
+        <meshLambertMaterial color="#70543c" />
+      </mesh>
+      <mesh position={[x, 1.08, deskZ]} castShadow>
+        <boxGeometry args={[3.55, 0.14, 0.88]} />
+        <meshLambertMaterial color="#987052" />
+      </mesh>
+      <mesh position={[x, 1.9, z - 1.38]} castShadow>
+        <boxGeometry args={[3.05, 0.72, 0.08]} />
+        <meshLambertMaterial color="#40544a" />
+      </mesh>
+      <Html position={[x, 1.9, z - 1.3]} center distanceFactor={15} style={{ pointerEvents: "none" }}>
+        <span className="scene-reception-sign">RECEPTION</span>
+      </Html>
+      <InstancedBoxes items={benchLegs} dimensions={[0.08, 0.44, 0.08]} color="#5d6158" />
+      <mesh position={[x, 0.49, waitingZ]} castShadow>
+        <boxGeometry args={[2.35, 0.16, 0.62]} />
+        <meshLambertMaterial color="#74816e" />
+      </mesh>
+      <mesh position={[x, 0.86, waitingZ + 0.24]} castShadow>
+        <boxGeometry args={[2.35, 0.66, 0.14]} />
+        <meshLambertMaterial color="#65745f" />
+      </mesh>
+    </group>
+  );
+}
+
+
 function SceneContents({ agents, zoom, focusTarget, focusMode, reducedMotion, simplified, layout, onSelectAgent }: OfficeSceneProps & { layout: OfficeLayout }) {
   const { size } = useThree();
   const floorWidth = layout.roomWidth;
   const floorDepth = layout.roomDepth;
   const aspect = Math.max(0.1, size.width / Math.max(1, size.height));
-  const verticalHalfFov = (CAMERA_FOV * Math.PI) / 360;
-  const horizontalHalfFov = Math.atan(Math.tan(verticalHalfFov) * aspect);
-  const fitDistance = Math.max(
-    floorWidth / (2 * Math.tan(horizontalHalfFov)),
-    floorDepth / (2 * Math.tan(verticalHalfFov)),
-  ) * 1.2;
+  const cameraFitDistance = calculateOfficeCameraFitDistance(floorWidth, floorDepth, aspect);
   const cameraZoom = focusMode
     ? Math.max(7, 9 + zoom - 15)
-    : Math.max(7, fitDistance + zoom - 15);
+    : Math.max(7, cameraFitDistance + zoom - 15);
   const fullAvatars = agents.filter((agent) => agent.fullAvatar);
   const staticAgents = agents.filter((agent) => !agent.fullAvatar);
   const selectedStaticAgent = staticAgents.find((agent) => agent.selected);
@@ -691,9 +809,11 @@ function SceneContents({ agents, zoom, focusTarget, focusMode, reducedMotion, si
         <meshLambertMaterial color="#e7dfd0" />
       </mesh>
       <OfficeSetDressing width={floorWidth} depth={floorDepth} />
+      <OfficeAreaFloors areas={layout.areas} />
       <OfficeWorkstations agents={agents} />
       <OfficeRestRoom layout={layout} agents={agents} />
       <OfficeSharedFurniture width={floorWidth} centerZ={layout.sharedAreaCenter[2]} />
+      <OfficeReception area={layout.receptionArea} />
       <mesh position={[0, 0.015, 0]} rotation={[-Math.PI / 2, 0, 0]}>
         <planeGeometry args={[floorWidth, floorDepth]} />
         <meshBasicMaterial transparent opacity={0} depthWrite={false} />
@@ -712,7 +832,7 @@ function SceneContents({ agents, zoom, focusTarget, focusMode, reducedMotion, si
         enableRotate
         enableZoom
         minDistance={7}
-        maxDistance={Math.max(42, fitDistance + 20)}
+        maxDistance={Math.max(42, cameraFitDistance + 20)}
         maxPolarAngle={Math.PI / 2.12}
         target={focusTarget}
       />
@@ -721,12 +841,12 @@ function SceneContents({ agents, zoom, focusTarget, focusMode, reducedMotion, si
 }
 
 export function OfficeScene(props: OfficeSceneProps) {
-  const layout = createOfficeLayout(props.agents.length);
+  const layout = createOfficeLayout(props.agents.map((agent) => agent.officeArea));
   return (
     <Canvas
       camera={{
         position: [7, 14, 7],
-        fov: CAMERA_FOV,
+        fov: OFFICE_CAMERA_FOV,
         near: 0.1,
         far: Math.max(250, Math.hypot(layout.roomWidth, layout.roomDepth) * 4),
       }}

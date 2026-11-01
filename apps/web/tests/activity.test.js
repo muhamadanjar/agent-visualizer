@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { subscribeToActivity } from "../app/lib/activity.ts";
+import { requestAgentAvailability, subscribeToActivity } from "../app/lib/activity.ts";
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -48,6 +48,29 @@ async function withFakeBrowser(run, { authStatus = 200 } = {}) {
     else delete globalThis.fetch;
   }
 }
+
+test("the Agent Availability client accepts Offline records", async () => {
+  const previousFetch = Object.getOwnPropertyDescriptor(globalThis, "fetch");
+  const responseBody = [
+    { agent_instance_id: "agent-offline", availability: "offline" },
+    { agent_instance_id: "agent-idle", availability: "idle" },
+  ];
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async () => new Response(JSON.stringify(responseBody), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+  });
+
+  try {
+    const availability = await requestAgentAvailability(["agent-offline", "agent-idle"]);
+    expect(availability).toEqual(responseBody);
+  } finally {
+    if (previousFetch) Object.defineProperty(globalThis, "fetch", previousFetch);
+    else delete globalThis.fetch;
+  }
+});
 
 test("an expired Owner session stops reconnect retries", async () => {
   await withFakeBrowser(async (sockets) => {

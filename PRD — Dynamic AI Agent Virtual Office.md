@@ -1258,11 +1258,11 @@ Typing
 
 Pergerakan harus menggunakan waypoint atau navigation system.
 
-### FR-3D-007 — Workspace Assignment
+### FR-3D-007 — Office Area Assignment
 
 **Priority:** P1
 
-Agent dapat ditempatkan pada workspace tertentu.
+Owner dapat memilih Office Area visual untuk Agent Instance; pemilihan tersimpan. Jika tidak memilih saat membuat instance, sistem mengalokasikan area dengan jumlah instance paling sedikit. Office Area hanya lokasi presentasi dan tidak memberikan izin Project atau filesystem.
 
 Contoh:
 
@@ -1277,14 +1277,9 @@ Contoh:
 
 **Priority:** P1
 
-Ketika agent baru dibuat, sistem menentukan workstation yang tersedia.
+Saat Agent Instance baru dibuat, sistem menentukan Office Area dan membentuk satu workstation yang unik dari layout roster aktif. Ruang dan zona bertambah dinamis saat roster bertambah; workstation tidak memiliki kapasitas tetap.
 
-Jika tidak ada workstation:
-
-- Agent ditempatkan pada temporary area; atau
-- Sistem menampilkan peringatan bahwa kapasitas workspace penuh.
-
-Agent tidak boleh ditempatkan di posisi yang bertabrakan dengan objek lain.
+Koordinat workstation dihitung dari layout visual dan tidak disimpan sebagai koordinat persisten. Workstation baru tidak boleh bertabrakan dengan workstation atau objek lain; jika zona bertambah, ukuran layout ikut bertambah tanpa overflow area sementara atau peringatan kapasitas penuh.
 
 ### FR-3D-009 — Responsive Experience
 
@@ -1323,11 +1318,11 @@ Optimasi yang perlu dipertimbangkan:
 
 # 14. Virtual Office Layout
 
-## 14.1 Required Areas
+## 14.1 Required Office Areas and Shared Rooms
 
 ### Reception Area
 
-Lokasi default bagi agent baru yang belum mendapatkan workstation.
+Reception adalah ruang fisik bersama bagi pengunjung yang ditampilkan pada scene kantor. Reception bukan Office Area Assignment yang disimpan, bukan lokasi Agent Instance, dan bukan lokasi default bagi agent yang baru dibuat. Setiap Agent Instance yang tersimpan mendapat salah satu dari enam Office Area sesuai FR-3D-007.
 
 ### Engineering Workspace
 
@@ -1345,7 +1340,11 @@ Area untuk system design dan planning.
 
 ### Review Area
 
-Area untuk reviewer dan security specialist.
+Area untuk reviewer.
+
+### Security Area
+
+Area untuk spesialis keamanan.
 
 ### Meeting Room
 
@@ -2671,7 +2670,7 @@ Secrets harus dibackup menggunakan prosedur keamanan terpisah.
 
 | ID | Test | Expected Result |
 |---|---|---|
-| AC-001 | Create new agent | Agent tersimpan dan muncul di office |
+| AC-001 | Create new agent | Agent tersimpan dengan Office Area, muncul di office pada workstation unik |
 | AC-002 | Edit agent | Konfigurasi versi baru tersimpan |
 | AC-003 | Disable agent | Agent tidak menerima run baru |
 | AC-004 | Delete agent | Agent disembunyikan tanpa menghapus history |
@@ -2695,7 +2694,7 @@ Secrets harus dibackup menggunakan prosedur keamanan terpisah.
 | AV-002 | Orbit camera | Kamera dapat bergerak |
 | AV-003 | Zoom camera | Zoom bekerja |
 | AV-004 | Select character | Agent Detail muncul |
-| AV-005 | Create agent | Karakter baru ditambahkan |
+| AV-005 | Create agent | Karakter baru ditambahkan ke Office Area yang dipilih atau dialokasikan dengan workstation unik |
 | AV-006 | Remove agent | Karakter tidak lagi ditampilkan |
 | AV-007 | Working state | Animasi kerja aktif |
 | AV-008 | Completed state | Indikator selesai ditampilkan |

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { assignOfficeAvatarModels, OFFICE_AVATAR_MODELS } from "../app/components/office-avatar.ts";
+import { assignOfficeAvatarModels, OFFICE_AVATAR_MODELS, selectDetailedOfficeAvatarIds } from "../app/components/office-avatar.ts";
 
 test("registered agents get distinct deterministic avatars when the catalog has enough models", () => {
   const ids = ["agent-7", "agent-2", "agent-5", "agent-3", "agent-6", "agent-1", "agent-4"];
@@ -18,4 +18,12 @@ test("larger rosters reuse the avatar catalog without collapsing to one appearan
   expect(assigned.size).toBe(21);
   expect(loads.size).toBe(OFFICE_AVATAR_MODELS.length);
   expect(Math.max(...loads.values()) - Math.min(...loads.values())).toBeLessThanOrEqual(1);
+});
+
+test("a full office roster caps full-rig selection at eight prioritized agents", () => {
+  const priorityOrder = Array.from({ length: 20 }, (_, index) => `agent-${index + 1}`);
+  const detailed = selectDetailedOfficeAvatarIds(priorityOrder, 8);
+
+  expect(detailed.size).toBe(8);
+  expect([...detailed]).toEqual(priorityOrder.slice(0, 8));
 });

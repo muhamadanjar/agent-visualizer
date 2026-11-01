@@ -117,6 +117,7 @@ function isAgentAvailability(value: unknown): value is AgentAvailability {
     && (record.availability === "idle"
       || record.availability === "working"
       || record.availability === "waiting"
+      || record.availability === "offline"
       || record.availability === "unknown");
 }
 

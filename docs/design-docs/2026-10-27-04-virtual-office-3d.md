@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | In-Review |
+| **Status** | In Review |
 | **Author(s)** | Anjar |
 | **Reviewer(s)** | [perlu konfirmasi: reviewer] |
 | **Tanggal Dibuat** | 2026-10-27 |
@@ -12,42 +12,43 @@
 
 ## Ringkasan (TL;DR)
 
-Virtual Office menampilkan satu workstation per persisted `Agent Instance` aktif dan satu Rest Room berisi kursi untuk setiap instance. `Agent Availability` turunan API menempatkan agent idle di Rest Room, agent dengan Run aktif dan bukti fresh di workstation, serta waiting/unknown dalam pose netral; tujuh avatar GLB CC0 dipilih otomatis secara deterministik.
+Virtual Office menampilkan satu workstation per `Agent Instance` aktif, dibagi ke Office Area bernama dan Rest Room dengan kursi khusus per instance. `office_area` tersimpan sebagai penempatan visual; koordinat workstation, rute, dan kursi istirahat dihitung dari layout scene aktif. Availability tetap menentukan posisi kerja/istirahat; Office Area tidak memberi akses. Sebelas GLB CC0 dipilih otomatis secara deterministik.
 
 ## Latar Belakang & Masalah
 
-Aplikasi memakai scene React Three Fiber untuk `Agent Instance` persisted tanpa sample records. Workstation, Rest Room, area meeting, dan pergerakan hanyalah presentasi; lokasi tidak disimpan dan tidak memberi izin. Status ruang istirahat berasal dari read model availability yang owner-scoped, bukan inferensi UI atau status permanen pada `Agent Instance`.
+Aplikasi memakai scene React Three Fiber untuk `Agent Instance` persisted tanpa sample records. Office Area Assignment menyimpan zona visual; koordinat workstation, kursi istirahat, dan rute tetap dihitung oleh scene layout. Tidak ada lokasi/avatar yang mengubah otorisasi project atau filesystem. Status berasal dari read model availability owner-scoped, bukan inferensi UI.
 
 ## Tujuan
 
 - Satu workstation per persisted `Agent Instance` aktif serta Rest Room terpisah dengan kursi unik untuk tiap instance; posisi avatar idle tepat di pusat kursinya dan jarak minimum antarpusat kursi 2.4m untuk menghindari tumpang-tindih saat roster membesar.
 - `Agent Availability` tetap sinkron dengan Run dispatch unresolved dan projection Activity Event fresh: hanya `idle` masuk Rest Room; `working` berjalan ke workstation dan mengetik; `waiting`/`unknown` tetap di workstation tanpa pose mengetik.
 - Menggunakan sebelas model humanoid Quaternius CC0 dari dua rig; pilihan model deterministik per roster ID, benturan indeks dihindari bila jumlah instance tidak melebihi katalog.
-- Menjaga identitas `Agent Instance`, Run state, Visual Agent State, Agent Availability, dan presentasi scene terpisah; anchor 3D bukan lokasi workspace tersimpan.
+- Menjaga identitas `Agent Instance`, `Office Area Assignment`, Run state, Visual Agent State, Agent Availability, dan presentasi scene terpisah; area visual tidak menyimpan path workspace dan tidak memberi akses.
 - Menyediakan orbit, zoom, pan, focus-agent, reset, reduced motion, pemilihan HTML yang dapat diakses, serta fallback WebGL yang mempertahankan list/detail.
 - Menyediakan filter Project/Agent Definition, deep link `#<Agent Instance.id>`, dan CTA Create Task yang mengisi agent serta Project yang tersedia; Run tetap tindakan eksplisit.
-- Mengukur target PRD pada hardware/network profile yang direkam; angka performa belum lulus gate.
+- Memenuhi target 30 FPS desktop pada profil referensi Chrome yang disetujui Owner, dengan benchmark 20 Agent Instances synthetic yang dibedakan antara GLB rinci dan low-poly. Hasil ini tidak menyatakan performa perangkat pilot atau mobile fisik.
 
 ## Non-Tujuan (Out of Scope)
 
 - Menyimulasikan status/aktivitas agent ketika tidak ada Activity Event nyata.
 - Menjadikan kamar/meja/kedekatan avatar sebagai batas akses atau izin project.
-- Model/rig custom khusus per `Agent Instance`, multiplayer manusia, physics/game simulation, editor office bebas, persisted workspace assignment, dynamic allocation, atau role-based areas. Waypoint saat ini hanya presentasi dan mengikuti availability terverifikasi.
+- Custom rigs per instance, multiplayer manusia, physics/game simulation, dan editor bebas untuk geometri scene.
 - Direct chat, prompt chat, streamed response, dan chat history tidak disimulasikan karena API saat ini tidak menyediakan kontrak percakapan; UI menggunakan Task/Run API yang ada.
 
 ## Proposal / Desain
 
 ### Data dan scene boundary
 
-- Layout menempatkan workstation di ruang kerja, area meeting bersama di depannya, dan Rest Room terpisah di bagian belakang. Koordinat dihitung dari daftar aktif `Agent Instance` terurut ID; seat-center clearance minimum 2.4m dipertahankan dengan room growth dan tidak disimpan.
-- Setiap instance mendapat workstation dan satu kursi Rest Room; jumlah baris dan kedalaman ruangan bertambah mengikuti roster. Posisi bukan `Office Scene Version`, assignment, koordinat Agent Instance, atau lokasi Run.
+- Layout memisahkan enam Office Area yang dapat ditetapkan dari Rest Room dan Reception sebagai ruang fisik bersama. Setiap instance aktif mendapat satu workstation di area yang ditetapkan dan satu kursi istirahat khusus. Geometri zona dan ruangan bertambah mengikuti roster, dengan clearance antarpusat workstation agar tidak bertabrakan.
+- Owner memilih Office Area pada Agent Instance. Jika tidak dipilih saat pembuatan, API menempatkan instance ke area dengan jumlah agent paling sedikit; urutan tie-break tetap. `office_area` menyimpan salah satu dari Architecture, Engineering, Review, Security, Meeting, atau Lounge; Reception tidak disimpan atau digunakan sebagai lokasi default instance.
+- Reception dirender sebagai ruang masuk bersama dengan meja, papan nama, dan area tunggu; geometri berada dalam envelope ruang bersama yang elastis dan tidak menjadi Office Area ketujuh.
 - API memasok `Agent Availability` owner-scoped dari dispatch `Run / Attempt` unresolved dan Activity Event projection. Tidak ada unresolved dispatch berarti idle, termasuk setelah Run terminal; instance asing/archived atau data hilang menghasilkan unknown.
 - Availability mapping: `working` requires a `leased` dispatch and fresh `running` projection; `waiting` covers queued/blocked, input/approval, or cancellation pending; `offline` requires a `leased` dispatch, active projection, and persisted `session.heartbeat` older than 30 seconds with no later Activity Event; `unknown` covers missing/conflicting evidence, stale activity without a qualifying heartbeat, or API unavailable. Only idle rests; offline is inactive at the workstation; unknown never implies idle or offline.
 - Idle agents use waypoints to reach the Rest Room; working agents use waypoints to reach a workstation and sit/type. Waiting, offline, and unknown remain at the workstation without typing; offline uses the inactive pose while unknown stays neutral. State refreshes every five seconds; refresh failure clears availability so agents become unknown.
-- Project/Agent Definition chips memfilter daftar record aktual tanpa membuat Division atau zona visual terpisah. Pemilihan menggunakan `#<Agent Instance.id>`; ID tidak valid/arsip dibersihkan dari URL dengan pesan non-blocking. Owner session tetap diwajibkan oleh API.
+- Filter Project/Agent Definition memilih record tersimpan; Office Area bernama adalah zona fisik untuk presentasi, bukan subdivisi Project atau permission. Seleksi menggunakan `#<Agent Instance.id>`; ID invalid/arsip dibersihkan dengan notice non-blocking. API tetap memerlukan Owner session.
 - CTA Create Task membuka `/tasks/new` dengan Agent Instance terpilih dan Project saat ini jika ada. Task baru tersimpan hanya setelah submit; Run tetap memerlukan preflight dan tindakan eksplisit.
-- Rig GLB rinci dibatasi 20 desktop/8 mobile; selebihnya marker tetap dapat dipilih. Tujuh GLB dipilih otomatis secara deterministik berdasarkan ID dan collision-resolved untuk roster hingga ukuran katalog; anchor marker juga tidak menyimpan assignment.
-- Kursi, meja, komputer, ruangan, waypoint, kamera, dan warna aksen tidak mengubah policy, permission, atau lokasi workspace.
+- Rig GLB rinci dibatasi maksimal 8 di semua viewport; seluruh Agent Instance lainnya tetap terlihat dan dapat dipilih melalui karakter humanoid low-poly berinstancing. Pemilihan GLB deterministik per ID dan collision-resolved untuk roster hingga ukuran katalog.
+- Kursi, meja, komputer, Reception, ruangan, waypoint, kamera, dan warna aksen tidak mengubah policy, permission, atau lokasi workspace.
 
 ### Availability-to-animation
 
@@ -63,7 +64,9 @@ OrbitControls mendukung orbit/pan/zoom, focus-agent, dan reset tanpa menggantika
 
 ### Performa
 
-Target PRD awal (render awal ≤5 detik, 20 rig, ≥30 FPS desktop) tetap provisional. Desktop Canvas sekarang meminta WebGL `high-performance`; viewport compact meminta `low-power`, DPR/shadow lebih rendah. Furniture tetap memakai instanced geometry. Satu browser-only synthetic working roster 20 agent mencapai 59.3 FPS pada profile saat ini; evidence dan batasnya dicatat di progress register. Profil pilot, cold render, draw-call, transfer/decode belum menjadi acceptance.
+Pada profil referensi yang disetujui Owner (Chrome 156, 1440×900 CSS, DPR 1.25, 6 logical CPUs, 8 GiB reported), scene synthetic berisi 20 Agent Instances idle—maksimal 8 GLB rinci dan sisanya low-poly—mencapai 34.3 FPS selama 5.099 detik ketika document visible dan focused. Hasil lokal ini melewati target awal ≥30 FPS pada sample tersebut, tetapi bukan jaminan kapasitas pilot. Pada viewport 390×844 CSS, document width 375px tanpa horizontal overflow; ini bukan benchmark perangkat mobile fisik.
+
+Diagnostik browser sebelumnya pada 7 instance tersimpan (6 idle, 1 unknown) tetap dicatat sebagai data historis, bukan hasil versi terkini: sebelum static-pose caching, sample 4 detik 48.5 FPS pada 1867×931 dan 47.2 FPS pada emulasi 390×844; sesudah perubahan, dua sample desktop 41.6/40.0 FPS dan mobile-viewport 59.6 FPS. Sample variatif ini tidak membuktikan peningkatan desktop atau performa mobile fisik.
 
 ## Alternatif yang Dipertimbangkan
 
@@ -77,7 +80,7 @@ Target PRD awal (render awal ≤5 detik, 20 rig, ≥30 FPS desktop) tetap provis
 
 - **Backward compatibility**: katalog avatar berisi sebelas model; penambahan model dapat mengubah pemetaan visual deterministik, tetapi API Agent Instance dan ID tetap. Status scene memakai API Agent Availability owner-scoped.
 - **Migrasi data**: tidak ada skema lokasi scene/workstation/status yang ditambah atau diubah; anchors hanya presentasi.
-- **Performa**: GLB rinci dibatasi 20 desktop/8 mobile; sebelas model menambah transfer, decode, dan biaya GPU. Hasil 20-agent synthetic browser adalah eksplorasi pada profile yang belum disepakati, bukan bukti target pilot; GPU identifier tidak tersedia. Cold render, draw-call, transfer/decode, dan perangkat pilot tetap belum diukur/ditetapkan.
+- **Performa**: maksimal 8 GLB rinci; roster selebihnya memakai humanoid low-poly yang dapat dipilih. Sample synthetic 20-instance pada profil referensi Owner terukur 34.3 FPS selama 5.099 detik saat visible dan focused, melampaui target awal ≥30 FPS. Sample 38.1 FPS/5 detik yang lebih awal dilakukan saat tab tidak focused dan diperlakukan sebagai data historis. Fisik pilot/mobile belum dipilih atau diukur; cold render, draw calls, dan transfer asset uncached tetap belum terverifikasi.
 - **Keamanan**: API membatasi availability ke owner session; client tidak dapat menyetel owner. Ruangan/anchor tidak memberi akses; GLB CC0 self-hosted tidak memuat credential atau data agent.
 - **Operasional**: kegagalan refresh availability menurunkan tampilan menjadi neutral `unknown`; kegagalan GLB same-origin memakai fallback list/WebGL yang tersedia. Browser smoke bukan bukti Run nyata atau kapasitas produksi.
 
@@ -85,18 +88,19 @@ Target PRD awal (render awal ≤5 detik, 20 rig, ≥30 FPS desktop) tetap provis
 
 1. Verifikasi asset source/lisensi dan clip set — selesai: Quaternius Ultimate Modular Men Pack, tujuh model CC0 dengan rig yang sama.
 2. Expose owner-scoped Agent Availability dari unresolved dispatch dan fresh Activity Event projection — implementasi ada; boundary tests dan isolated PostgreSQL integration pass.
-3. Sediakan workstation, kursi unik Rest Room, pose duduk/mengetik, dan perpindahan waypoint — implementasi ada; regression test cover anchor-seat equality dan ≥2.4m seat-center clearance pada roster 21, authenticated desktop/mobile smoke pass. Browser-only status override memperlihatkan work/wait movement; belum menjadi bukti Run nyata.
+3. Sediakan workstation, kursi unik Rest Room, pose duduk/mengetik, dan perpindahan waypoint — implementasi ada; regression test cover anchor-seat equality dan ≥2.4m seat-center clearance pada roster 21, authenticated desktop/mobile smoke pass. Office browser menampilkan Run nyata yang bekerja di workstation dan instance Offline persisted dalam pose inactive; test status override tetap hanya bukti visual tambahan, bukan runtime evidence.
 4. Render tujuh GLB berbeda, deterministic per ID dan collision-resolved selama roster ≤ katalog — implementasi ada; tujuh asset requests HTTP 200 dan tujuh instance aktif mendapat model berbeda.
 5. Camera, accessibility, responsive simplification, filter/deep link, Task shortcut, dan WebGL fallback — final authenticated browser smoke; WebGL fallback dan reduced-motion telah diverifikasi ulang; viewport 390×844 CSS tidak overflow dan menggunakan cap 8 detailed avatars.
-6. Ukur render time, FPS, draw calls, transfer/decode, dan interaction pada desktop/mobile hardware profile — preliminary: 20 browser-only synthetic working agents menghasilkan satu foreground sample 59.3 FPS selama 3.5 detik setelah desktop meminta high-performance; sample low-power sebelumnya 1.7 FPS. Browser profile: 1867×931 CSS, DPR 1, Brave/Chrome 156, 6 logical CPUs, deviceMemory 8 GiB reported. GPU identity masked; belum menjadi target hardware yang disetujui. Cold render, draw calls, transfer/decode, mobile benchmark, dan persetujuan profile tetap gate Phase 4.
+6. Verifikasi performa/integrasi — FR-3D-009 responsive smoke: viewport 390×844 CSS menghasilkan document width 375px tanpa horizontal overflow; seluruh 20 record dapat dipilih; satu canvas dan sign Reception tampil; key membedakan enam Office Area assignable dari Reception. Pada profil reference Owner (1440×900 CSS, DPR 1.25, Chrome 156, 6 logical CPUs, 8 GiB reported), satu sample RAF focused/visible 20-agent synthetic menghasilkan 34.3 FPS selama 5.099 detik, di atas target awal ≥30 FPS. Sample ini bukan tes perangkat pilot fisik. Diagnostik asset sebelumnya merekam 8 GLB (2,080,571 encoded-body bytes), tetapi transferSize 2,400 bytes menunjukkan cached-resource timing dan tidak mengukur uncached transfer. Cold-load, draw calls, GPU identity, serta mobile/pilot fisik tetap tidak diverifikasi.
 
-## Pertanyaan Terbuka
+## Keputusan dan Batas Verifikasi
 
-- [perlu konfirmasi: hardware/browser/DPR/network profile untuk acceptance render, mobile, dan benchmark FPS] — browser profile saat ini tercatat di [progress register](../progress.md), tetapi belum disetujui Owner sebagai target pilot; GPU identifier masked.
-- Offline→Inactive is implemented from persisted Runtime Session evidence: an unresolved leased dispatch, active Run projection, `session.heartbeat` older than 30 seconds, and no later Activity Event. API unit/PostgreSQL tests cover the projection; browser rendering of an actual Offline instance remains unverified because the last API recreation invalidated the in-memory Owner session and `/office` now requires sign-in. `activity_0019` upgrade/downgrade/upgrade and event projection passed isolated PostgreSQL tests. Two independent cross-provider live Runs remain unverified; keep the same-account Codex Launcher guard. Current real failure/reconnect visual evidence and target-profile performance/hardware acceptance remain open. Earlier Phase 3 Redis outage/replay verification is separate evidence. FR-3D-007/008 workspace assignment/allocation remain deferred.
-- Workspace assignment tersimpan dan dynamic workspace allocation tetap P1 yang belum diimplementasikan; waypoint current hanya presentasi mengikuti `Agent Availability`.
-- [perlu konfirmasi: reviewer] — terbuka.
-
+- Referensi performa yang disetujui Owner: Chrome 156, 1440×900 CSS, DPR 1.25; sample versi terkini focused/visible memberi 34.3 FPS selama 5.099 detik pada 20 instance synthetic (6 logical CPUs, 8 GiB reported). Ini bukti lokal pada fixture, bukan klaim kapasitas produksi atau pilot hardware; GPU identity masked.
+- Offline→Inactive terbukti pada probe live Run `7ca1195b-5775-40ac-9a35-249c4292068f`: heartbeat persisted, dispatch leased, API mengembalikan `offline`, Office menampilkan `1 offline`; setelah Runner dipulihkan, Run sukses dan availability kembali idle. Actual controlled HTTP 503 failure and network offline→online restored the feed; synthetic fresh `run.failed` showed the scene’s `Failed` cue, and closing/reconnecting the fixture’s WebSocket displayed `disconnected` → `connected`. A live provider-failure avatar rendering and behavior during a real network partition were not claimed.
+- Dua Runs live lintas Codex+NineRouter overlap dan sukses. Guard same-account Codex HTTP 429 tetap dipertahankan di Phase 6.
+- FR-3D-007/008 telah diimplementasikan: assignment `office_area` persisten, area least-populated deterministic, workstation unik dan layout elastis. Migration `office_area_0020`, owner/archive boundary, legacy backfill, dan layout diuji; browser fixture menampilkan enam nama area.
+- Keputusan Owner (2026-11-01): Reception adalah ruang fisik bersama, bukan Office Area ketujuh, lokasi default, atau assignment Agent Instance. PRD §14.1 dan FR-3D-007 kini konsisten: enam Office Area tetap menjadi pilihan persistensi; Reception hanya berada pada scene bersama.
+- Independent code review menemukan geometri Reception awalnya hanya diuji lewat jalur balanced-count; regression test kini mencakup juga layout dari persisted Office Area array. Re-review: no findings. Design doc tetap `In Review` sampai human review sesuai status flow di `README.md`.
 ## Referensi
 
 - [PRD — Dynamic AI Agent Virtual Office](../../PRD%20%E2%80%94%20Dynamic%20AI%20Agent%20Virtual%20Office.md), §13–16, §24, §26.

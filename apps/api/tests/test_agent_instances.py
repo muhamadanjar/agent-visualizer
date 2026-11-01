@@ -29,10 +29,10 @@ class AgentInstance:
     definition_name: str
     project_id: UUID | None
     project_name: str | None
+    office_area: str
     archived_at: datetime | None
     created_at: datetime
     updated_at: datetime
-
 
 class MemoryProjectRepository:
     def __init__(self) -> None:
@@ -75,13 +75,31 @@ class MemoryAgentInstanceRepository:
         project = self.projects.projects.get(instance.project_id) if instance.project_id else None
         return replace(instance, definition_name=definition.name, project_name=project.name if project else None)
 
-    async def create(self, owner_id: str, display_name: str, definition_id: UUID, project_id: UUID | None) -> AgentInstance:
+    async def create(
+        self,
+        owner_id: str,
+        display_name: str,
+        definition_id: UUID,
+        project_id: UUID | None,
+        office_area: str | None = None,
+    ) -> AgentInstance:
         now = datetime.now(UTC)
         definition = self.definitions.definitions[definition_id]
         project = self.projects.projects.get(project_id) if project_id else None
-        instance = AgentInstance(uuid4(), owner_id, display_name, definition_id, definition.name, project_id, project.name if project else None, None, now, now)
+        if office_area is None:
+            counts: dict[str, int] = {}
+            for existing in self.instances.values():
+                if existing.owner_id == owner_id and existing.archived_at is None:
+                    counts[existing.office_area] = counts.get(existing.office_area, 0) + 1
+            from app.domain.instances import least_populated_office_area
+            office_area = least_populated_office_area(counts)
+        instance = AgentInstance(
+            uuid4(), owner_id, display_name, definition_id, definition.name,
+            project_id, project.name if project else None, office_area, None, now, now,
+        )
         self.instances[instance.id] = instance
         return instance
+
 
     async def list_for_owner(
         self,
@@ -176,6 +194,81 @@ def test_instance_creation_list_detail_and_project_placement_are_persisted() -> 
         assert client.get(f"/api/v1/agent-instances/{record['id']}").json() == record
         assert client.get(f"/api/v1/agent-instances?project_id={project.id}").json() == [record]
         assert client.get("/api/v1/agent-instances", headers={"cookie": ""}).status_code == 401
+
+
+def test_office_area_is_auto_allocated_and_owner_editable() -> None:
+    repositories = Repositories()
+    definition = Definition(uuid4(), "owner", "Reviewer")
+    repositories.definitions.definitions[definition.id] = definition
+
+    with make_client(repositories) as client:
+        authorized(client)
+        first = client.post(
+            "/api/v1/agent-instances",
+            headers={"origin": ORIGIN},
+            json={"display_name": "Architecture", "definition_id": str(definition.id)},
+        )
+        second = client.post(
+            "/api/v1/agent-instances",
+            headers={"origin": ORIGIN},
+            json={"display_name": "Engineering", "definition_id": str(definition.id)},
+        )
+        explicit = client.post(
+            "/api/v1/agent-instances",
+            headers={"origin": ORIGIN},
+            json={
+                "display_name": "Lounge",
+                "definition_id": str(definition.id),
+                "office_area": "lounge",
+            },
+        )
+
+        assert first.status_code == second.status_code == explicit.status_code == 201
+        assert first.json()["office_area"] == "architecture"
+        assert second.json()["office_area"] == "engineering"
+        assert explicit.json()["office_area"] == "lounge"
+        updated = client.put(
+            f"/api/v1/agent-instances/{first.json()['id']}",
+            headers={"origin": ORIGIN},
+            json={"office_area": "security"},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["office_area"] == "security"
+        assert updated.json()["project_id"] is None
+        invalid = client.put(
+            f"/api/v1/agent-instances/{first.json()['id']}",
+            headers={"origin": ORIGIN},
+            json={"office_area": "filesystem"},
+        )
+        assert invalid.status_code == 422
+
+
+def test_office_area_cannot_be_updated_for_foreign_or_archived_instance() -> None:
+    repositories = Repositories()
+    definition = Definition(uuid4(), "owner", "Writer")
+    repositories.definitions.definitions[definition.id] = definition
+
+    with make_client(repositories) as client:
+        authorized(client)
+        created = client.post(
+            "/api/v1/agent-instances",
+            headers={"origin": ORIGIN},
+            json={"display_name": "Private", "definition_id": str(definition.id)},
+        ).json()
+        assert client.put(
+            f"/api/v1/agent-instances/{uuid4()}",
+            headers={"origin": ORIGIN},
+            json={"office_area": "review"},
+        ).status_code == 404
+        client.post(
+            f"/api/v1/agent-instances/{created['id']}/archive",
+            headers={"origin": ORIGIN},
+        )
+        assert client.put(
+            f"/api/v1/agent-instances/{created['id']}",
+            headers={"origin": ORIGIN},
+            json={"office_area": "review"},
+        ).status_code == 404
 
 
 def test_foreign_definition_or_project_cannot_be_linked_or_inspected() -> None:

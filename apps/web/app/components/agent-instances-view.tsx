@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { OFFICE_AREAS, OFFICE_AREA_LABELS, type OfficeArea } from "./office-layout";
 import { PageHeader, StatusPill } from "./workspace-components";
 
 type AgentInstance = {
@@ -12,6 +13,7 @@ type AgentInstance = {
   definition_name: string;
   project_id: string | null;
   project_name: string | null;
+  office_area: OfficeArea;
   archived: boolean;
   created_at: string;
   updated_at: string;
@@ -102,7 +104,7 @@ export function AgentInstancesView() {
                 <StatusPill tone={instance.archived ? "amber" : "green"}>{instance.archived ? "Archived" : "Registered"}</StatusPill>
               </div>
               <p className="agent-summary">Persistent instance identity. Runtime session and live work status are separate and are not connected here.</p>
-              <dl className="agent-meta"><div><dt>Project</dt><dd>{instance.project_name ?? "Unassigned"}</dd></div><div><dt>Office location</dt><dd>Not configured</dd></div></dl>
+              <dl className="agent-meta"><div><dt>Project</dt><dd>{instance.project_name ?? "Unassigned"}</dd></div><div><dt>Office area</dt><dd>{OFFICE_AREA_LABELS[instance.office_area]}</dd></div></dl>
               <div className="agent-card-footer"><Link className="text-link" href={`/agents/${instance.id}`}>Open instance</Link><span className="muted">API-backed</span></div>
             </article>
           ))}
@@ -121,6 +123,7 @@ export function AgentInstanceEditor({ instanceId }: { instanceId?: string }) {
   const [displayName, setDisplayName] = useState("");
   const [definitionId, setDefinitionId] = useState("");
   const [projectId, setProjectId] = useState("");
+  const [officeArea, setOfficeArea] = useState<OfficeArea | "">("");
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -144,6 +147,7 @@ export function AgentInstanceEditor({ instanceId }: { instanceId?: string }) {
         setDisplayName(loadedInstance.display_name);
         setDefinitionId(loadedInstance.definition_id);
         setProjectId(loadedInstance.project_id ?? "");
+        setOfficeArea(loadedInstance.office_area);
       } else if (loadedDefinitions.length > 0) {
         setDefinitionId(loadedDefinitions.find((definition) => definition.enabled && !definition.archived)?.id ?? "");
       }
@@ -170,6 +174,7 @@ export function AgentInstanceEditor({ instanceId }: { instanceId?: string }) {
             display_name: displayName.trim(),
             definition_id: definitionId,
             project_id: projectId || null,
+            office_area: officeArea || undefined,
           }),
         },
       );
@@ -177,6 +182,7 @@ export function AgentInstanceEditor({ instanceId }: { instanceId?: string }) {
       setDisplayName(result.display_name);
       setDefinitionId(result.definition_id);
       setProjectId(result.project_id ?? "");
+      setOfficeArea(result.office_area);
       if (!instanceId) router.replace(`/agents/${result.id}`);
     } catch (reason) {
       setSaveError(reason instanceof Error ? reason.message : "Could not save the agent instance.");
@@ -219,9 +225,10 @@ export function AgentInstanceEditor({ instanceId }: { instanceId?: string }) {
         <div className="section-heading"><h2>{instance ? "Instance configuration" : "Register identity"}</h2><StatusPill>Owner scoped · persisted</StatusPill></div>
         <label className="preview-field">Display name<input value={displayName} onChange={(event) => setDisplayName(event.target.value)} minLength={1} maxLength={120} autoComplete="off" required disabled={!canEdit} /></label>
         <label className="preview-field">Agent definition<select value={definitionId} onChange={(event) => setDefinitionId(event.target.value)} required disabled={!canEdit || (!instance && !hasActiveDefinition)}><option value="" disabled>Select an enabled definition</option>{definitions.map((definition) => <option key={definition.id} value={definition.id} disabled={definition.archived || !definition.enabled}>{definition.name}{definition.archived ? " · Archived" : !definition.enabled ? " · Disabled" : ` · v${definition.version}`}</option>)}</select></label>
-        <label className="preview-field">Project placement <span className="field-note">This associates the instance with project context only; it does not grant project permissions or place an avatar at a physical desk.</span><select value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={!canEdit}><option value="">No project</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
+        <label className="preview-field">Project association <span className="field-note">Project context only; this does not grant project permissions or control the avatar’s visual office area.</span><select value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={!canEdit}><option value="">No project</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
+        <label className="preview-field">Visual office area <span className="field-note">A presentation-only zone. New instances use the least-populated area when automatic placement is selected.</span><select value={officeArea} onChange={(event) => setOfficeArea(event.target.value as OfficeArea | "")} disabled={!canEdit}><option value="" disabled={Boolean(instance)}>Auto-assign {instance ? "unavailable" : "(least populated)"}</option>{OFFICE_AREAS.map((area) => <option key={area} value={area}>{OFFICE_AREA_LABELS[area]}</option>)}</select></label>
         {selectedDefinition ? <div className="connection-placeholder"><strong>{selectedDefinition.name} · version {selectedDefinition.version}</strong><span>{selectedDefinition.description || "No description provided."}</span></div> : null}
-        {instance ? <dl className="preview-facts"><div><dt>Instance ID</dt><dd>{instance.id}</dd></div><div><dt>Office location</dt><dd>Not configured</dd></div><div><dt>Runtime session</dt><dd>Not attached</dd></div><div><dt>Created</dt><dd>{new Date(instance.created_at).toLocaleString()}</dd></div></dl> : null}
+        {instance ? <dl className="preview-facts"><div><dt>Instance ID</dt><dd>{instance.id}</dd></div><div><dt>Visual office area</dt><dd>{OFFICE_AREA_LABELS[instance.office_area]}</dd></div><div><dt>Runtime session</dt><dd>Not attached</dd></div><div><dt>Created</dt><dd>{new Date(instance.created_at).toLocaleString()}</dd></div></dl> : null}
         {!instance && !hasActiveDefinition ? <p className="inline-error" role="status">Create and enable a definition before registering an instance. <Link href="/agents/definitions/new">Create definition</Link></p> : null}
         {saveError ? <p className="inline-error" role="alert">{saveError}</p> : null}
         <div className="form-actions">

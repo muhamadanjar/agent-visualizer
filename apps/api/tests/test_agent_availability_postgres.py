@@ -66,9 +66,10 @@ def test_postgres_availability_is_owner_scoped_and_excludes_archived_instances()
                     )
                     await connection.execute(
                         text(
-                            "INSERT INTO agent_instances (id, owner_id, display_name, definition_id) "
-                            "VALUES (:active_id, :owner_id, 'Active availability test', :definition_id), "
-                            "(:archived_id, :owner_id, 'Archived availability test', :definition_id)"
+                            "INSERT INTO agent_instances "
+                            "(id, owner_id, display_name, definition_id, office_area) "
+                            "VALUES (:active_id, :owner_id, 'Active availability test', :definition_id, 'architecture'), "
+                            "(:archived_id, :owner_id, 'Archived availability test', :definition_id, 'architecture')"
                         ),
                         {
                             "active_id": active_instance_id,

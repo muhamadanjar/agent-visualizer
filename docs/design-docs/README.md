@@ -7,7 +7,7 @@ Dokumen-dokumen ini merinci keputusan arsitektur berdasarkan [PRD baru](../../PR
 | [01 — Agent Registry & Agent Factory](2026-10-27-01-agent-registry.md) | Agent definitions, versions, CRUD/archive, permissions, Model Endpoint, Agent Factory | In Review | 2026-10-27 |
 | [02 — Agent Runtime](2026-10-27-02-agent-runtime.md) | LangChain execution, workers, runtime adapters, cancellation, lifecycle | In Review | 2026-10-27 |
 | [03 — Event System](2026-10-27-03-event-system.md) | Event schema/persistence, Redis Streams, WebSocket, reconnect, state synchronization | In Review | 2026-10-28 |
-| [04 — Virtual Office 3D](2026-10-27-04-virtual-office-3d.md) | Three.js, karakter, animasi, workstation, kamera, performance | In Review | 2026-10-29 |
+| [04 — Virtual Office 3D](2026-10-27-04-virtual-office-3d.md) | Three.js, karakter, animasi, workstation, Reception bersama, kamera, performance | In Review | 2026-11-01 |
 | [05 — Multi-Agent Orchestration](2026-10-27-05-multi-agent-orchestration.md) | LangGraph supervisor, task dependencies, dynamic routing, agent collaboration | Draft | 2026-10-27 |
 | [06 — Codex Subscription via Model Gateway](2026-10-30-06-codex-subscription.md) | Usulan gateway/broker privat untuk provider Codex, LangChain dan 9Router tetap tersedia; auth, policy dan acceptance belum terbukti | In Review | 2026-10-30 |
 
@@ -15,4 +15,4 @@ Dokumen-dokumen ini merinci keputusan arsitektur berdasarkan [PRD baru](../../PR
 
 `Draft → In Review → Approved → Implemented`. Status hanya berpindah ke `In Review` setelah human review. `Rejected` dan `Deprecated` adalah status terminal.
 
-Setiap design doc mencatat asumsi/keputusan yang belum terverifikasi di bagian **Pertanyaan Terbuka**. Status `Approved` bukan bukti implementasi; `Implemented` memerlukan deliverable dan acceptance evidence pada progress register.
+Setiap design doc mencatat asumsi/keputusan yang belum terverifikasi pada bagian yang eksplisit (umumnya **Pertanyaan Terbuka**). Status `Approved` bukan bukti implementasi; `Implemented` memerlukan deliverable dan acceptance evidence pada progress register.
