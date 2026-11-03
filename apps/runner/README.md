@@ -18,9 +18,9 @@ The Runner is the host-side supervisor for explicit, persisted Task Runs. It aut
 
 ## Deployment
 
-Compose runs Runner and Runtime Launcher privately without published ports. Runner receives the API/Launcher tokens and state, but not the provider key. Runtime Launcher receives `RUNTIME_LAUNCHER_TOKEN`, `NINEROUTER_KEY`, a Docker socket mount, and the workspace-root bind mount; it is trusted host-control software. It injects the provider key only into the per-Run worker container. The worker receives neither shared token nor Docker socket.
+Compose runs Runner and Runtime Launcher privately without published ports. Runner receives the API/Launcher tokens and state, but not the provider key. Runtime Launcher receives `RUNTIME_LAUNCHER_TOKEN`, the separate `ORCHESTRATION_INFERENCE_TOKEN`, `NINEROUTER_KEY`, a Docker socket mount, and the workspace-root bind mount; it is trusted host-control software. It injects the provider key only into the per-Run worker container. The worker receives neither shared token nor Docker socket. The planning-only orchestration route is not exposed to Runner workers or browsers.
 
-`scripts/bootstrap-env.sh` creates both shared tokens and UID/GID defaults without overwriting an existing `.env`. `RUNNER_UID`/`RUNNER_GID` identify the non-root worker and workspace ownership. Configure the selected Model Endpoint URL in the application and provide `NINEROUTER_KEY` to Compose; Compose passes the credential only to Runtime Launcher, which supplies it to the worker for provider-backed Runs.
+`scripts/bootstrap-env.sh` creates `RUNNER_SHARED_TOKEN`, `RUNTIME_LAUNCHER_TOKEN`, and `ORCHESTRATION_INFERENCE_TOKEN`, plus UID/GID defaults, without overwriting an existing `.env`. The inference-only token is shared only by API and Runtime Launcher. `RUNNER_UID`/`RUNNER_GID` identify the non-root worker and workspace ownership. Configure the selected Model Endpoint URL in the application and provide `NINEROUTER_KEY` to Compose; Compose passes the credential only to Runtime Launcher, which supplies it to the worker for provider-backed Runs.
 
 ## Remaining P0 limits
 

@@ -135,7 +135,7 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
             await apply_alembic_migrations(dsn)
             assert await connection.fetchval(
                 "SELECT version_num FROM alembic_version"
-            ) == "office_area_0020"
+            ) == "orchestration_0023"
             backfilled_areas = await connection.fetch(
                 "SELECT id, office_area FROM agent_instances "
                 "WHERE owner_id = $1 AND id = ANY($2::uuid[])",
@@ -309,13 +309,14 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                 ("runs", ("SELECT", "INSERT")),
                 ("provider_configs", ("SELECT", "INSERT", "UPDATE")),
                 ("model_endpoints", ("SELECT", "INSERT", "UPDATE")),
+                ("approval_requests", ("SELECT", "INSERT", "UPDATE")),
             ):
                 for privilege in privileges:
                     assert await connection.fetchval(
                         "SELECT has_table_privilege($1, $2, $3)",
                         app_role_name, f"public.{table}", privilege,
                     )
-                update_allowed = table in {"tasks", "provider_configs", "model_endpoints"}
+                update_allowed = table in {"tasks", "provider_configs", "model_endpoints", "approval_requests"}
                 assert await connection.fetchval(
                     "SELECT has_table_privilege($1, $2, 'UPDATE')",
                     app_role_name, f"public.{table}",
@@ -773,6 +774,7 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                 first_task.id,
                 run_request_id,
                 execution_policy_revision=execution_policy.revision,
+                dependency_outputs={"upstream": {"decision": "approved"}},
             )
             assert created is True
             assert first_run.attempt_number == 1
@@ -791,13 +793,19 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                 "adapter": "openai_compatible_chat_completions",
                 "endpoint_url": "http://localhost:20128/v1",
                 "credential_env": "NINEROUTER_KEY",
+                "model_id": "openrouter/cohere/north-mini-code:free",
+                "route": "free",
             }
             assert first_run.configuration_snapshot["runtime"] == {"id": "langchain"}
+            assert first_run.configuration_snapshot["task"]["dependency_outputs"] == {
+                "upstream": {"decision": "approved"}
+            }
             replayed_run, created = await run_repository.create_for_task(
                 restricted_owner_id,
                 first_task.id,
                 run_request_id,
                 execution_policy_revision=execution_policy.revision,
+                dependency_outputs={"upstream": {"decision": "approved"}},
             )
             assert created is False
             assert replayed_run.id == first_run.id
@@ -1982,6 +1990,18 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                         runner_id,
                         expiry,
                     )
+                await connection.execute("DROP TABLE orchestration_delegations")
+                await connection.execute("DROP TABLE orchestration_checkpoints")
+                await connection.execute("DROP TABLE orchestration_leases")
+                await connection.execute(
+                    "DROP FUNCTION prevent_orchestration_delegation_immutable_update()"
+                )
+                await connection.execute(
+                    "ALTER TABLE task_revisions "
+                    "DROP CONSTRAINT task_revisions_output_schema_object_check, "
+                    "DROP CONSTRAINT task_revisions_tool_scope_check, "
+                    "DROP COLUMN output_schema, DROP COLUMN tool_scope"
+                )
                 await connection.execute(
                     "UPDATE alembic_version SET version_num = 'execution_0009'"
                 )
@@ -2066,7 +2086,7 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
             ) == "blocked"
             assert await connection.fetchval(
                 "SELECT version_num FROM alembic_version"
-            ) == "office_area_0020"
+            ) == "orchestration_0023"
         finally:
             if restricted_pool is not None:
                 await restricted_pool.close()

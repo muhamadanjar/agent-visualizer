@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "side-tab",
+        "value": "*",
+        "files": [
+          "apps/web/app/globals.css"
+        ],
+        "createdAt": "2026-11-02T04:51:12.771Z",
+        "reason": "intentional semantic preflight status indicator, not a card accent tab"
+      }
+    ]
+  }
+}

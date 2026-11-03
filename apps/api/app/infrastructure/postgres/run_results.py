@@ -7,7 +7,9 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.domain.run_results import RunResult, RunResultConflictError
+from app.domain.orchestration import WorkflowLeaseBinding
 from app.infrastructure.postgres.models import RunResultTable
+from app.infrastructure.postgres.raw_sql import RawSQLExecutor, require_workflow_lease
 
 MAX_RUN_RESULT_BYTES = 1_048_576
 
@@ -27,7 +29,8 @@ class PostgresRunResultRepository:
         self._sessions = sessions
 
     async def create_for_run(
-        self, owner_id: str, run_id: UUID, text: str
+        self, owner_id: str, run_id: UUID, text: str, *,
+        workflow_lease: WorkflowLeaseBinding | None = None,
     ) -> tuple[RunResult, bool]:
         if not text.strip():
             raise ValueError("Run Result must not be blank")
@@ -48,6 +51,11 @@ class PostgresRunResultRepository:
             .returning(RunResultTable)
         )
         async with self._sessions.begin() as session:
+            if workflow_lease is not None:
+                await require_workflow_lease(
+                    RawSQLExecutor(session), workflow_lease,
+                    owner_id=owner_id, parent_run_id=run_id,
+                )
             inserted = (await session.execute(statement)).scalar_one_or_none()
             if inserted is not None:
                 return _result(inserted), True

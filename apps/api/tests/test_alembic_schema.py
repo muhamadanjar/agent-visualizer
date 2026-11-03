@@ -42,6 +42,9 @@ EXPECTED_APPLICATION_TABLES = {
     "runner_connections",
     "run_dispatches",
     "run_results",
+    "orchestration_delegations",
+    "orchestration_checkpoints",
+    "orchestration_leases",
 }
 
 

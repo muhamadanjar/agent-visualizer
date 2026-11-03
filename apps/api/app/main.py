@@ -23,6 +23,8 @@ from app.domain.model_endpoints import ModelEndpointRepository
 from app.domain.registry import AgentRegistryRepository
 from app.domain.runs import RunRepository
 from app.domain.run_results import RunResultRepository
+from app.domain.orchestration import OrchestrationRepository
+from app.application.workflow_controller import WorkflowController, controller_loop
 from app.domain.skills import SkillRepository
 from app.domain.tasks import TaskRepository
 from app.infrastructure.postgres.evidence import (
@@ -38,6 +40,7 @@ from app.infrastructure.postgres.model_endpoints import PostgresModelEndpointRep
 from app.infrastructure.postgres.registry import PostgresAgentRegistryRepository
 from app.infrastructure.postgres.runs import PostgresRunRepository
 from app.infrastructure.postgres.run_results import PostgresRunResultRepository
+from app.infrastructure.postgres.orchestration import PostgresOrchestrationRepository
 from app.infrastructure.postgres.skills import PostgresSkillRepository
 from app.infrastructure.postgres.tasks import PostgresTaskRepository
 from app.infrastructure.redis.activity_stream import (
@@ -82,6 +85,7 @@ def create_app(
     artifact_repository: ArtifactRepository | None = None,
     office_scene_repository: OfficeSceneRepository | None = None,
     run_result_repository: RunResultRepository | None = None,
+    orchestration_repository: OrchestrationRepository | None = None,
 ) -> FastAPI:
     configured = settings or load_settings()
     verify_database = database_check or (
@@ -101,6 +105,7 @@ def create_app(
         ("artifact_repository", artifact_repository),
         ("office_scene_repository", office_scene_repository),
         ("run_result_repository", run_result_repository),
+        ("orchestration_repository", orchestration_repository),
     )
 
     @asynccontextmanager
@@ -135,6 +140,7 @@ def create_app(
         application.state.artifact_repository = PostgresArtifactRepository(sessions)
         application.state.office_scene_repository = PostgresOfficeSceneRepository(sessions)
         application.state.run_result_repository = PostgresRunResultRepository(sessions)
+        application.state.orchestration_repository = PostgresOrchestrationRepository(sessions)
         redis = Redis.from_url(
             configured.redis_url,
             decode_responses=True,
@@ -142,6 +148,14 @@ def create_app(
             socket_timeout=5,
         )
         stop = asyncio.Event()
+        application.state.workflow_controller = WorkflowController(
+            application.state.orchestration_repository,
+            application.state.run_repository,
+            application.state.execution_repository,
+            application.state.approval_repository,
+            application.state.activity_event_repository,
+            application.state.run_result_repository,
+        )
         consumer_ready = asyncio.Event()
         hub = ActivityEventHub()
         application.state.activity_event_hub = hub
@@ -150,6 +164,7 @@ def create_app(
             asyncio.create_task(
                 publish_outbox(activity_events, redis, stop, consumer_ready)
             ),
+            asyncio.create_task(controller_loop(application.state.workflow_controller, stop)),
         )
         try:
             yield

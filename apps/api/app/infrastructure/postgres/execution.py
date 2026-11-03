@@ -20,6 +20,7 @@ from app.domain.execution import (
     WorkspacePolicy,
     WorkspacePolicyDraft,
 )
+from app.domain.orchestration import WorkflowLeaseBinding
 from app.infrastructure.postgres.models import (
     AgentInstanceTable,
     ProjectExecutionPolicyTable,
@@ -28,6 +29,7 @@ from app.infrastructure.postgres.models import (
     RunTable,
     RunnerConnectionTable,
 )
+from app.infrastructure.postgres.raw_sql import RawSQLExecutor, require_workflow_lease
 
 
 def _workspace_policy(row: ProjectExecutionPolicyTable) -> WorkspacePolicy:
@@ -411,9 +413,17 @@ class PostgresExecutionRepository:
                 task_revision=task_revision,
             )
 
-    async def request_cancellation(self, owner_id: str, run_id: UUID) -> str | None:
+    async def request_cancellation(
+        self, owner_id: str, run_id: UUID, *,
+        workflow_lease: WorkflowLeaseBinding | None = None,
+    ) -> str | None:
         now = datetime.now(UTC)
         async with self._sessions.begin() as session:
+            if workflow_lease is not None:
+                await require_workflow_lease(
+                    RawSQLExecutor(session), workflow_lease,
+                    owner_id=owner_id, parent_run_id=workflow_lease.parent_run_id,
+                )
             dispatch = await session.scalar(
                 select(RunDispatchTable)
                 .where(
@@ -434,6 +444,31 @@ class PostgresExecutionRepository:
                 dispatch.cancellation_requested_at = now
                 dispatch.updated_at = now
             return "cancellation_pending"
+
+    async def cancel_queued_run(
+        self, owner_id: str, run_id: UUID, *,
+        workflow_lease: WorkflowLeaseBinding | None = None,
+    ) -> bool:
+        now = datetime.now(UTC)
+        async with self._sessions.begin() as session:
+            if workflow_lease is not None:
+                await require_workflow_lease(
+                    RawSQLExecutor(session), workflow_lease,
+                    owner_id=owner_id, parent_run_id=workflow_lease.parent_run_id,
+                )
+            dispatch = await session.scalar(
+                select(RunDispatchTable)
+                .where(
+                    RunDispatchTable.owner_id == owner_id,
+                    RunDispatchTable.run_id == run_id,
+                )
+                .with_for_update()
+            )
+            if dispatch is None or dispatch.state != "queued":
+                return False
+            dispatch.state = "canceled"
+            dispatch.updated_at = now
+            return True
 
     async def get_cancellation_requests(self, runner_id: UUID) -> list[UUID]:
         now = datetime.now(UTC)

@@ -8,7 +8,9 @@ import logging
 import os
 import re
 import socket
+import ssl
 import threading
+import time
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import PurePosixPath
@@ -23,6 +25,18 @@ MAX_ACTIVE_RUNS = 2
 MAX_DURATION_SECONDS = 3600
 MAX_INFERENCE_TURNS = 24
 MAX_RESULT_BYTES = 1_048_576
+MAX_PLANNING_MESSAGES = 64
+MAX_PLANNING_MESSAGE_BYTES = 32 * 1024
+MAX_PLANNING_PROMPT_BYTES = 128 * 1024
+MAX_PLANNING_RESPONSE_BYTES = 256 * 1024
+MAX_PLANNING_TOKENS = 4096
+MAX_PLANNING_BODY_BYTES = 256 * 1024
+PLANNING_REQUEST_TIMEOUT_SECONDS = 60
+DEFAULT_ORCHESTRATION_PLANNING_ALLOWED_ENDPOINTS = (
+    "http://localhost:20128/proxy/v1,http://127.0.0.1:20128/proxy/v1"
+)
+_DNS_RESOLUTION_LOCK = threading.Lock()
+_DNS_RESOLUTION_THREAD: threading.Thread | None = None
 WORKER_MEMORY_BYTES = 2 * 1024 * 1024 * 1024
 WORKER_NANO_CPUS = 1_000_000_000
 WORKER_PIDS_LIMIT = 128
@@ -86,6 +100,54 @@ class _UnixHTTPConnection(http.client.HTTPConnection):
             connection.close()
             raise
         self.sock = connection
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection pinned to an already-validated public DNS answer."""
+
+    def __init__(
+        self, hostname: str, address: str, port: int, timeout: float, deadline: float
+    ) -> None:
+        super().__init__(hostname, port=port, timeout=timeout, context=ssl.create_default_context())
+        self._pinned_address = address
+        self._server_hostname = hostname
+        self._deadline = deadline
+
+    def connect(self) -> None:
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("planning deadline exceeded")
+        connection = socket.create_connection(
+            (self._pinned_address, self.port), timeout=remaining
+        )
+        self.sock = connection
+        try:
+            remaining = self._deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("planning deadline exceeded")
+            connection.settimeout(remaining)
+            self.sock = self._context.wrap_socket(
+                connection, server_hostname=self._server_hostname
+            )
+            remaining = self._deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("planning deadline exceeded")
+            self.sock.settimeout(remaining)
+        except BaseException:
+            failed_socket = self.sock
+            self.sock = None
+            if failed_socket is not None:
+                try:
+                    failed_socket.close()
+                except OSError:
+                    pass
+            connection.close()
+            raise
+
+    def send(self, data: bytes) -> None:
+        if time.monotonic() >= self._deadline:
+            raise TimeoutError("planning deadline exceeded")
+        super().send(data)
 
 
 class DockerEngine:
@@ -352,13 +414,50 @@ class RuntimeLauncher:
     def __init__(self) -> None:
         self._engine = DockerEngine()
         self._token = os.environ.get("RUNTIME_LAUNCHER_TOKEN", "").strip()
+        self._orchestration_token = os.environ.get("ORCHESTRATION_INFERENCE_TOKEN", "").strip()
         self._worker_image = os.environ.get("RUN_WORKER_IMAGE", "").strip()
         self._proxy_image = os.environ.get("RUNTIME_PROXY_IMAGE", "").strip()
         self._worker_uid, self._worker_gid = _worker_identity()
         self._model_key = os.environ.get("NINEROUTER_KEY", "").strip()
         self._lock = threading.RLock()
+        self._planning_slots = threading.BoundedSemaphore(1)
+        self._planning_gateway_active = False
         self._host_workspace_root: str | None = None
         self._orphans_reconciled = False
+    def planning_chat(self, payload: object) -> object:
+        request = _validate_planning_payload(payload)
+        endpoint = request["endpoint"]
+        credential = endpoint["credential_env"]
+        if not self._planning_slots.acquire(blocking=False):
+            raise LauncherError("Planning inference is busy", 429)
+        deadline = time.monotonic() + PLANNING_REQUEST_TIMEOUT_SECONDS
+        gateway_reserved = False
+        try:
+            if credential == "OMP_GATEWAY_KEY":
+                with self._lock:
+                    self._planning_gateway_active = True
+                    gateway_reserved = True
+                workers = self._engine.list_owned_workers()
+                if any(
+                    isinstance(row.get("Labels"), dict)
+                    and row["Labels"].get("agent-office.provider") == "omp-gateway"
+                    and row.get("State") == "running"
+                    for row in workers
+                ):
+                    raise LauncherError("Codex account already has an active Run", 429)
+                return _planning_gateway_request(
+                    request, _gateway_key(), deadline=deadline
+                )
+            if credential == "NINEROUTER_KEY":
+                return _planning_provider_request(
+                    request, self._model_key, deadline=deadline
+                )
+            raise LauncherError("Planning endpoint credential is invalid")
+        finally:
+            if gateway_reserved:
+                with self._lock:
+                    self._planning_gateway_active = False
+            self._planning_slots.release()
 
     def ready(self) -> dict[str, object]:
         if not self._token or not self._worker_image or not self._proxy_image:
@@ -474,6 +573,8 @@ class RuntimeLauncher:
         worker_name = "ao-worker-" + UUID(run_id).hex
         proxy_name = "ao-proxy-" + UUID(run_id).hex
         with self._lock:
+            if credential == "OMP_GATEWAY_KEY" and self._planning_gateway_active:
+                raise LauncherError("Codex account is reserved for workflow planning", 429)
             existing = self._engine.list_owned_role(run_id, "worker")
             if existing:
                 container_id = existing[0].get("Id")
@@ -811,6 +912,350 @@ def _provider_target(endpoint_url: object) -> tuple[str, int]:
     if not address.is_global:
         raise LauncherError("Private Model Endpoint is not allowed")
     return host, port
+
+
+def _validate_planning_payload(payload: object) -> dict[str, object]:
+    if not isinstance(payload, dict) or set(payload) not in (
+        {"endpoint", "messages", "max_tokens"},
+        {"endpoint", "messages", "response_format", "max_tokens"},
+    ):
+        raise LauncherError("Planning request is invalid")
+    endpoint = payload.get("endpoint")
+    if not isinstance(endpoint, dict) or set(endpoint) != {"credential_env", "endpoint_url", "model_id"}:
+        raise LauncherError("Planning endpoint is invalid")
+    credential = endpoint.get("credential_env")
+    endpoint_url = endpoint.get("endpoint_url")
+    model_id = endpoint.get("model_id")
+    if credential not in {"OMP_GATEWAY_KEY", "NINEROUTER_KEY"} or not isinstance(endpoint_url, str) or not isinstance(model_id, str):
+        raise LauncherError("Planning endpoint is invalid")
+    model_pattern = r"[A-Za-z0-9._:/+-]{1,200}" if credential == "NINEROUTER_KEY" else r"[A-Za-z0-9._:/-]{1,200}"
+    if len(endpoint_url) > 2048 or len(model_id) > 200 or not re.fullmatch(model_pattern, model_id):
+        raise LauncherError("Planning model is invalid")
+    messages = payload.get("messages")
+    if not isinstance(messages, list) or not 1 <= len(messages) <= MAX_PLANNING_MESSAGES:
+        raise LauncherError("Planning messages are invalid")
+    total = 0
+    normalized_messages: list[dict[str, str]] = []
+    for message in messages:
+        if not isinstance(message, dict) or set(message) != {"role", "content"}:
+            raise LauncherError("Planning message is invalid")
+        role, content = message.get("role"), message.get("content")
+        if role not in {"system", "user"} or not isinstance(content, str):
+            raise LauncherError("Planning message is invalid")
+        try:
+            encoded = content.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise LauncherError("Planning message is invalid") from error
+        if not encoded or len(encoded) > MAX_PLANNING_MESSAGE_BYTES:
+            raise LauncherError("Planning message is invalid")
+        total += len(encoded)
+        normalized_messages.append({"role": role, "content": content})
+    if total > MAX_PLANNING_PROMPT_BYTES:
+        raise LauncherError("Planning prompt exceeded size limit", 413)
+    max_tokens = payload.get("max_tokens")
+    if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or not 1 <= max_tokens <= MAX_PLANNING_TOKENS:
+        raise LauncherError("Planning token limit is invalid")
+    response_format = payload.get("response_format")
+    if response_format is not None and response_format != {"type": "json_object"}:
+        raise LauncherError("Planning response format is invalid")
+    parsed = {
+        "endpoint": {"credential_env": credential, "endpoint_url": endpoint_url, "model_id": model_id},
+        "messages": normalized_messages,
+        "max_tokens": max_tokens,
+    }
+    if response_format is not None:
+        parsed["response_format"] = response_format
+    return parsed
+
+
+def _planning_gateway_request(
+    request: dict[str, object], key: str, *, deadline: float | None = None
+) -> object:
+    if not key:
+        raise LauncherError("Planning endpoint is unavailable", 503)
+    endpoint = request["endpoint"]
+    assert isinstance(endpoint, dict)
+    if endpoint["endpoint_url"] != GATEWAY_ENDPOINT or not re.fullmatch(r"openai-codex/[A-Za-z0-9._-]+", endpoint["model_id"]):
+        raise LauncherError("Planning gateway endpoint is invalid")
+    return _planning_http_request(
+        _UnixHTTPConnection(
+            GATEWAY_SOCKET, timeout=PLANNING_REQUEST_TIMEOUT_SECONDS
+        ),
+        "/v1/chat/completions",
+        request,
+        {"Host": "localhost:14000", "Authorization": "Bearer " + key},
+        secret=key,
+        deadline=deadline,
+    )
+
+
+def _planning_provider_endpoint(value: str) -> tuple[str, str, int, str]:
+    try:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+            or not parsed.path.startswith("/")
+        ):
+            raise ValueError("endpoint")
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as error:
+        raise LauncherError("Planning provider endpoint is invalid", 503) from error
+    return (
+        parsed.scheme,
+        parsed.hostname.lower().rstrip("."),
+        port,
+        parsed.path.rstrip("/") or "/",
+    )
+
+
+def _planning_provider_allowed_endpoints() -> set[tuple[str, str, int, str]]:
+    configured = os.environ.get(
+        "ORCHESTRATION_PLANNING_ALLOWED_ENDPOINTS",
+        DEFAULT_ORCHESTRATION_PLANNING_ALLOWED_ENDPOINTS,
+    )
+    endpoints: set[tuple[str, str, int, str]] = set()
+    for value in configured.split(","):
+        endpoint = value.strip()
+        if endpoint:
+            endpoints.add(_planning_provider_endpoint(endpoint))
+    return endpoints
+
+
+def _resolve_provider_addresses(host: str, port: int, deadline: float) -> list[tuple]:
+    global _DNS_RESOLUTION_THREAD
+    completed = threading.Event()
+    result: list[tuple] = []
+    failure: list[Exception] = []
+
+    def resolve() -> None:
+        try:
+            result.extend(socket.getaddrinfo(host, port, type=socket.SOCK_STREAM))
+        except Exception as error:
+            failure.append(error)
+        finally:
+            completed.set()
+
+    with _DNS_RESOLUTION_LOCK:
+        if _DNS_RESOLUTION_THREAD is not None and _DNS_RESOLUTION_THREAD.is_alive():
+            raise LauncherError("Planning provider resolution is busy", 503)
+        _DNS_RESOLUTION_THREAD = threading.Thread(
+            target=resolve, name="planning-dns-resolution", daemon=True
+        )
+        _DNS_RESOLUTION_THREAD.start()
+    remaining = deadline - time.monotonic()
+    if remaining <= 0 or not completed.wait(remaining):
+        raise LauncherError("Planning provider resolution timed out", 504)
+    if failure:
+        raise LauncherError("Planning provider endpoint is unavailable", 503) from failure[0]
+    return result
+
+
+def _planning_provider_request(
+    request: dict[str, object], key: str, *, deadline: float | None = None
+) -> object:
+    if not key or len(key) > 4096 or any(ord(c) < 33 or ord(c) > 126 for c in key):
+        raise LauncherError("Planning endpoint is unavailable", 503)
+    endpoint = request["endpoint"]
+    assert isinstance(endpoint, dict)
+    endpoint_url = endpoint["endpoint_url"]
+    parsed_endpoint = _planning_provider_endpoint(endpoint_url)
+    if parsed_endpoint not in _planning_provider_allowed_endpoints():
+        raise LauncherError("Planning provider endpoint is not authorized")
+    scheme, host, port, base_path = parsed_endpoint
+    if deadline is None:
+        deadline = time.monotonic() + PLANNING_REQUEST_TIMEOUT_SECONDS
+    path = (base_path.rstrip("/") or "") + "/chat/completions"
+    if scheme == "http":
+        if host not in {"localhost", "127.0.0.1"} or port != 20128:
+            raise LauncherError("Planning provider endpoint is not allowed")
+        return _planning_http_request(
+            http.client.HTTPConnection(
+                "host.docker.internal",
+                20128,
+                timeout=PLANNING_REQUEST_TIMEOUT_SECONDS,
+            ),
+            path,
+            request,
+            {"Host": "host.docker.internal:20128", "Authorization": "Bearer " + key},
+            secret=key,
+            deadline=deadline,
+        )
+    if scheme != "https":
+        raise LauncherError("Planning provider endpoint is invalid")
+    answers = _resolve_provider_addresses(host, port, deadline)
+    addresses = {item[4][0] for item in answers if item[4]}
+    if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
+        raise LauncherError("Planning provider endpoint is not public")
+    host_header = f"[{host}]:{port}" if ":" in host else (f"{host}:{port}" if port != 443 else host)
+    return _planning_http_request(
+        _PinnedHTTPSConnection(
+            host,
+            sorted(addresses)[0],
+            port,
+            timeout=PLANNING_REQUEST_TIMEOUT_SECONDS,
+            deadline=deadline,
+        ),
+        path,
+        request,
+        {"Host": host_header, "Authorization": "Bearer " + key},
+        secret=key,
+        deadline=deadline,
+    )
+
+
+def _set_planning_timeout(
+    connection: http.client.HTTPConnection, response: object, deadline: float
+) -> None:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise LauncherError("Planning inference timed out", 504)
+    connection.timeout = remaining
+    sock = getattr(connection, "sock", None)
+    if sock is None:
+        raw = getattr(getattr(response, "fp", None), "raw", None)
+        sock = getattr(raw, "_sock", None)
+    if sock is not None:
+        sock.settimeout(remaining)
+
+
+def _planning_response(result: object, secret: str) -> dict[str, object]:
+    choices = result.get("choices") if isinstance(result, dict) else None
+    first = choices[0] if isinstance(choices, list) and choices else None
+    message = first.get("message") if isinstance(first, dict) else None
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, str):
+        raise LauncherError("Planning response is invalid", 502)
+    try:
+        content.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise LauncherError("Planning response is invalid", 502) from error
+    if secret:
+        content = content.replace(secret, "[REDACTED]")
+    return {"choices": [{"message": {"content": content}}]}
+
+
+def _planning_http_request(
+    connection: http.client.HTTPConnection,
+    path: str,
+    request: dict[str, object],
+    headers: dict[str, str],
+    *,
+    secret: str = "",
+    deadline: float | None = None,
+) -> object:
+    endpoint = request["endpoint"]
+    assert isinstance(endpoint, dict)
+    body: dict[str, object] = {
+        "model": endpoint["model_id"],
+        "messages": request["messages"],
+        "max_tokens": request["max_tokens"],
+    }
+    if "response_format" in request:
+        body["response_format"] = request["response_format"]
+    encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if deadline is None:
+        deadline = time.monotonic() + PLANNING_REQUEST_TIMEOUT_SECONDS
+    deadline_expired = threading.Event()
+    response: object | None = None
+    active_socket: object | None = None
+
+    def interrupt_expired_request() -> None:
+        deadline_expired.set()
+
+        def shutdown(sock: object | None) -> bool:
+            if sock is None:
+                return False
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+                return True
+            except OSError:
+                return False
+
+        connection_socket = getattr(connection, "sock", None)
+        if shutdown(connection_socket):
+            return
+        if active_socket is not connection_socket and shutdown(active_socket):
+            return
+        if response is not None:
+            raw = getattr(getattr(response, "fp", None), "raw", None)
+            response_socket = getattr(raw, "_sock", None)
+            if (
+                response_socket is not connection_socket
+                and response_socket is not active_socket
+            ):
+                shutdown(response_socket)
+
+    def check_deadline() -> None:
+        if deadline_expired.is_set() or time.monotonic() >= deadline:
+            raise LauncherError("Planning inference timed out", 504)
+
+    deadline_timer = threading.Timer(
+        max(0.0, deadline - time.monotonic()), interrupt_expired_request
+    )
+    deadline_timer.daemon = True
+    try:
+        deadline_timer.start()
+        _set_planning_timeout(connection, None, deadline)
+        connection.request(
+            "POST",
+            path,
+            body=encoded,
+            headers={"Content-Type": "application/json", "Accept": "application/json", **headers},
+        )
+        active_socket = getattr(connection, "sock", None)
+        _set_planning_timeout(connection, None, deadline)
+        response = connection.getresponse()
+        check_deadline()
+        if response.status != 200:
+            raise LauncherError("Planning inference failed", 502)
+        data = bytearray()
+        reader = getattr(response, "read1", None)
+        if reader is None:
+            _set_planning_timeout(connection, response, deadline)
+            data.extend(response.read(MAX_PLANNING_RESPONSE_BYTES + 1))
+            check_deadline()
+        else:
+            while len(data) <= MAX_PLANNING_RESPONSE_BYTES:
+                _set_planning_timeout(connection, response, deadline)
+                chunk = reader(min(8192, MAX_PLANNING_RESPONSE_BYTES + 1 - len(data)))
+                check_deadline()
+                if not chunk:
+                    break
+                data.extend(chunk)
+        if len(data) > MAX_PLANNING_RESPONSE_BYTES:
+            raise LauncherError("Planning response exceeded size limit", 502)
+        try:
+            result = json.loads(data)
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise LauncherError("Planning response is invalid", 502) from error
+        sanitized = _planning_response(result, secret)
+        check_deadline()
+        return sanitized
+    except LauncherError as error:
+        if deadline_expired.is_set() or time.monotonic() >= deadline:
+            raise LauncherError("Planning inference timed out", 504) from error
+        raise
+    except TimeoutError as error:
+        raise LauncherError("Planning inference timed out", 504) from error
+    except (OSError, ValueError, http.client.HTTPException) as error:
+        if deadline_expired.is_set() or time.monotonic() >= deadline:
+            raise LauncherError("Planning inference timed out", 504) from error
+        raise LauncherError("Planning inference unavailable", 503) from error
+    finally:
+        deadline_timer.cancel()
+        if response is not None:
+            close_response = getattr(response, "close", None)
+            if callable(close_response):
+                try:
+                    close_response()
+                except OSError:
+                    pass
+        connection.close()
 
 
 def _safe_relative_path(value: str) -> bool:
@@ -1213,13 +1658,17 @@ class LauncherRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
-        if not self._authenticate():
+        authenticated = self._authenticate_orchestration() if path == "/internal/planning/chat-completions" else self._authenticate()
+        if not authenticated:
             self._send_error(401, "unauthorized")
             return
         try:
-            body = self._read_json_body()
+            body = self._read_json_body(MAX_PLANNING_BODY_BYTES if path == "/internal/planning/chat-completions" else MAX_BODY_BYTES)
             if path == "/internal/runs":
                 self._send_json(201, self.launcher.start_run(body))
+                return
+            if path == "/internal/planning/chat-completions":
+                self._send_json(200, self.launcher.planning_chat(body))
                 return
             match = re.fullmatch(r"/internal/runs/([0-9a-fA-F-]{36})/stop", path)
             if match:
@@ -1253,7 +1702,12 @@ class LauncherRequestHandler(BaseHTTPRequestHandler):
             authorization, f"Bearer {expected}"
         )
 
-    def _read_json_body(self) -> object:
+    def _authenticate_orchestration(self) -> bool:
+        expected = self.launcher._orchestration_token
+        authorization = self.headers.get("Authorization", "")
+        return bool(expected) and hmac.compare_digest(authorization, f"Bearer {expected}")
+
+    def _read_json_body(self, limit: int = MAX_BODY_BYTES) -> object:
         if self.headers.get_content_type() != "application/json":
             raise LauncherError("JSON request body is required", 415)
         length = self.headers.get("Content-Length", "")
@@ -1261,7 +1715,7 @@ class LauncherRequestHandler(BaseHTTPRequestHandler):
             size = int(length)
         except ValueError as error:
             raise LauncherError("Request body length is invalid", 411) from error
-        if not 0 <= size <= MAX_BODY_BYTES:
+        if not 0 <= size <= limit:
             raise LauncherError("Request body exceeded size limit", 413)
         raw = self.rfile.read(size)
         if len(raw) != size:

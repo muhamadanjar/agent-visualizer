@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import socket
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -268,6 +270,571 @@ def test_start_payload_rejects_private_and_unencrypted_nonlocal_endpoints() -> N
         server._provider_target("https://127.0.0.1/v1")
     with pytest.raises(server.LauncherError):
         server._provider_target("http://localhost:8080/v1")
+
+
+def test_planning_payload_rejects_unknown_fields_tools_streaming_and_paths() -> None:
+    payload = {
+        "endpoint": {
+            "credential_env": "OMP_GATEWAY_KEY",
+            "endpoint_url": server.GATEWAY_ENDPOINT,
+            "model_id": "openai-codex/gpt-5.2",
+        },
+        "messages": [{"role": "user", "content": "Plan this."}],
+        "response_format": {"type": "json_object"},
+        "max_tokens": 128,
+    }
+    assert server._validate_planning_payload(payload)["messages"] == payload["messages"]
+    for extra in (
+        {"stream": False},
+        {"tools": []},
+        {"endpoint_url": server.GATEWAY_ENDPOINT},
+        {"path": "/v1/chat/completions"},
+        {"url": "https://provider.example/v1"},
+    ):
+        invalid = dict(payload)
+        invalid.update(extra)
+        with pytest.raises(server.LauncherError):
+            server._validate_planning_payload(invalid)
+
+
+def test_planning_endpoint_and_model_lengths_are_bounded() -> None:
+    payload = {
+        "endpoint": {"credential_env": "NINEROUTER_KEY", "endpoint_url": "https://provider.example/v1", "model_id": "model"},
+        "messages": [{"role": "user", "content": "Plan."}], "max_tokens": 1,
+    }
+    payload["endpoint"]["endpoint_url"] += "a" * 2100
+    with pytest.raises(server.LauncherError):
+        server._validate_planning_payload(payload)
+    payload["endpoint"]["endpoint_url"] = "https://provider.example/v1"
+    payload["endpoint"]["model_id"] = "m" * 201
+    with pytest.raises(server.LauncherError):
+        server._validate_planning_payload(payload)
+
+
+def test_planning_ninerouter_model_id_allows_plus() -> None:
+    payload = {
+        "endpoint": {"credential_env": "NINEROUTER_KEY", "endpoint_url": "https://provider.example/v1", "model_id": "provider/model+variant"},
+        "messages": [{"role": "user", "content": "Plan."}], "max_tokens": 1,
+    }
+    assert server._validate_planning_payload(payload)["endpoint"]["model_id"] == "provider/model+variant"
+
+
+def test_planning_unpaired_surrogate_is_a_generic_bad_message() -> None:
+    payload = {
+        "endpoint": {"credential_env": "NINEROUTER_KEY", "endpoint_url": "https://provider.example/v1", "model_id": "model"},
+        "messages": [{"role": "user", "content": "\ud800"}], "max_tokens": 1,
+    }
+    with pytest.raises(server.LauncherError, match="Planning message is invalid"):
+        server._validate_planning_payload(payload)
+
+
+def test_planning_provider_preserves_allowlisted_base_path_and_non_default_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "ORCHESTRATION_PLANNING_ALLOWED_ENDPOINTS",
+        "https://provider.example:8443/proxy/v1",
+    )
+    requests: list[tuple[str, dict[str, str]]] = []
+
+    class Connection:
+        def __init__(self, *_args: object, **_kwargs: object) -> None: pass
+        def request(self, _method: str, path: str, **kwargs: object) -> None:
+            requests.append((path, kwargs["headers"]))
+        def getresponse(self) -> object:
+            return type("Response", (), {"status": 200, "read": lambda _self, _limit: b'{"choices":[{"message":{"content":"{}"}}]}'})()
+        def close(self) -> None: pass
+
+    monkeypatch.setattr(server.socket, "getaddrinfo", lambda *_args, **_kwargs: [(server.socket.AF_INET, server.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 8443))])
+    monkeypatch.setattr(server, "_PinnedHTTPSConnection", Connection)
+    payload = server._validate_planning_payload({
+        "endpoint": {"credential_env": "NINEROUTER_KEY", "endpoint_url": "https://provider.example:8443/proxy/v1", "model_id": "model"},
+        "messages": [{"role": "user", "content": "Plan."}], "max_tokens": 1,
+    })
+    server._planning_provider_request(payload, "launcher-key")
+    assert requests[0][0] == "/proxy/v1/chat/completions"
+    assert requests[0][1]["Host"] == "provider.example:8443"
+
+
+def test_planning_provider_rejects_caller_selected_path_under_allowed_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "ORCHESTRATION_PLANNING_ALLOWED_ENDPOINTS",
+        "https://provider.example:8443/proxy/v1",
+    )
+    payload = server._validate_planning_payload({
+        "endpoint": {"credential_env": "NINEROUTER_KEY", "endpoint_url": "https://provider.example:8443/other", "model_id": "model"},
+        "messages": [{"role": "user", "content": "Plan."}], "max_tokens": 1,
+    })
+    with pytest.raises(server.LauncherError, match="not authorized"):
+        server._planning_provider_request(payload, "secret")
+
+
+def test_planning_local_ninerouter_maps_only_fixed_host_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[tuple[str, str, int, dict[str, str]]] = []
+
+    class Connection:
+        def __init__(self, host: str, port: int, timeout: int) -> None:
+            requests.append((host, "", port, {"timeout": str(timeout)}))
+        def request(self, _method: str, path: str, **kwargs: object) -> None:
+            requests[-1] = (requests[-1][0], path, requests[-1][2], kwargs["headers"])
+        def getresponse(self) -> object:
+            return type("Response", (), {"status": 200, "read": lambda _self, _limit: b'{"choices":[{"message":{"content":"{}"}}]}'})()
+        def close(self) -> None: pass
+
+    monkeypatch.setattr(server.http.client, "HTTPConnection", Connection)
+    for alias in ("localhost", "127.0.0.1"):
+        payload = server._validate_planning_payload({
+            "endpoint": {"credential_env": "NINEROUTER_KEY", "endpoint_url": f"http://{alias}:20128/proxy/v1", "model_id": "model"},
+            "messages": [{"role": "user", "content": "Plan."}], "max_tokens": 1,
+        })
+        server._planning_provider_request(payload, "launcher-key")
+    assert requests[0][:3] == ("host.docker.internal", "/proxy/v1/chat/completions", 20128)
+    assert requests[0][3]["Host"] == "host.docker.internal:20128"
+    assert requests[1][:3] == requests[0][:3]
+    for endpoint_url in ("http://localhost:20129/v1", "http://private.example/v1", "https://attacker.example/v1"):
+        payload["endpoint"]["endpoint_url"] = endpoint_url
+        with pytest.raises(server.LauncherError):
+            server._planning_provider_request(payload, "launcher-key")
+
+
+def test_planning_rejects_untrusted_public_provider_before_sending_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "ORCHESTRATION_PLANNING_ALLOWED_ENDPOINTS",
+        "https://trusted.example/v1",
+    )
+    monkeypatch.setattr(
+        server.socket, "getaddrinfo",
+        lambda *_args, **_kwargs: pytest.fail("untrusted provider was resolved"),
+    )
+    payload = server._validate_planning_payload({
+        "endpoint": {
+            "credential_env": "NINEROUTER_KEY",
+            "endpoint_url": "https://attacker.example/v1",
+            "model_id": "model",
+        },
+        "messages": [{"role": "user", "content": "Plan."}],
+        "max_tokens": 1,
+    })
+    with pytest.raises(server.LauncherError, match="not authorized"):
+        server._planning_provider_request(payload, "secret")
+
+
+@pytest.mark.parametrize(
+    "endpoint_url",
+    ["http://127.0.0.1:14000/v1", "https://127.0.0.1/v1"],
+)
+def test_planning_ninerouter_rejects_private_or_arbitrary_destinations(
+    monkeypatch: pytest.MonkeyPatch, endpoint_url: str,
+) -> None:
+    payload = {
+        "endpoint": {"credential_env": "NINEROUTER_KEY", "endpoint_url": endpoint_url, "model_id": "combo"},
+        "messages": [{"role": "user", "content": "Plan."}], "max_tokens": 1,
+    }
+    with pytest.raises(server.LauncherError):
+        server._planning_provider_request(server._validate_planning_payload(payload), "secret")
+
+
+
+def test_planning_gateway_request_uses_launcher_gateway_key_and_bounded_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[tuple[str, bytes, dict[str, str]]] = []
+
+    class Connection:
+        def __init__(self, *_args: object, **_kwargs: object) -> None: pass
+        def request(self, method: str, path: str, body: bytes, headers: dict[str, str]) -> None:
+            requests.append((path, body, headers))
+        def getresponse(self) -> object:
+            return type("Response", (), {"status": 200, "read": lambda _self, _limit: b'{"choices":[{"message":{"content":"{}"}}]}'})()
+        def close(self) -> None: pass
+
+    monkeypatch.setattr(server, "_UnixHTTPConnection", Connection)
+    payload = server._validate_planning_payload({
+        "endpoint": {"credential_env": "OMP_GATEWAY_KEY", "endpoint_url": server.GATEWAY_ENDPOINT, "model_id": "openai-codex/gpt-5.2"},
+        "messages": [{"role": "user", "content": "Plan."}], "max_tokens": 1,
+    })
+    server._planning_gateway_request(payload, "launcher-key")
+    assert requests[0][0] == "/v1/chat/completions"
+    assert requests[0][2]["Authorization"] == "Bearer launcher-key"
+    assert b"launcher-key" not in requests[0][1]
+
+
+def test_planning_response_strips_provider_metadata_and_redacts_credential() -> None:
+    assert server._planning_response(
+        {
+            "id": "provider-id",
+            "usage": {"prompt_tokens": 4},
+            "reasoning": "hidden reasoning",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": '{"token":"provider-key"}',
+                    "reasoning_content": "hidden reasoning",
+                    "diagnostic": "provider-key",
+                },
+                "finish_reason": "stop",
+            }],
+        },
+        "provider-key",
+    ) == {"choices": [{"message": {"content": '{"token":"[REDACTED]"}'}}]}
+
+
+def test_planning_response_rejects_success_envelopes_without_message_content() -> None:
+    with pytest.raises(server.LauncherError, match="response is invalid"):
+        server._planning_response({"error": {"detail": "provider-key"}}, "provider-key")
+
+
+def test_planning_http_request_rejects_unpaired_surrogate_response() -> None:
+    class Connection:
+        def request(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def getresponse(self) -> object:
+            return type("Response", (), {
+                "status": 200,
+                "read": lambda _self, _limit: b'{"choices":[{"message":{"content":"\\ud800"}}]}',
+            })()
+
+        def close(self) -> None:
+            pass
+
+    request = {
+        "endpoint": {"model_id": "model"},
+        "messages": [{"role": "user", "content": "Plan."}],
+        "max_tokens": 1,
+    }
+    with pytest.raises(server.LauncherError, match="Planning response is invalid"):
+        server._planning_http_request(Connection(), "/v1/chat/completions", request, {})
+
+def test_planning_deadline_reduces_read_timeout_and_expires(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = {"now": 10.0}
+
+    class Sock:
+        def __init__(self) -> None:
+            self.timeouts: list[float] = []
+
+        def settimeout(self, value: float) -> None:
+            self.timeouts.append(value)
+
+        def shutdown(self, _how: int) -> None:
+            pass
+
+    class Response:
+        status = 200
+        fp = None
+
+        def read1(self, _limit: int) -> bytes:
+            clock["now"] = 11.1
+            return b'{"choices":[]}'
+
+    class Connection:
+        timeout = 60
+
+        def __init__(self) -> None:
+            self.sock = Sock()
+
+        def request(self, *_args: object, **_kwargs: object) -> None:
+            clock["now"] = 10.2
+
+        def getresponse(self) -> Response:
+            clock["now"] = 10.5
+            return Response()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock["now"])
+    connection = Connection()
+    request = {
+        "endpoint": {"model_id": "model"},
+        "messages": [{"role": "user", "content": "Plan."}],
+        "max_tokens": 1,
+    }
+    with pytest.raises(server.LauncherError, match="timed out"):
+        server._planning_http_request(
+            connection, "/v1/chat/completions", request, {}, deadline=11.0
+        )
+    assert connection.sock.timeouts == pytest.approx([1.0, 0.8, 0.5])
+
+
+def test_planning_deadline_interrupts_trickling_response_headers() -> None:
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(1)
+    port = listener.getsockname()[1]
+
+    def trickle_headers() -> None:
+        try:
+            client, _ = listener.accept()
+        except OSError:
+            return
+        with client:
+            client.settimeout(1)
+            request_data = bytearray()
+            while b"\r\n\r\n" not in request_data:
+                chunk = client.recv(4096)
+                if not chunk:
+                    return
+                request_data.extend(chunk)
+            header, body = bytes(request_data).split(b"\r\n\r\n", 1)
+            content_length = next(
+                int(line.split(b":", 1)[1])
+                for line in header.split(b"\r\n")
+                if line.lower().startswith(b"content-length:")
+            )
+            while len(body) < content_length:
+                chunk = client.recv(4096)
+                if not chunk:
+                    return
+                body += chunk
+            try:
+                for byte in b"HTTP/1.1 200 OK\r\nX-":
+                    client.sendall(bytes((byte,)))
+                    time.sleep(0.03)
+                for _ in range(60):
+                    client.sendall(b"A")
+                    time.sleep(0.03)
+            except OSError:
+                pass
+
+    worker = threading.Thread(target=trickle_headers, daemon=True)
+    worker.start()
+    request = {
+        "endpoint": {"model_id": "test-model"},
+        "messages": [{"role": "user", "content": "Plan."}],
+        "max_tokens": 1,
+    }
+    connection = server.http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+    deadline = time.monotonic() + 0.15
+    started = time.monotonic()
+    try:
+        with pytest.raises(server.LauncherError, match="timed out") as error:
+            server._planning_http_request(
+                connection, "/v1/chat/completions", request, {}, deadline=deadline
+            )
+        assert error.value.status_code == 504
+        assert time.monotonic() - started < 0.75
+    finally:
+        listener.close()
+        worker.join(timeout=1)
+    assert not worker.is_alive()
+
+
+def test_planning_deadline_interrupts_trickled_chunk_size_on_close_response() -> None:
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(1)
+    port = listener.getsockname()[1]
+
+    def trickle_chunk_size() -> None:
+        try:
+            client, _ = listener.accept()
+        except OSError:
+            return
+        with client:
+            client.settimeout(1)
+            request_data = bytearray()
+            while b"\r\n\r\n" not in request_data:
+                chunk = client.recv(4096)
+                if not chunk:
+                    return
+                request_data.extend(chunk)
+            header, body = bytes(request_data).split(b"\r\n\r\n", 1)
+            content_length = next(
+                int(line.split(b":", 1)[1])
+                for line in header.split(b"\r\n")
+                if line.lower().startswith(b"content-length:")
+            )
+            while len(body) < content_length:
+                chunk = client.recv(4096)
+                if not chunk:
+                    return
+                body += chunk
+            client.sendall(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Connection: close\r\n"
+                b"Transfer-Encoding: chunked\r\n\r\n"
+            )
+            try:
+                for _ in range(60):
+                    client.sendall(b"1")
+                    time.sleep(0.03)
+            except OSError:
+                pass
+
+    worker = threading.Thread(target=trickle_chunk_size, daemon=True)
+    worker.start()
+    request = {
+        "endpoint": {"model_id": "test-model"},
+        "messages": [{"role": "user", "content": "Plan."}],
+        "max_tokens": 1,
+    }
+    connection = server.http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+    deadline = time.monotonic() + 0.15
+    started = time.monotonic()
+    try:
+        with pytest.raises(server.LauncherError, match="timed out") as error:
+            server._planning_http_request(
+                connection, "/v1/chat/completions", request, {}, deadline=deadline
+            )
+        assert error.value.status_code == 504
+        assert time.monotonic() - started < 0.75
+    finally:
+        listener.close()
+        worker.join(timeout=1)
+    assert not worker.is_alive()
+
+
+def test_pinned_https_deadline_interrupts_tls_handshake_before_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    interrupted = threading.Event()
+    sent: list[bytes] = []
+
+    class Transport:
+        def settimeout(self, _timeout: float) -> None:
+            pass
+
+        def shutdown(self, _how: int) -> None:
+            interrupted.set()
+
+        def close(self) -> None:
+            pass
+
+        def sendall(self, data: bytes) -> None:
+            sent.append(data)
+
+    transport = Transport()
+
+    class TLSContext:
+        def wrap_socket(self, _sock: object, *, server_hostname: str) -> object:
+            assert server_hostname == "provider.example"
+            assert interrupted.wait(1)
+
+            class WrappedSocket:
+                def settimeout(self, _timeout: float) -> None:
+                    pass
+
+                def close(self) -> None:
+                    pass
+
+                def sendall(self, data: bytes) -> None:
+                    sent.append(data)
+
+            return WrappedSocket()
+
+    monkeypatch.setattr(server.socket, "create_connection", lambda *_args, **_kwargs: transport)
+    deadline = time.monotonic() + 0.15
+    connection = server._PinnedHTTPSConnection(
+        "provider.example", "93.184.216.34", 443, timeout=2, deadline=deadline
+    )
+    connection._context = TLSContext()
+    request = {
+        "endpoint": {"model_id": "test-model"},
+        "messages": [{"role": "user", "content": "Plan."}],
+        "max_tokens": 1,
+    }
+
+    with pytest.raises(server.LauncherError, match="timed out") as error:
+        server._planning_http_request(
+            connection, "/v1/chat/completions", request, {}, deadline=deadline
+        )
+
+    assert error.value.status_code == 504
+    assert interrupted.is_set()
+    assert sent == []
+
+def test_planning_dns_resolution_enforces_deadline_without_unbounded_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_resolution(*_args: object, **_kwargs: object) -> list[tuple]:
+        entered.set()
+        assert release.wait(2)
+        return []
+
+    monkeypatch.setattr(server.socket, "getaddrinfo", blocked_resolution)
+    worker: threading.Thread | None = None
+    try:
+        with pytest.raises(server.LauncherError, match="resolution timed out"):
+            server._resolve_provider_addresses(
+                "provider.example", 443, server.time.monotonic() + 0.02
+            )
+        assert entered.wait(1)
+        worker = server._DNS_RESOLUTION_THREAD
+    finally:
+        release.set()
+        worker = worker or server._DNS_RESOLUTION_THREAD
+        if worker is not None:
+            worker.join(timeout=1)
+    assert worker is not None
+    assert not worker.is_alive()
+
+
+def test_planning_reservation_releases_runtime_lock_and_blocks_codex_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = object.__new__(server.RuntimeLauncher)
+    launcher._lock = threading.RLock()
+    launcher._planning_slots = threading.BoundedSemaphore(1)
+    launcher._planning_gateway_active = False
+    launcher._engine = type("Engine", (), {"list_owned_workers": lambda _self: []})()
+    launcher._model_key = ""
+    launcher._host_workspace_root = "/host"
+    launcher._worker_uid = 1000
+    launcher._worker_gid = 1000
+    started = threading.Event()
+    release = threading.Event()
+
+    def planning_request(*_args: object, **_kwargs: object) -> object:
+        started.set()
+        assert release.wait(2)
+        return {"choices": [{"message": {"content": "{}"}}]}
+
+    monkeypatch.setattr(server, "_gateway_key", lambda: "gateway-key")
+    monkeypatch.setattr(server, "_planning_gateway_request", planning_request)
+    monkeypatch.setattr(server, "_gateway_ready", lambda *_args: True)
+    monkeypatch.setattr(
+        server,
+        "_validate_start_payload",
+        lambda _payload: (
+            "runner-id",
+            "891e3b15-7408-4d39-91af-ff0ea5a06d18",
+            "workspace",
+            {
+                "configuration_snapshot": {
+                    "model_endpoint": {"credential_env": "OMP_GATEWAY_KEY"},
+                    "agent_definition": {"configuration": {"model_id": "codex"}},
+                }
+            },
+            ("localhost", 14000),
+        ),
+    )
+    monkeypatch.setattr(server, "_prepare_workspace", lambda *_args: ("/host", "/workspace"))
+    payload = {
+        "endpoint": {
+            "credential_env": "OMP_GATEWAY_KEY",
+            "endpoint_url": server.GATEWAY_ENDPOINT,
+            "model_id": "openai-codex/gpt-5.2",
+        },
+        "messages": [{"role": "user", "content": "Plan."}],
+        "max_tokens": 1,
+    }
+    thread = threading.Thread(target=launcher.planning_chat, args=(payload,))
+    thread.start()
+    try:
+        assert started.wait(2)
+        assert launcher._lock.acquire(timeout=0.2)
+        launcher._lock.release()
+        with pytest.raises(server.LauncherError, match="reserved for workflow planning"):
+            launcher.start_run({})
+    finally:
+        release.set()
+        thread.join(timeout=2)
+    assert not thread.is_alive()
 
 
 def test_workspace_creation_rejects_symlink_components(tmp_path: Path) -> None:

@@ -650,6 +650,10 @@ h1, h2, h3 { line-height: 1.17; }
   .artifact-row { flex-direction: column; }
   .inbox-action-context div { grid-template-columns: 1fr; gap: 0.12rem; }
   .list-toolbar .filter-field { min-width: min(100%, 9.5rem); }
+  .workflow-snapshot-field { grid-template-columns: 1fr; gap: 0.15rem; }
+  .workflow-node-heading { align-items: stretch; flex-direction: column; }
+  .workflow-approval-actions { align-items: stretch; flex-direction: column; }
+  .workflow-approval-actions .button { width: 100%; }
 }
 .primary-nav { flex: 1; min-height: 0; overflow-y: auto; align-content: start; overscroll-behavior: contain; }
 .button, .quiet-button, .text-button, .nav-link { min-height: 2.75rem; }
@@ -673,6 +677,30 @@ h1, h2, h3 { line-height: 1.17; }
 .preflight-summary { margin: 0.55rem 0 0; padding-left: 0.55rem; border-left: 3px solid var(--warning); color: var(--text); font-size: 0.72rem; }
 .preflight-summary.is-ready { border-color: var(--success); }
 .preflight-error { display: grid; gap: 0.3rem; margin-top: 0.55rem; padding: 0.6rem; border: 1px solid var(--error); border-radius: 0.55rem; }
+.workflow-start-panel { display: grid; gap: 0.65rem; }
+.workflow-start-panel .field-note { margin: 0; }
+.workflow-goal-field { display: grid; gap: 0.3rem; color: var(--text); font-size: 0.72rem; font-weight: 680; }
+.workflow-goal-field textarea { width: 100%; min-height: 6rem; resize: vertical; padding: 0.6rem 0.7rem; border: 1px solid var(--border); border-radius: 0.6rem; background: var(--panel-strong); color: var(--text); font: inherit; font-size: 0.74rem; line-height: 1.45; }
+.workflow-started { display: grid; gap: 0.25rem; padding: 0.65rem; border: 1px solid var(--success); border-radius: 0.55rem; background: var(--success-soft); font-size: 0.7rem; }
+.workflow-started span { overflow-wrap: anywhere; color: var(--muted); }
+.workflow-started .button { justify-self: start; margin-top: 0.25rem; }
+.workflow-run-panel { min-width: 0; }
+.workflow-plan-facts { margin-top: 0.35rem; }
+.workflow-node-list { display: grid; gap: 0.7rem; }
+.workflow-node-card { display: grid; gap: 0.65rem; padding: 0.75rem; border: 1px solid var(--border); border-radius: 0.65rem; background: var(--panel-strong); }
+.workflow-node-heading { display: flex; align-items: start; justify-content: space-between; gap: 0.75rem; }
+.workflow-node-heading h4 { margin: 0; font-size: 0.8rem; overflow-wrap: anywhere; }
+.workflow-node-heading .eyebrow { margin-bottom: 0.25rem; }
+.workflow-snapshot { display: grid; gap: 0.45rem; margin: 0; }
+.workflow-snapshot-field { display: grid; grid-template-columns: minmax(7rem, 0.28fr) minmax(0, 1fr); gap: 0.65rem; padding-top: 0.45rem; border-top: 1px solid var(--border); }
+.workflow-snapshot-field dt { color: var(--muted); font-size: 0.65rem; }
+.workflow-snapshot-field dd { min-width: 0; margin: 0; }
+.workflow-snapshot-field pre { max-height: 12rem; overflow: auto; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); font: inherit; font-size: 0.67rem; line-height: 1.4; }
+.workflow-node-footer { display: grid; gap: 0.45rem; padding-top: 0.55rem; border-top: 1px solid var(--border); }
+.workflow-node-footer .text-link, .workflow-node-footer .muted { font-size: 0.68rem; overflow-wrap: anywhere; }
+.workflow-approval-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; }
+.workflow-approval-actions .field-note { flex: 1 1 100%; margin: 0; }
+.workflow-approval-actions .button { min-height: 2.35rem; font-size: 0.7rem; }
 .preflight-error p { margin: 0; color: var(--text); font-size: 0.7rem; }
 
 /* Workspace navigation, Run board, and task stage lanes */

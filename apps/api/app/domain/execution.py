@@ -8,6 +8,7 @@ from uuid import UUID
 
 
 from app.domain.availability import AgentAvailability, AgentRunEvidence
+from app.domain.orchestration import WorkflowLeaseBinding
 
 ALLOWED_WORKSPACE_TOOLS = frozenset({"list_files", "read_file", "write_file"})
 _WORKSPACE_SEGMENT_RE = re.compile(r"[^/\\\x00-\x1f\x7f]{1,255}\Z")
@@ -174,7 +175,8 @@ class ExecutionRepository(Protocol):
     async def get_run_context_for_runner(
         self, runner_id: UUID, run_id: UUID
     ) -> RunnerRunContext | None: ...
-    async def request_cancellation(self, owner_id: str, run_id: UUID) -> str | None: ...
+    async def request_cancellation(self, owner_id: str, run_id: UUID, *, workflow_lease: WorkflowLeaseBinding | None = None) -> str | None: ...
+    async def cancel_queued_run(self, owner_id: str, run_id: UUID, *, workflow_lease: WorkflowLeaseBinding | None = None) -> bool: ...
 
     async def get_cancellation_requests(self, runner_id: UUID) -> list[UUID]: ...
 

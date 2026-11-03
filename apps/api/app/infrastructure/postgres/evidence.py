@@ -30,6 +30,7 @@ from app.domain.evidence import (
     _is_newer,
     _same_event,
 )
+from app.domain.orchestration import WorkflowLeaseBinding
 from app.infrastructure.postgres.models import (
     ApprovalDecisionTable,
     ApprovalRequestTable,
@@ -37,7 +38,7 @@ from app.infrastructure.postgres.models import (
     OfficeSceneVersionTable,
     RunTable,
 )
-from app.infrastructure.postgres.raw_sql import RawSQLConnectionPool, RawSQLExecutor
+from app.infrastructure.postgres.raw_sql import RawSQLConnectionPool, RawSQLExecutor, require_workflow_lease
 
 
 
@@ -46,10 +47,15 @@ class PostgresActivityEventRepository:
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
         self._pool = RawSQLConnectionPool(sessions)
 
-    async def append_event(self, event: ActivityEventDraft) -> tuple[ActivityEvent, bool]:
+    async def append_event(
+        self, event: ActivityEventDraft, *,
+        workflow_lease: WorkflowLeaseBinding | None = None,
+    ) -> tuple[ActivityEvent, bool]:
         if event.event_type.removeprefix("run.") in TERMINAL_RUN_STATES:
             raise EvidenceInputError("terminal_transition_required")
-        return await self._append_event(event, terminal_runner_id=None)
+        return await self._append_event(
+            event, terminal_runner_id=None, workflow_lease=workflow_lease,
+        )
 
     async def append_terminal_event(
         self, event: ActivityEventDraft, runner_id: UUID
@@ -59,6 +65,16 @@ class PostgresActivityEventRepository:
         if event.source_id != str(runner_id):
             raise EvidenceInputError("runner")
         return await self._append_event(event, terminal_runner_id=runner_id)
+
+    async def append_controller_terminal_event(
+        self, event: ActivityEventDraft, *,
+        workflow_lease: WorkflowLeaseBinding | None = None,
+    ) -> tuple[ActivityEvent, bool]:
+        if event.event_type.removeprefix("run.") not in TERMINAL_RUN_STATES:
+            raise EvidenceInputError("terminal_event")
+        return await self._append_event(
+            event, terminal_runner_id=None, workflow_lease=workflow_lease,
+        )
 
     async def append_in_transaction(
         self, session: AsyncSession, event: ActivityEventDraft
@@ -73,13 +89,15 @@ class PostgresActivityEventRepository:
         )
 
     async def _append_event(
-        self, event: ActivityEventDraft, *, terminal_runner_id: UUID | None
+        self, event: ActivityEventDraft, *, terminal_runner_id: UUID | None,
+        workflow_lease: WorkflowLeaseBinding | None = None,
     ) -> tuple[ActivityEvent, bool]:
         event.validate()
         async with self._pool.acquire() as connection:
             async with connection.transaction():
                 return await self._append_event_on_connection(
-                    connection, event, terminal_runner_id=terminal_runner_id
+                    connection, event, terminal_runner_id=terminal_runner_id,
+                    workflow_lease=workflow_lease,
                 )
 
     async def _append_event_on_connection(
@@ -88,7 +106,13 @@ class PostgresActivityEventRepository:
         event: ActivityEventDraft,
         *,
         terminal_runner_id: UUID | None,
+        workflow_lease: WorkflowLeaseBinding | None = None,
     ) -> tuple[ActivityEvent, bool]:
+        if workflow_lease is not None:
+            await require_workflow_lease(
+                connection, workflow_lease,
+                owner_id=event.owner_id, parent_run_id=event.run_id,
+            )
         dedupe_key = f"event:{event.owner_id}:{event.source_id}:{event.event_id}"
         await connection.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", dedupe_key
@@ -710,10 +734,12 @@ class PostgresApprovalRepository:
                 f"approval:{owner_id}:{approval_id}",
             )
             request = await session.scalar(
-                select(ApprovalRequestTable).where(
+                select(ApprovalRequestTable)
+                .where(
                     ApprovalRequestTable.owner_id == owner_id,
                     ApprovalRequestTable.id == approval_id,
                 )
+                .with_for_update()
             )
             if request is None:
                 raise EvidenceInputError("approval")
@@ -743,6 +769,13 @@ class PostgresApprovalRepository:
                 raise EvidenceInputError("approval_expired")
             if request.expires_at > now and decision == "expired":
                 raise EvidenceInputError("approval_not_expired")
+            if request.action_type == "workflow.delegation" and decision in {"approved", "rejected"}:
+                delegation = await raw.fetchval(
+                    "UPDATE orchestration_delegations SET status=$4,updated_at=now() WHERE owner_id=$1 AND parent_run_id=$2 AND approval_id=$3 AND status='waiting_approval' RETURNING 1",
+                    owner_id, request.run_id, approval_id, decision,
+                )
+                if delegation != 1:
+                    raise EvidenceInputError("workflow_state_conflict")
             resolved = ApprovalDecisionTable(
                 owner_id=owner_id,
                 approval_id=approval_id,
@@ -756,6 +789,27 @@ class PostgresApprovalRepository:
                     session, request, f"approval.{decision}", resolved.decided_at
                 )
             return _approval(request, resolved)
+
+    async def expire_due(self, now: datetime) -> int:
+        count = 0
+        async with self._sessions.begin() as session:
+            rows = (await session.execute(
+                select(ApprovalRequestTable).outerjoin(
+                    ApprovalDecisionTable,
+                    (ApprovalDecisionTable.owner_id == ApprovalRequestTable.owner_id)
+                    & (ApprovalDecisionTable.approval_id == ApprovalRequestTable.id),
+                ).where(
+                    ApprovalRequestTable.expires_at <= now,
+                    ApprovalDecisionTable.approval_id.is_(None),
+                ).with_for_update(skip_locked=True)
+            )).scalars().all()
+            for request in rows:
+                decision = ApprovalDecisionTable(owner_id=request.owner_id, approval_id=request.id, decision="expired", decided_at=now)
+                session.add(decision)
+                await session.flush()
+                await self._emit_approval_event(session, request, "approval.expired", now)
+                count += 1
+        return count
 
     async def _emit_approval_event(
         self,

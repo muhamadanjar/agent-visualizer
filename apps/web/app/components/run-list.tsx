@@ -23,6 +23,7 @@ import {
   type RunActivity,
 } from "../lib/activity";
 import { PageHeader, StatusPill } from "./workspace-components";
+import { WorkflowRunPanel } from "./workflow-ui";
 
 const TASK_PAGE_SIZE = 100;
 const RUN_PAGE_SIZE = 20;
@@ -436,6 +437,7 @@ export function RunDetailView({ runId }: { runId: string }) {
             <div className="settings-row"><span>Model Endpoint</span><strong>{snapshot.model_endpoint?.endpoint_url ?? (snapshot.provider === null || snapshot.provider === undefined ? "Not configured" : "Historical provider snapshot")}</strong></div>
             <div className="settings-row"><span>Runtime configuration</span><strong>{snapshot.runtime == null ? "Not configured" : "Present in snapshot"}</strong></div>
           </section>
+          <WorkflowRunPanel runId={run.id} />
           <RunEvidenceView runId={run.id} />
         </section>
         <aside className="run-side-panel">

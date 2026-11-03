@@ -8,12 +8,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol
 from uuid import UUID, uuid4
+from app.domain.orchestration import WorkflowLeaseBinding
 
 ACTIVITY_EVENT_TYPES = frozenset(
     {
         "run.started",
         "run.waiting_input",
         "run.waiting_approval",
+        "run.waiting_children",
         "run.blocked",
         "run.tool_action",
         "run.working",
@@ -28,6 +30,7 @@ ACTIVITY_EVENT_TYPES = frozenset(
         "approval.requested",
         "approval.approved",
         "approval.rejected",
+        "approval.expired",
     }
 )
 EVENT_STATUS = {
@@ -37,6 +40,7 @@ EVENT_STATUS = {
     "run.reviewing": "running",
     "run.waiting_input": "waiting_input",
     "run.waiting_approval": "waiting_approval",
+    "run.waiting_children": "waiting_children",
     "run.blocked": "blocked",
     "run.cancellation_pending": "running",
     "run.succeeded": "succeeded",
@@ -151,10 +155,17 @@ class ActivitySnapshot:
 
 
 class ActivityEventRepository(Protocol):
-    async def append_event(self, event: ActivityEventDraft) -> tuple[ActivityEvent, bool]: ...
+    async def append_event(
+        self, event: ActivityEventDraft, *,
+        workflow_lease: WorkflowLeaseBinding | None = None,
+    ) -> tuple[ActivityEvent, bool]: ...
 
     async def append_terminal_event(
         self, event: ActivityEventDraft, runner_id: UUID
+    ) -> tuple[ActivityEvent, bool]: ...
+    async def append_controller_terminal_event(
+        self, event: ActivityEventDraft, *,
+        workflow_lease: WorkflowLeaseBinding | None = None,
     ) -> tuple[ActivityEvent, bool]: ...
     async def has_event_for_runner(
         self, owner_id: str, source_id: str, run_id: UUID, event_id: UUID
@@ -290,6 +301,7 @@ class ApprovalRepository(Protocol):
     async def list_for_run(
         self, owner_id: str, run_id: UUID, *, limit: int
     ) -> list[ApprovalRequest] | None: ...
+    async def expire_due(self, now: datetime) -> int: ...
 
 @dataclass(frozen=True, slots=True)
 class ArtifactDraft:

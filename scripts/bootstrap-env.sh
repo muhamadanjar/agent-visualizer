@@ -3,10 +3,10 @@
 # .env and never prints a secret value.
 #
 # Usage: scripts/bootstrap-env.sh
-# Optional environment overrides:
-#   APP_PORT, PUBLIC_ORIGIN, OWNER_USERNAME, POSTGRES_DB, POSTGRES_USER,
-#   APP_DB_USER, OWNER_PASSWORD_HASH
-
+# Optional environment overrides: APP_PORT, PUBLIC_ORIGIN, OWNER_USERNAME,
+# POSTGRES_DB, POSTGRES_USER, APP_DB_USER, OWNER_PASSWORD_HASH, DOCKER_GID,
+# REDIS_URL, NINEROUTER_KEY, ORCHESTRATION_PLANNING_URL,
+# ORCHESTRATION_PLANNING_ALLOWED_ENDPOINTS
 # If OWNER_PASSWORD_HASH is unset, the script prompts for the owner password
 # (hidden, twice) and hashes it with the API image's `python -m app.password_hash`.
 set -Eeuo pipefail
@@ -31,6 +31,7 @@ app_db_user="${APP_DB_USER:-agent_office_app}"
 postgres_user="${POSTGRES_USER:-agent_office_admin}"
 runner_uid="${RUNNER_UID:-$(id -u)}"
 runner_gid="${RUNNER_GID:-$(id -g)}"
+docker_gid="${DOCKER_GID:-$(stat -c %g /var/run/docker.sock 2>/dev/null || true)}"
 
 [[ "$app_port" =~ ^[0-9]{1,5}$ ]] || die "APP_PORT must be a TCP port number"
 (( 10#$app_port >= 1 && 10#$app_port <= 65535 )) || die "APP_PORT must be between 1 and 65535"
@@ -43,6 +44,7 @@ runner_gid="${RUNNER_GID:-$(id -g)}"
 [[ "$postgres_user" =~ ^[a-z][a-z0-9_]{0,62}$ ]] || die "POSTGRES_USER must be a lowercase SQL identifier"
 [[ "$runner_uid" =~ ^[1-9][0-9]{0,9}$ ]] || die "RUNNER_UID must be a non-root numeric user id"
 [[ "$runner_gid" =~ ^[1-9][0-9]{0,9}$ ]] || die "RUNNER_GID must be a non-root numeric group id"
+[[ "$docker_gid" =~ ^[0-9]+$ ]] || die "DOCKER_GID must be a numeric group id for /var/run/docker.sock"
 
 case "$public_origin" in
     https://*)
@@ -91,6 +93,8 @@ postgres_password="$(openssl rand -hex 32)"
 app_db_password="$(openssl rand -hex 32)"
 runner_shared_token="$(openssl rand -hex 32)"
 runtime_launcher_token="$(openssl rand -hex 32)"
+orchestration_inference_token="$(openssl rand -hex 32)"
+session_secret="$(openssl rand -hex 32)"
 tmp="$(mktemp "$ROOT_DIR/.env.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT
 
@@ -106,6 +110,7 @@ trap 'rm -f "$tmp"' EXIT
     printf 'APP_DB_PASSWORD=%s\n' "$app_db_password"
     printf 'DATABASE_URL=postgresql+asyncpg://%s:%s@db:5432/%s\n' \
         "$app_db_user" "$app_db_password" "$postgres_db"
+    printf 'REDIS_URL=%s\n' "${REDIS_URL:-redis://redis:6379/0}"
     printf 'MIGRATION_DATABASE_URL=postgresql+asyncpg://%s:%s@db:5432/%s\n' \
         "$postgres_user" "$postgres_password" "$postgres_db"
     printf 'OWNER_USERNAME=%s\n' "$owner_username"
@@ -114,8 +119,15 @@ trap 'rm -f "$tmp"' EXIT
     printf 'SESSION_SECRET=%s\n' "$session_secret"
     printf 'RUNNER_SHARED_TOKEN=%s\n' "$runner_shared_token"
     printf 'RUNTIME_LAUNCHER_TOKEN=%s\n' "$runtime_launcher_token"
+    printf 'ORCHESTRATION_INFERENCE_TOKEN=%s\n' "$orchestration_inference_token"
+    printf 'ORCHESTRATION_PLANNING_URL=%s\n' \
+        "${ORCHESTRATION_PLANNING_URL:-http://runtime-launcher:8001/internal/planning/chat-completions}"
+    printf 'ORCHESTRATION_PLANNING_ALLOWED_ENDPOINTS=%s\n' \
+        "${ORCHESTRATION_PLANNING_ALLOWED_ENDPOINTS:-http://localhost:20128/proxy/v1,http://127.0.0.1:20128/proxy/v1}"
     printf 'RUNNER_UID=%s\n' "$runner_uid"
     printf 'RUNNER_GID=%s\n' "$runner_gid"
+    printf 'DOCKER_GID=%s\n' "$docker_gid"
+    printf 'NINEROUTER_KEY=%s\n' "${NINEROUTER_KEY:-}"
     printf 'SESSION_TTL_SECONDS=28800\n'
     printf 'SESSION_COOKIE_SECURE=%s\n' "$cookie_secure"
     printf 'SESSION_COOKIE_SAMESITE=strict\n'

@@ -45,6 +45,20 @@ def test_postgres_activity_phase_migration_round_trips_safely() -> None:
         config.attributes["connection"] = connection
         command.downgrade(config, "gateway_0018")
 
+
+    async def alembic_upgrade(revision: str) -> None:
+        engine = create_async_engine(isolated_async_url, poolclass=NullPool)
+        try:
+            async with engine.connect() as connection:
+                def upgrade(sync_connection) -> None:
+                    config = Config(str(ALEMBIC_CONFIG))
+                    config.attributes["connection"] = sync_connection
+                    command.upgrade(config, revision)
+
+                await connection.run_sync(upgrade)
+                await connection.commit()
+        finally:
+            await engine.dispose()
     async def verify() -> None:
         admin_connection = await asyncpg.connect(dsn=admin_dsn, timeout=5)
         try:
@@ -58,7 +72,7 @@ def test_postgres_activity_phase_migration_round_trips_safely() -> None:
                 await apply_migrations(migration_connection)
             finally:
                 await migration_connection.close()
-            await apply_alembic_migrations(isolated_url)
+            await alembic_upgrade("office_area_0020")
 
             engine = create_async_engine(isolated_async_url, poolclass=NullPool)
             try:
@@ -98,7 +112,7 @@ def test_postgres_activity_phase_migration_round_trips_safely() -> None:
                     assert isinstance(old_constraint, str)
                     assert all(event_type not in old_constraint for event_type in _PHASE_EVENT_TYPES)
 
-                await apply_alembic_migrations(isolated_url)
+                await alembic_upgrade("office_area_0020")
                 async with engine.connect() as connection:
                     assert await connection.scalar(
                         text("SELECT version_num FROM alembic_version")
@@ -112,6 +126,11 @@ def test_postgres_activity_phase_migration_round_trips_safely() -> None:
                     )
                     assert isinstance(upgraded_constraint, str)
                     assert all(event_type in upgraded_constraint for event_type in _PHASE_EVENT_TYPES)
+                await apply_alembic_migrations(isolated_url)
+                async with engine.connect() as connection:
+                    assert await connection.scalar(
+                        text("SELECT version_num FROM alembic_version")
+                    ) == "orchestration_0023"
             finally:
                 await engine.dispose()
         finally:

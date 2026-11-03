@@ -6,6 +6,7 @@ from typing import Protocol
 from uuid import UUID
 
 
+from app.domain.orchestration import WorkflowLeaseBinding
 @dataclass(frozen=True, slots=True)
 class RunResult:
     owner_id: str
@@ -21,7 +22,8 @@ class RunResultConflictError(ValueError):
 
 class RunResultRepository(Protocol):
     async def create_for_run(
-        self, owner_id: str, run_id: UUID, text: str
+        self, owner_id: str, run_id: UUID, text: str, *,
+        workflow_lease: WorkflowLeaseBinding | None = None,
     ) -> tuple[RunResult, bool]: ...
 
     async def get_for_owner(self, owner_id: str, run_id: UUID) -> RunResult | None: ...
