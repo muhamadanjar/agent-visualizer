@@ -6,13 +6,13 @@
 | **Author(s)** | Anjar |
 | **Reviewer(s)** | [perlu konfirmasi: reviewer] |
 | **Tanggal Dibuat** | 2026-10-27 |
-| **Terakhir Diupdate** | 2026-11-01 |
+| **Terakhir Diupdate** | 2026-11-02 |
 | **Service Terkait** | `apps/api`, `apps/runner`, Redis Streams, PostgreSQL, `apps/web` |
 | **Ticket / Issue** | N/A — tidak diberikan |
 
-## Status implementasi saat ini (2026-11-01)
+## Status implementasi saat ini (2026-11-02)
 
-Roadmap Phase 3 (P0) selesai: PostgreSQL event/projection/outbox, Redis Streams fan-out, authenticated snapshot/replay WebSocket, dan frontend cursor/reconnect telah diimplementasikan. Bukti mencakup Redis outage recovery, post-restart browser session/replay, dan dua isolated TCP fan-out measurements di bawah profil lokal. Status ini hanya Phase 3, bukan seluruh taksonomi PRD atau usulan P1/P2. Approval decision tersimpan, tetapi belum ada caller Run yang membuat `approval.requested`; event workflow/delegation tetap deferred. Partitioning/consumer-group pada skala lebih besar dan batas backlog/alert tetap terbuka.
+Roadmap Phase 3 (P0) selesai: PostgreSQL event/projection/outbox, Redis Streams fan-out, authenticated snapshot/replay WebSocket, dan frontend cursor/reconnect telah diimplementasikan. Bukti mencakup Redis outage recovery, post-restart browser session/replay, dan dua isolated TCP fan-out measurements di bawah profil lokal. Status ini hanya Phase 3 P0, bukan seluruh taksonomi event PRD atau usulan P1/P2. Approval decision tersimpan, tetapi belum ada caller Run yang membuat `approval.requested`. Event `run.waiting_children` dan `approval.expired` adalah rencana P1 Phase 5 di bawah; belum diimplementasikan. Partitioning/consumer-group pada skala lebih besar dan batas backlog/alert tetap terbuka.
 
 ## Ringkasan (TL;DR)
 
@@ -47,6 +47,10 @@ Sebelum cutover, API sudah menyimpan Activity Event dengan `event_id`, `schema_v
 Wire envelope mengikuti struktur PRD baru: `event_id`, `event_version`, `sequence`, `timestamp`, `type`, owner/project/task/run/agent correlation, dan payload terkontrol. Implementasi saat ini menamai versi persisted `schema_version` dan cursor sebagai `cursor`; adapter baru memetakan format lama ke wire contract baru. Legacy rows tetap dipertahankan; data migration additive/backfill saja, tanpa mengubah makna event historis.
 
 P0 event taxonomy covers Run lifecycle, heartbeat/freshness, cancellation, terminal outcome, safe tool-action summaries, and approval transitions (`approval.requested`, `approval.approved`, `approval.rejected`). The FR-3D-005 visual-activity extension adds `run.working`, `run.tool_started`, and `run.reviewing`; these are normalized evidence, not Run lifecycle statuses. Agent, Task, workflow, and delegation event categories are deferred. Raw runtime callback payloads never leave the adapter. Safe action summaries are backend-derived from registered tool IDs, not model prose.
+
+### Planned Phase 5 event extensions (P1; not implemented)
+
+Phase 5 plans additive `run.waiting_children` evidence for a nonterminal parent Run waiting on a child Run or dependency, and `approval.expired` for approval TTL expiry, distinct from Owner rejection. Delivering these extensions will require Event schema, projection, WebSocket, and frontend changes. They are Phase 5 plans only: they do not reopen or change the completed Phase 3 P0 scope or its status.
 
 ```mermaid
 sequenceDiagram

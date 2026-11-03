@@ -76,11 +76,15 @@ An execution context for one or more Run attempts; distinct from the persistent 
 _Avoid_: Agent Instance
 
 **Delegation**:
-An optional P1 relationship from a parent Run to a child Task/Run using a registered Agent Definition Version and bounded scope. It is not part of the initial independent-Task flow and is never inferred from prompt text or avatar movement.
+An explicit relationship from a parent Run to a child Task/Run, identifying the work assigned to another Agent Instance under a defined scope. A Delegation is not inferred from prompt text or avatar movement.
 _Avoid_: Child mention, agent name in prose
 
+**Delegation Approval**:
+An Owner's decision authorizing one specific Delegation and its child Run under the approved Task revision, agent, project, inputs, and scope. It is distinct from accepting a Task's result or approving an individual tool action.
+_Avoid_: Task acceptance, per-tool approval
+
 **Child Run**:
-A temporary P1 Run created for an approved delegation and linked to its parent Run and Agent Definition Version. It remains in history after completion but does not create a permanent Agent Instance by default.
+A Run / Attempt for a Task created through an approved Delegation and related to its parent Run. It is a Run, not a permanent Agent Instance.
 _Avoid_: Permanent Agent Instance
 
 **Activity Event**:
