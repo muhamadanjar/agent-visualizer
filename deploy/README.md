@@ -64,11 +64,15 @@ service, and an Nginx reverse proxy on one private Linux host:
    The script refuses to overwrite an existing `.env`, prompts for the owner
    password twice without echo, and hashes it with Argon2id. It generates
    PostgreSQL/session secrets, `RUNNER_SHARED_TOKEN`,
-   `RUNTIME_LAUNCHER_TOKEN`, and Runner UID/GID defaults. It writes atomically
-   with mode `600` and prints no secret values.
-   Optional non-secret overrides: `APP_PORT`, `PUBLIC_ORIGIN`,
-   `OWNER_USERNAME`, `POSTGRES_DB`, `POSTGRES_USER`, `APP_DB_USER`,
-   `RUNNER_UID`, and `RUNNER_GID`.
+   `RUNTIME_LAUNCHER_TOKEN`, `ORCHESTRATION_INFERENCE_TOKEN`, Runner UID/GID,
+   and `DOCKER_GID` from `/var/run/docker.sock`. It also writes the Redis and
+   planning endpoint defaults. The inference-only token is shared by API and
+   Runtime Launcher, never the Runner. It writes atomically with mode `600`
+   and prints no secret values.
+   Optional overrides: `APP_PORT`, `PUBLIC_ORIGIN`, `OWNER_USERNAME`,
+   `POSTGRES_DB`, `POSTGRES_USER`, `APP_DB_USER`, `RUNNER_UID`, `RUNNER_GID`,
+   `DOCKER_GID`, `REDIS_URL`, `ORCHESTRATION_PLANNING_URL`, and
+   `ORCHESTRATION_PLANNING_ALLOWED_ENDPOINTS`.
 
 2. Review `.env`. The default loopback HTTP setup uses
    `APP_ENV=development`, `SESSION_COOKIE_SECURE=false`, and
@@ -94,6 +98,39 @@ service, and an Nginx reverse proxy on one private Linux host:
    Open `http://127.0.0.1:8080` and log in as the configured owner. There is no
    signup route or public user.
 
+### Adding the optional planning token to an existing `.env`
+
+The planning route is optional: Compose passes an empty token when
+`ORCHESTRATION_INFERENCE_TOKEN` is absent, so ordinary Runs remain valid while
+the planning route stays unavailable. To enable planning on an existing
+`.env`, do not rerun the bootstrap script (it refuses to overwrite the file).
+Append one fresh token atomically while preserving the private file mode:
+
+```bash
+rtk bash -c '
+set -Eeuo pipefail
+umask 077
+test -f .env
+test "$(stat -c %a .env)" = 600
+! grep -q "^ORCHESTRATION_INFERENCE_TOKEN=" .env
+token="$(openssl rand -hex 32)"
+tmp="$(mktemp .env.XXXXXX)"
+trap "rm -f -- \"$tmp\"" EXIT
+cp --preserve=mode .env "$tmp"
+printf "ORCHESTRATION_INFERENCE_TOKEN=%s\\n" "$token" >>"$tmp"
+chmod 600 "$tmp"
+mv -- "$tmp" .env
+trap - EXIT
+unset token
+'
+```
+
+The command prints no token. Recreate the Runtime Launcher and API after the
+change; Runner, Nginx, and browser services do not receive this variable.
+`NINEROUTER_KEY` is written empty by bootstrap; set it only when planning uses
+NineRouter. Codex Subscription uses the isolated OMP profile and transient
+gateway credentials described below, not `NINEROUTER_KEY`.
+
 `docker compose down` stops services and keeps the `db_data` volume. Do not run
 `docker compose down -v` unless you intend to destroy the database.
 
@@ -110,9 +147,11 @@ On the private Linux host, provision the `agent-office-codex` OMP profile with
 the Owner's separate Codex login. Provision mode-600
 `~/.local/share/agent-office/omp-gateway/client.token` and `clients.json` with
 one scoped client, one `openai-codex` account and explicit
-`openai-codex/<model>` grants; the client token must differ from the broker
-bearer. The broker's token stays in its isolated profile. Never put credentials
-in the repository, `.env`, images, logs, or browser.
+`openai-codex/<model>` grants; the client token must differ from the broker bearer.
+The broker token, Codex OAuth credentials, and scoped client token stay out of
+the repository, `.env`, images, logs, and browser. `scripts/start-omp-gateway.py`
+injects `OMP_GATEWAY_KEY` and `OMP_RELAY_GID` only into its Compose invocation;
+they are intentionally not persistent `.env` settings.
 
 With Bun, OMP, Docker Compose and user systemd available, build the images and
 apply the additive migration as described above. When no Runs are active, run:
@@ -239,8 +278,11 @@ exist:
 - `RUNNER_SHARED_TOKEN` authenticates internal API Runner calls.
   `RUNTIME_LAUNCHER_TOKEN` separately authenticates Runner-to-Launcher calls;
   keep both secret. `NINEROUTER_KEY` supplies the credential for the selected
-  Model Endpoint. Its URL is stored on the endpoint record; a global
-  `NINEROUTER_URL` is not required. Endpoint records store the URL and
+  Model Endpoint. The Runtime Launcher sends it for planning only to complete
+  base URLs in `ORCHESTRATION_PLANNING_ALLOWED_ENDPOINTS` (default: the local
+  NineRouter endpoints on port `20128` with the configured API path). Add a
+  complete public provider base URL only after confirming it is controlled and
+  authorized to receive this key. Endpoint records store the URL and
   allowlisted environment-variable name, never the key value.
 - `REDIS_URL` selects the private Redis Streams service; Compose defaults it to
   `redis://redis:6379/0`. Do not publish Redis to the host.

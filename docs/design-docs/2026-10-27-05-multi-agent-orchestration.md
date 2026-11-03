@@ -2,17 +2,17 @@
 
 | | |
 |---|---|
-| **Status** | Draft |
+| **Status** | In Review |
 | **Author(s)** | [perlu konfirmasi: nama/email author] |
 | **Reviewer(s)** | [perlu konfirmasi: reviewer] |
 | **Tanggal Dibuat** | 2026-10-27 |
-| **Terakhir Diupdate** | 2026-11-01 |
-| **Service Terkait** | `apps/api`, LangGraph, `apps/dispatcher`, `apps/runner`, PostgreSQL, `apps/web` |
+| **Terakhir Diupdate** | 2026-11-03 |
+| **Service Terkait** | `apps/api`, LangGraph, `apps/launcher`, `apps/runner`, PostgreSQL, `apps/web` |
 | **Ticket / Issue** | N/A — tidak diberikan |
 
-## Status implementasi saat ini (2026-11-01)
+## Status implementasi saat ini (2026-11-03)
 
-Roadmap Phase 5 masih Not started. Tidak ada LangGraph supervisor, orchestration DAG/child Run yang persisted, ataupun eksekusi approval per child yang diimplementasikan atau diklaim. Proposal di bawah tetap rancangan P1; jalur manual Task/Run yang sudah tersedia bukan bukti implementasi orchestration.
+Roadmap Phase 5 berstatus In Progress. Implementasi API/controller, private inference broker, dan Web UI telah dirakit pada worktree integrasi `phase5-integration` yang belum di-merge ke `master`. Follow-up hardening memperbaiki validasi kedalaman DAG untuk urutan dependency-first; approval baru memerlukan Owner decision yang terikat pada owner/parent, action digest, dan resource, serta expiry diverifikasi ulang dengan `clock_timestamp()` tepat saat Delegation di-attach ke child Run; checkpoint dengan status/sequence yang mustahil atau bentuk/nilai rusak ditolak sebelum approval dibuat atau graph dijalankan dan diproyeksikan sebagai `blocked` untuk workflow nonterminal. Recovery scan memasukkan workflow aktif tanpa checkpoint dan checkpoint terminal dengan pending event; pembuatan workflow baru juga ditolak selama Owner masih memiliki Delegation aktif yang belum terselesaikan meski checkpoint hilang. Full API suite lulus (`149 passed`) pada PostgreSQL disposable; Web suite `25 passed / 545 assertions`, typecheck dan production build lulus. Independent re-review kedua koreksi tidak menemukan issue yang actionable. Ini bukti automated/integration-test, bukan authenticated Owner start → approval → child Run atau restart/lease recovery acceptance. Branch-level integrated/security review dan merge ke `master` tetap terbuka.
 
 ## Ringkasan (TL;DR)
 
@@ -47,36 +47,42 @@ PRD baru memerlukan manual assignment, workflow dependency, dynamic routing, sup
 - **P1 Workflow/Supervisor Execution**: LangGraph menyusun graph; parent Task/Run dan setiap child Task/Run tetap tercatat pada domain model Agent Office.
 - **P2 Auto-spawning**: tidak dibuat oleh dokumen ini sebagai P0/P1 capability.
 
-Istilah domain kanonis untuk satu eksekusi graph belum ditetapkan; PRD menyebut `Workflow Run`, sedangkan GLOSSARY.md belum mendefinisikannya. Dokumen ini memakai “eksekusi workflow” sebagai deskripsi sampai istilah disepakati.
+Keputusan domain: tidak ada entitas terpisah `Workflow Run`. Parent Task dan parent Run menjadi jangkar workflow kanonis; Delegation dan child Task/Run tetap record terpisah.
 
 ```mermaid
 flowchart TD
-    Request[Owner goal / parent Task] --> Plan[LangGraph supervisor plans DAG]
-    Plan --> Registry[Resolve active Agent Definition Versions]
-    Registry --> Review[Owner reviews child Task + scope]
-    Review -->|approve each| Child[Create child Task / Run]
-    Review -->|reject| Stop[Keep child unstarted]
-    Child --> Runtime[LangChain Runtime Adapter]
-    Runtime --> Event[Persist Activity Events / artifacts]
-    Event --> Dependency{Dependencies satisfied?}
-    Dependency -->|yes| Review
-    Dependency -->|no / failure| Policy[Block dependents or request owner decision]
-    Event --> Parent[Aggregate structured outputs]
+    Owner[Owner] --> API["POST /tasks/{id}/workflow"]
+    API --> Parent[Canonical parent Run]
+    API --> Planning[Private planning route]
+    Planning --> Launcher[Runtime Launcher]
+    Launcher -->|DAG plan, no provider secrets| API
+    API --> Persist[Persist child Task revisions and Delegations]
+    Persist --> Approval{Owner approves exact digest?}
+    Approval -->|no / expired| Stop[Keep child Run unstarted]
+    Approval -->|yes| Dependency{Dependencies succeeded?}
+    Dependency -->|not yet / failed| Blocked[Keep dependent node blocked]
+    Dependency -->|yes| ChildRun[Create child Run with approved snapshot]
+    ChildRun --> Runner[Normal Runner]
+    Runner --> Events[Persist Activity Events, Run Result and artifacts]
+    Events --> Validate[Validate structured output and artifact ownership]
+    Validate -->|pass| ParentResult[Aggregate parent Run Result]
+    Validate -->|fail| Blocked
 ```
 
 ### Perencanaan, persetujuan, dan eksekusi
 
-1. Supervisor menerima permintaan parent yang eksplisit dan hanya mengambil Agent Definition yang aktif serta ringkasan capability/policy yang terlihat oleh owner/project.
-2. Supervisor mengusulkan spesifikasi child Task, dependency edges, `Agent Definition Version` yang dipilih, expected outputs, dan tool scope yang dibutuhkan. Rencana tidak memuat secret atau hidden reasoning.
-3. Sebelum meminta approval, validasi DAG (tolak cycle), Definition, akses Project, endpoint, capabilities, dan execution limits.
-4. Owner menyetujui atau menolak setiap child Run. Approval mengikat revisi child Task, Definition Version, Project/workspace, tools, endpoint/model, dan limits; perubahan material memerlukan approval baru.
-5. Child yang disetujui dan siap dijalankan dikirim melalui Execution Manager dan LangChain Runtime Adapter yang sama dengan Run manual. Dependency menahan start sampai prasyarat mencapai kondisi terminal yang diterima.
-6. Output child melintasi batas hanya sebagai referensi Artifact atau hasil terstruktur yang tervalidasi. Parent Run hanya dapat memakai output yang disetujui, bukan konteks privat arbitrer.
-7. Jika gagal, descendants tetap diblokir sampai policy/owner memutuskan. Retry membuat Run / Attempt baru; outcome yang tidak diketahui tidak di-retry secara buta. Cabang DAG yang independen dapat lanjut hanya bila scope dan dependency mengizinkan.
+1. Owner memulai workflow dari Task yang memiliki Agent Instance aktif dan Model Endpoint. Parent planning memakai jalur private inference-only; secret provider tetap di Runtime Launcher, dan parent tidak masuk ke dispatch normal Runner.
+2. Planner menghasilkan DAG dari capability/registry yang diizinkan. Broker hanya mengizinkan exact configured endpoint URL/path, membatasi waktu DNS/TCP/TLS/response sampai deadline, dan menormalisasi provider response: API hanya menerima `choices[0].message.content`; provider reasoning fields, metadata, usage, dan diagnostics dibuang, serta key yang terpantul di content disamarkan. API memvalidasi graph, limits, Definition, endpoint, Project/workspace, lalu menyimpan child Task revisions dan Delegations sebelum approval.
+3. Setiap Delegation memerlukan keputusan Owner. Approval mengikat digest canonical konfigurasi Delegation dan berlaku tujuh hari; generic Run creation tidak boleh melewati approval yang belum disetujui atau tidak cocok.
+4. Child Run hanya dapat di-dispatch setelah approval valid dan semua dependency berhasil. Hanya output terstruktur yang tervalidasi atau Artifact reference milik Owner dan child Run terkait yang boleh diteruskan.
+5. Dispatch memakai jalur Run/Runner yang ada. Binding memuat snapshot tepat dari Task revision, Definition Version, Agent Instance, Model Endpoint/route, Project/workspace, tool scope, dan approval; child scope dibatasi irisan policy saat perencanaan dan dispatch.
+6. Output dibatasi 64 KiB. Schema memakai subset Draft 2020-12: root `$schema` opsional dan hanya boleh memakai URI kanonis; deklarasi dialect di schema bersarang ditolak. Local acyclic `$ref` hanya boleh menunjuk langsung ke entri `$defs` tingkat atas (nested pointer ditolak) dengan percent-decoding URI fragment dan reference-chain depth ≤32. Schema ≤2.048 nodes, output ≤8.192 nodes, validation budget konservatif `schema cost × output nodes ≤1.000.000`. Keyword regex `pattern` dan `patternProperties` ditolak karena evaluator regex sinkron tidak memiliki batas waktu; keyword annotation `unevaluatedProperties` dan `unevaluatedItems` ditolak karena evaluasi annotation dapat mengulang validasi subschema komposisi di luar estimasi budget struktural. Tanpa schema, hanya Artifact reference yang diteruskan. Hasil tidak memasukkan hidden reasoning atau secret.
+7. Controller memakai LangGraph dengan PostgreSQL checkpoint untuk resume. Status dan hasil tetap kanonis pada Delegation, Run, Activity Event, dan Run Result; checkpoint hanya menyimpan metadata controller, sementara status/output direkonstruksi dari record Delegation. Lease/fencing membatasi satu controller mutatif; event transisi disimpan checkpoint-nya sebelum append agar retry replay stabil. Unknown outcome tidak di-retry otomatis.
+8. Start workflow diserialisasi per Owner dengan PostgreSQL session advisory lock lintas instance API; replay plan yang sudah tersimpan didahulukan sebelum penolakan revision Task yang stale. UI mempertahankan request ID yang sama setelah kegagalan transport sampai start berhasil atau Task berubah.
 
-### Status dan batas
+### Batas yang disetujui dan diterapkan
 
-Simpan graph plan/version, parent-child links, dependency edges, keputusan approval, ID child Task/Run, referensi output, dan correlation IDs. Sumber status otoritatif tetap record Task, Run / Attempt, Activity Event, dan Approval; checkpoint LangGraph adalah state implementasi orchestration, bukan pengganti record tersebut. Terapkan batas configurable untuk concurrency, depth, jumlah node/step, durasi total, retry, dan resource/usage. Default limits dan retention belum dipilih.
+Satu workflow aktif per Owner; DAG depth maksimal 3; total child Run maksimal 8 (`0` menonaktifkan workflow); maksimal 2 child Run aktif; durasi maksimal 60 menit dan timer berhenti saat menunggu Owner approval. Error, rejection, expiry, invalid output, dan unknown outcome tidak dianggap dependency sukses. Tidak ada automatic retry.
 
 ## Alternatif yang Dipertimbangkan
 
@@ -94,21 +100,21 @@ Simpan graph plan/version, parent-child links, dependency edges, keputusan appro
 - **Keamanan**: child scope adalah irisan policy owner/project, parent scope, child Definition Version, dan tools yang disetujui. Approval mengikat action/config tertentu; tidak ada pewarisan secret/konteks privat; prompt injection tidak dapat memberi privilege.
 - **Operasional**: awasi checkpoint/recovery graph, dispatch duplikat, penyelesaian parsial, dan Redis event reconnect. Pada status parent/child yang tidak pasti, bekukan pekerjaan dependent dan minta rekonsiliasi alih-alih dispatch ulang.
 
-## Rencana Implementasi (opsional)
+## Next Acceptance Gates
 
-1. Pertahankan jalur manual P0 dan tetapkan kontrak parent/child/dependency yang persisted.
-2. Tambahkan graph planner yang menghasilkan DAG untuk ditinjau tanpa side effect dispatch.
-3. Implementasikan approval per child dan dispatch idempotent melalui batas eksekusi Agent Office.
-4. Tambahkan checkpoint LangGraph, aturan recovery, limits, dan projection event/3D; uji cycle, approval ditolak, partial failure, dan duplicate resume.
+1. Tinjau dan merge worktree integrasi `phase5-integration` setelah review final; jangan mengubah database Owner yang sudah ada.
+2. Run the authenticated Owner flow against a configured endpoint: start workflow, approve/reject exact node digests, dispatch approved child Runs, validate dependency outputs, and inspect terminal parent result/events after reload.
+3. Exercise controller restart/lease recovery and prove no duplicate child dispatch or unstable status events.
+4. Verify the agreed checkpoint policy: delete controller metadata when the parent becomes terminal; for malformed checkpoints, fail closed and require reconciliation without automatic reset or child dispatch.
 
 ## Pertanyaan Terbuka
 
-- [perlu konfirmasi: istilah domain kanonis untuk satu eksekusi graph; PRD memakai “Workflow Run”, glossary belum mendefinisikannya]
-- [perlu konfirmasi: kapan dependency dianggap terpenuhi—Run terminal sukses atau Task diterima owner—dan bagaimana status review memengaruhi descendants]
-- [perlu konfirmasi: batas default depth, node count, concurrency, duration, retry, dan usage/cost]
-- [perlu konfirmasi: version/retention policy untuk LangGraph checkpoints dan recovery setelah process restart]
-- [perlu konfirmasi: matriks permission Operator/Viewer pada fase P1]
-- [perlu konfirmasi: nama/email author dan reviewer]
+- **Ditetapkan**: tidak ada entitas `Workflow Run`; parent Task/Run tetap kanonis, sementara Delegation dan child Task/Run mencatat graph.
+- **Ditetapkan**: dependency terpenuhi hanya setelah node upstream berstatus `succeeded` dan outputnya lolos validasi; status lain tidak membuka dispatch descendant.
+- **Ditetapkan**: depth 3, maksimum 8 child Runs (0 menonaktifkan workflow), concurrency 2, durasi 60 menit (approval wait dikecualikan), approval TTL 7 hari, output 64 KiB, schema depth 32.
+- **Ditetapkan**: akses Phase 5 Owner-only; Operator/Viewer tidak mendapat hak orchestration.
+- **Ditetapkan Owner (2026-11-03)**: purge checkpoint saat parent terminal; Run/Event/Result kanonis tetap. Runtime sekarang menolak checkpoint rusak/missing sebelum approval creation atau dispatch dan menampilkan status `blocked` untuk workflow nonterminal; recovery scan menemukan checkpoint hilang dan event terminal yang belum selesai. Regresi unit/PostgreSQL lulus, tetapi prosedur rekonsiliasi manual, checkpoint purge saat runtime terminal, dan restart/lease acceptance tetap perlu demonstrasi Owner.
+- **Administratif**: nama/email author dan reviewer masih belum diberikan.
 
 ## Referensi
 

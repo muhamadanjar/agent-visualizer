@@ -74,6 +74,8 @@ services:
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
       SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-28800}
       SESSION_COOKIE_SAMESITE: ${SESSION_COOKIE_SAMESITE:-strict}
+      ORCHESTRATION_INFERENCE_TOKEN: ${ORCHESTRATION_INFERENCE_TOKEN:-}
+      ORCHESTRATION_PLANNING_URL: ${ORCHESTRATION_PLANNING_URL:-http://runtime-launcher:8001/internal/planning/chat-completions}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN in .env}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       RUNNER_SHARED_TOKEN: ${RUNNER_SHARED_TOKEN:-}
@@ -108,8 +110,12 @@ services:
     user: "${RUNNER_UID:-1000}:${RUNNER_GID:-1000}"
     group_add:
       - "${DOCKER_GID:?set DOCKER_GID to the host Docker socket group ID}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       RUNTIME_LAUNCHER_TOKEN: ${RUNTIME_LAUNCHER_TOKEN:?set RUNTIME_LAUNCHER_TOKEN in .env}
+      ORCHESTRATION_INFERENCE_TOKEN: ${ORCHESTRATION_INFERENCE_TOKEN:-}
+      ORCHESTRATION_PLANNING_ALLOWED_ENDPOINTS: ${ORCHESTRATION_PLANNING_ALLOWED_ENDPOINTS:-http://localhost:20128/proxy/v1,http://127.0.0.1:20128/proxy/v1}
       RUN_WORKER_IMAGE: agent-office-runner:local
       RUNTIME_PROXY_IMAGE: agent-office-runtime-launcher:local
       RUNTIME_EGRESS_NETWORK: agent-office-runtime-egress

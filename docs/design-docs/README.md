@@ -8,7 +8,7 @@ Dokumen-dokumen ini merinci keputusan arsitektur berdasarkan [PRD baru](../../PR
 | [02 — Agent Runtime](2026-10-27-02-agent-runtime.md) | LangChain execution, workers, runtime adapters, cancellation, lifecycle | Implemented (roadmap Phase 2 / P0 scope) | 2026-11-01 |
 | [03 — Event System](2026-10-27-03-event-system.md) | Event schema/persistence, Redis Streams, WebSocket, reconnect, state synchronization | Implemented (roadmap Phase 3 / P0 scope) | 2026-11-01 |
 | [04 — Virtual Office 3D](2026-10-27-04-virtual-office-3d.md) | Three.js, karakter, animasi, workstation, Reception bersama, kamera, performance | Implemented (roadmap Phase 4 / P0 scope) | 2026-11-01 |
-| [05 — Multi-Agent Orchestration](2026-10-27-05-multi-agent-orchestration.md) | LangGraph supervisor, task dependencies, dynamic routing, agent collaboration | Draft (roadmap Phase 5 / Not started) | 2026-11-01 |
+| [05 — Multi-Agent Orchestration](2026-10-27-05-multi-agent-orchestration.md) | LangGraph supervisor, task dependencies, dynamic routing, agent collaboration | In Review (roadmap Phase 5 / In Progress) | 2026-11-03 |
 | [06 — Codex Subscription via Model Gateway](2026-10-30-06-codex-subscription.md) | OMP broker/private single-attempt gateway + LangChain Chat Completions integration; broader acceptance open | In Review (roadmap Phase 6 / In Progress) | 2026-11-01 |
 
 ## Status flow

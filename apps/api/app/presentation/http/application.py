@@ -9,14 +9,16 @@ import hmac
 import ipaddress
 import json
 import logging
+import os
 import re
 import secrets
 import time
 import uuid
 from collections import OrderedDict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Awaitable, Callable, Literal
+from functools import wraps
+from typing import Any, Awaitable, Callable, Literal
 from uuid import UUID
 
 from argon2 import PasswordHasher
@@ -34,6 +36,7 @@ from app.domain.execution import (
     WorkspacePolicyDraft,
 )
 from app.application.tasks import TaskWorkflow, validate_task_references
+from app.application.orchestration import PlanningBroker, PlanningBrokerError, create_workflow_plan
 from app.domain.agent_configuration import (
     AgentConfigurationInputError,
     AgentDefinitionConfiguration,
@@ -53,6 +56,7 @@ from app.domain.evidence import (
     OfficeSceneVersion,
     RunActivityProjection,
     activity_event_envelope,
+    ApprovalRequestDraft,
 )
 from app.domain.instances import (
     AgentInstance,
@@ -88,6 +92,7 @@ from app.domain.run_results import (
     RunResultRepository,
 )
 from app.domain.tasks import Task, TaskInputError, TaskRepository, TaskSpec
+from app.domain.orchestration import MAX_CHILD_RUNS, MAX_DURATION_MINUTES, OrchestrationInputError, OrchestrationRepository, WorkflowLimits, approval_expiry, validate_local_schema, validate_parent_runtime_checkpoint
 
 SESSION_COOKIE = "agent_office_session"
 CORRELATION_HEADER = "X-Correlation-ID"
@@ -106,6 +111,19 @@ class OwnerPrincipal:
     owner_id: str
     username: str
 
+
+
+def _serialize_workflow_start(
+    function: Callable[..., Awaitable[Any]],
+) -> Callable[..., Awaitable[Any]]:
+    @wraps(function)
+    async def wrapped(*args: Any, **kwargs: Any) -> Any:
+        principal = kwargs["principal"]
+        orchestration = kwargs["orchestration"]
+        async with orchestration.workflow_start_lock(principal.owner_id):
+            return await function(*args, **kwargs)
+
+    return wrapped
 
 class OwnerSessionStore:
     """Opaque, revocable owner sessions for the single-replica private pilot."""
@@ -349,6 +367,7 @@ class RunnerEventRequest(BaseModel):
         "run.started",
         "run.waiting_input",
         "run.waiting_approval",
+        "run.waiting_children",
         "run.blocked",
         "run.tool_action",
         "run.working",
@@ -409,6 +428,8 @@ class RunnerResultRequest(BaseModel):
         return value
 
 
+
+
 class RunResultResponse(BaseModel):
     run_id: UUID
     text: str
@@ -446,6 +467,14 @@ class TaskWrite(BaseModel):
     blocked_by_task_ids: list[UUID] = Field(default_factory=list, max_length=100)
     max_duration_minutes: StrictInt | None = Field(default=None, ge=1, le=1440)
     max_child_runs: StrictInt | None = Field(default=None, ge=0, le=100)
+    output_schema: dict[str, object] | None = None
+
+    @field_validator("output_schema")
+    @classmethod
+    def validate_output_schema(cls, value: dict[str, object] | None) -> dict[str, object] | None:
+        if value is not None:
+            validate_local_schema(value)
+        return value
 
     @field_validator("title", "goal")
     @classmethod
@@ -495,6 +524,8 @@ class TaskResponse(BaseModel):
     blocked_by_task_ids: list[UUID]
     max_duration_minutes: int | None
     max_child_runs: int | None
+    output_schema: dict[str, object] | None
+    tool_scope: list[str] | None
     created_at: datetime
     updated_at: datetime
     revision_created_at: datetime
@@ -504,6 +535,60 @@ class RunCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     request_id: UUID
+
+
+class WorkflowStartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    goal: StrictStr = Field(min_length=1, max_length=10000)
+    input_refs: list[StrictStr] = Field(default_factory=list, max_length=100)
+    max_child_runs: StrictInt | None = Field(default=None, ge=0, le=8)
+    max_duration_minutes: StrictInt | None = Field(default=None, ge=1, le=60)
+    request_id: UUID
+
+
+class WorkflowStartResponse(BaseModel):
+    parent_run_id: UUID
+    plan_digest: str
+    plan_revision: int
+    status: Literal["waiting_approval", "waiting_children", "succeeded", "failed", "blocked"]
+    delegations: list[dict[str, object]]
+
+class WorkflowDelegationResponse(BaseModel):
+    node_id: str
+    child_task_id: UUID
+    child_revision: int
+    child_task: dict[str, object]
+    definition_id: UUID
+    definition_version: int
+    definition_name: str | None
+    instance_id: UUID
+    instance_name: str | None
+    project_id: UUID
+    workspace_path: str
+    input_payload: dict[str, object]
+    resource_refs: list[str]
+    dependencies: list[str]
+    output_schema: dict[str, object] | None
+    model_scope: dict[str, object]
+    tool_scope: list[str]
+    limits: dict[str, object]
+    digest: str
+    status: str
+    approval_id: UUID | None
+    approval_digest: str | None
+    approval_expires_at: datetime | None
+    approval_decision: str | None
+    child_run_id: UUID | None
+    output: dict[str, object] | None
+
+
+class WorkflowDetailsResponse(BaseModel):
+    parent_run_id: UUID
+    plan_digest: str
+    plan_revision: int
+    status: Literal["waiting_approval", "waiting_children", "succeeded", "failed", "blocked"]
+    delegations: list[WorkflowDelegationResponse]
+
 
 
 class ModelEndpointWrite(BaseModel):
@@ -796,6 +881,7 @@ def _task_spec(body: TaskWrite) -> TaskSpec:
         blocked_by_task_ids=tuple(body.blocked_by_task_ids),
         max_duration_minutes=body.max_duration_minutes,
         max_child_runs=body.max_child_runs,
+        output_schema=body.output_schema,
     )
 
 
@@ -816,6 +902,8 @@ def _task_response(task: Task) -> TaskResponse:
         blocked_by_task_ids=list(task.blocked_by_task_ids),
         max_duration_minutes=task.max_duration_minutes,
         max_child_runs=task.max_child_runs,
+        output_schema=task.output_schema,
+        tool_scope=None if task.tool_scope is None else list(task.tool_scope),
         created_at=task.created_at,
         updated_at=task.updated_at,
         revision_created_at=task.revision_created_at,
@@ -1189,6 +1277,12 @@ def create_http_app(
             raise HTTPException(status_code=503, detail="Run Result storage is not ready")
         return repository
 
+    def require_orchestration_repository(request: Request) -> OrchestrationRepository:
+        repository = getattr(request.app.state, "orchestration_repository", None)
+        if repository is None:
+            raise HTTPException(status_code=503, detail="Orchestration storage is not ready")
+        return repository
+
     def require_model_endpoint_repository(request: Request) -> ModelEndpointRepository:
         repository = getattr(request.app.state, "model_endpoint_repository", None)
         if repository is None:
@@ -1211,6 +1305,14 @@ def create_http_app(
         expected = f"Bearer {token}"
         if not hmac.compare_digest(authorization, expected):
             raise HTTPException(status_code=401, detail="Runner authentication required")
+
+    def authenticate_planning(request: Request) -> None:
+        token = configured.orchestration_inference_token
+        authorization = request.headers.get("authorization", "")
+        if token is None:
+            raise HTTPException(status_code=503, detail="Planning authentication is not configured")
+        if not hmac.compare_digest(authorization, f"Bearer {token}"):
+            raise HTTPException(status_code=401, detail="Planning authentication required")
 
 
     def require_activity_event_repository(request: Request) -> ActivityEventRepository:
@@ -1292,6 +1394,22 @@ def create_http_app(
             logger.warning("readiness_failed", extra={"dependency": "postgres"})
             return JSONResponse(status_code=503, content={"status": "not_ready"})
         return JSONResponse(status_code=200, content={"status": "ready"})
+
+    @application.post("/internal/planning/chat-completions")
+    async def planning_chat_completions(
+        body: dict[str, object], request: Request
+    ) -> dict[str, object]:
+        """Proxy planning inference with its dedicated credential only."""
+        authenticate_planning(request)
+        if configured.orchestration_planning_url is None:
+            raise HTTPException(status_code=503, detail="Planning broker is not configured")
+        try:
+            return await PlanningBroker(
+                configured.orchestration_planning_url,
+                configured.orchestration_inference_token or "",
+            ).complete(body)
+        except PlanningBrokerError as error:
+            raise HTTPException(status_code=503, detail="Planning broker unavailable") from error
 
     @application.post("/internal/runner/heartbeat")
     async def runner_heartbeat(
@@ -1487,6 +1605,7 @@ def create_http_app(
         except ValueError as error:
             raise HTTPException(status_code=422, detail="Run Result is invalid") from error
         return {"accepted": True}
+
 
     @application.post(
         "/api/v1/projects",
@@ -1712,7 +1831,10 @@ def create_http_app(
         repository: TaskRepository = Depends(require_task_repository),
     ) -> TaskResponse:
         require_origin(request.headers.get("origin"))
-        spec = _task_spec(body)
+        current = await repository.get_for_owner(principal.owner_id, task_id)
+        if current is None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        spec = replace(_task_spec(body), tool_scope=current.tool_scope)
         try:
             await validate_task_references(principal.owner_id, spec, projects, instances)
             task = await repository.update_for_owner(principal.owner_id, task_id, spec)
@@ -1824,6 +1946,210 @@ def create_http_app(
             response.status_code = 200
         return _run_response(run)
 
+    @application.post(
+        "/api/v1/tasks/{task_id}/workflow",
+        status_code=202,
+        response_model=WorkflowStartResponse,
+    )
+    @_serialize_workflow_start
+    async def start_workflow(
+        task_id: UUID,
+        body: WorkflowStartRequest,
+        request: Request,
+        principal: OwnerPrincipal = Depends(require_owner),
+        runs: RunRepository = Depends(require_run_repository),
+        tasks: TaskRepository = Depends(require_task_repository),
+        instances: AgentInstanceRepository = Depends(require_agent_instance_repository),
+        definitions: AgentRegistryRepository = Depends(require_agent_registry_repository),
+        model_endpoints: ModelEndpointRepository = Depends(require_model_endpoint_repository),
+        orchestration: OrchestrationRepository = Depends(require_orchestration_repository),
+        approvals: ApprovalRepository = Depends(require_approval_repository),
+        execution: ExecutionRepository = Depends(require_execution_repository),
+    ) -> WorkflowStartResponse:
+        require_origin(request.headers.get("origin"))
+        task = await tasks.get_for_owner(principal.owner_id, task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        if task.agent_instance_id is None:
+            raise HTTPException(status_code=409, detail="Parent workflow preflight is blocked")
+        if configured.orchestration_inference_token is None:
+            raise HTTPException(status_code=409, detail="Planning broker is not configured")
+        workflow_request_id = uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"agent-office:workflow-request:{principal.owner_id}:{body.request_id}",
+        )
+        existing_parent = await runs.get_for_request(principal.owner_id, workflow_request_id)
+        if existing_parent is not None and existing_parent.task_id != task_id:
+            raise HTTPException(status_code=409, detail="Workflow request ID was already used for a different Task")
+        active_workflows = await orchestration.active_parent_runs()
+        if any(
+            active_owner_id == principal.owner_id
+            and active_run_id != (existing_parent.id if existing_parent is not None else None)
+            for active_owner_id, active_run_id in active_workflows
+        ):
+            raise HTTPException(status_code=409, detail="An active workflow already exists")
+        try:
+            parent = existing_parent
+            if parent is None:
+                parent, _ = await runs.create_for_task(
+                    principal.owner_id, task_id, workflow_request_id,
+                )
+        except RunInputError as error:
+            raise HTTPException(status_code=409, detail="Parent workflow preflight is blocked") from error
+        run_id = parent.id
+        existing_plan = await orchestration.get_plan(principal.owner_id, run_id)
+        if existing_plan is not None:
+            statuses = await orchestration.node_statuses(principal.owner_id, run_id)
+            terminal_nodes = {"succeeded", "failed", "rejected", "expired", "invalid", "blocked", "unknown"}
+            all_terminal = bool(statuses) and all(value in terminal_nodes for value in statuses.values())
+            checkpoint = await orchestration.get_checkpoint(principal.owner_id, run_id)
+            checkpoint_blocked = checkpoint is None and not all_terminal
+            if checkpoint is not None:
+                try:
+                    checkpoint = validate_parent_runtime_checkpoint(checkpoint, existing_plan)
+                except OrchestrationInputError:
+                    checkpoint_blocked = True
+                else:
+                    checkpoint_blocked = (
+                        checkpoint["status"] in {"succeeded", "failed", "canceled"}
+                        and not all_terminal
+                    )
+            if checkpoint_blocked or (checkpoint is None and all_terminal):
+                status = (
+                    "blocked" if checkpoint_blocked
+                    else "succeeded" if all(value == "succeeded" for value in statuses.values())
+                    else "failed"
+                )
+                return WorkflowStartResponse(
+                    parent_run_id=run_id, plan_digest=existing_plan.plan_digest,
+                    plan_revision=existing_plan.revision, status=status,
+                    delegations=[
+                        {
+                            "node_id": node.node_id,
+                            "child_task_id": node.child_task_id,
+                            "child_revision": node.child_revision,
+                            "digest": node.canonical_digest(),
+                            "dependencies": list(node.dependencies),
+                            "status": statuses.get(node.node_id, "unknown"),
+                        }
+                        for node in existing_plan.nodes
+                    ],
+                )
+            existing_approvals = await approvals.list_for_run(principal.owner_id, run_id, limit=existing_plan.limits.child_cap)
+            approval_by_node = {
+                approval.resource_ref.rsplit(":", 1)[-1]: approval
+                for approval in (existing_approvals or [])
+                if approval.action_type == "workflow.delegation" and approval.resource_ref
+            }
+            for node in existing_plan.nodes:
+                if node.node_id in approval_by_node:
+                    continue
+                approval, _ = await approvals.create_request(ApprovalRequestDraft(
+                    owner_id=principal.owner_id, run_id=run_id, request_id=uuid.uuid5(uuid.NAMESPACE_URL, f"agent-office:workflow-approval:{run_id}:{node.node_id}"),
+                    action_type="workflow.delegation", action_digest=node.canonical_digest(),
+                    resource_ref=f"workflow:{run_id}:{node.node_id}", expires_at=approval_expiry(),
+                ))
+                await orchestration.bind_approval(principal.owner_id, run_id, node.node_id, approval.id)
+            controller = getattr(request.app.state, "workflow_controller", None)
+            if controller is not None:
+                await controller.resume(principal.owner_id, run_id)
+            statuses = await orchestration.node_statuses(principal.owner_id, run_id)
+            terminal = statuses and all(value in {"succeeded", "failed", "rejected", "expired", "invalid", "blocked", "unknown"} for value in statuses.values())
+            status = "succeeded" if terminal and all(value == "succeeded" for value in statuses.values()) else "failed" if terminal else "waiting_children" if any(value in {"queued", "running", "succeeded"} for value in statuses.values()) else "waiting_approval"
+            return WorkflowStartResponse(
+                parent_run_id=run_id, plan_digest=existing_plan.plan_digest,
+                plan_revision=existing_plan.revision, status=status,
+                delegations=[{"node_id": node.node_id, "child_task_id": node.child_task_id, "child_revision": node.child_revision, "digest": node.canonical_digest(), "dependencies": list(node.dependencies), "status": statuses.get(node.node_id, "waiting_approval")} for node in existing_plan.nodes],
+            )
+        if parent.task_revision != task.revision:
+            raise HTTPException(status_code=409, detail="Workflow request is bound to an older parent Task revision")
+        instance = await instances.get_for_owner(principal.owner_id, task.agent_instance_id)
+        if instance is None or instance.archived_at is not None:
+            raise HTTPException(status_code=409, detail="Parent workflow requires an active assigned Agent Instance")
+        definition = await definitions.get_for_owner(principal.owner_id, instance.definition_id, version=parent.configuration_snapshot.get("agent_definition", {}).get("version"))
+        if definition is None or not definition.enabled or definition.archived_at is not None:
+            raise HTTPException(status_code=409, detail="Parent workflow requires an active Definition")
+        snapshot_endpoint = parent.configuration_snapshot.get("model_endpoint", {})
+        snapshot_config = parent.configuration_snapshot.get("agent_definition", {}).get("configuration", {})
+        snapshot_task = parent.configuration_snapshot.get("task", {})
+        if not isinstance(snapshot_endpoint, dict) or not isinstance(snapshot_config, dict) or not isinstance(snapshot_task, dict):
+            raise HTTPException(status_code=409, detail="Parent workflow snapshot is unavailable")
+        parent_endpoint = dict(snapshot_endpoint)
+        parent_endpoint.setdefault("model_id", snapshot_config.get("model_id"))
+        if not parent_endpoint.get("credential_env") or not parent_endpoint.get("endpoint_url") or not parent_endpoint.get("model_id"):
+            raise HTTPException(status_code=409, detail="Parent Model Endpoint snapshot is unavailable")
+        configured_parent_tools = snapshot_config.get("allowed_tools")
+        task_tool_scope = snapshot_task.get("tool_scope")
+        if (
+            not isinstance(configured_parent_tools, list)
+            or any(not isinstance(tool, str) for tool in configured_parent_tools)
+            or task_tool_scope is not None
+            and (
+                not isinstance(task_tool_scope, list)
+                or any(not isinstance(tool, str) for tool in task_tool_scope)
+            )
+        ):
+            raise HTTPException(status_code=409, detail="Parent workflow tool scope is unavailable")
+        parent_tool_scope = set(configured_parent_tools)
+        if task_tool_scope is not None:
+            parent_tool_scope &= set(task_tool_scope)
+        parent_child_limit = snapshot_task.get("max_child_runs")
+        parent_duration_limit = snapshot_task.get("max_duration_minutes")
+        if (
+            parent_child_limit is not None
+            and (isinstance(parent_child_limit, bool) or not isinstance(parent_child_limit, int) or parent_child_limit < 0)
+            or parent_duration_limit is not None
+            and (isinstance(parent_duration_limit, bool) or not isinstance(parent_duration_limit, int) or parent_duration_limit < 1)
+        ):
+            raise HTTPException(status_code=409, detail="Parent workflow limits are unavailable")
+        max_child_runs = min(MAX_CHILD_RUNS, parent_child_limit) if parent_child_limit is not None else MAX_CHILD_RUNS
+        max_duration_minutes = min(MAX_DURATION_MINUTES, parent_duration_limit) if parent_duration_limit is not None else MAX_DURATION_MINUTES
+        if max_child_runs == 0:
+            raise HTTPException(status_code=409, detail="Parent Task does not allow child Runs")
+        if body.max_child_runs is not None and body.max_child_runs > max_child_runs:
+            raise HTTPException(status_code=409, detail="Requested child Run limit exceeds the parent Task limit")
+        if body.max_duration_minutes is not None and body.max_duration_minutes > max_duration_minutes:
+            raise HTTPException(status_code=409, detail="Requested workflow duration exceeds the parent Task limit")
+        child_policy = await execution.get_policy_for_project(principal.owner_id, task.project_id)
+        if child_policy is None or not child_policy.enabled or not child_policy.allowed_tools:
+            raise HTTPException(status_code=409, detail="Child execution policy is not ready")
+        try:
+            plan = await create_workflow_plan(
+                owner_id=principal.owner_id, parent_run_id=run_id, parent_project_id=task.project_id,
+                goal=body.goal, input_refs=tuple(body.input_refs),
+                limits=WorkflowLimits(
+                    body.max_child_runs if body.max_child_runs is not None else max_child_runs,
+                    body.max_duration_minutes if body.max_duration_minutes is not None else max_duration_minutes,
+                ),
+                broker=PlanningBroker(configured.orchestration_planning_url, configured.orchestration_inference_token),
+                instances=instances, definitions=definitions, model_endpoints=model_endpoints,
+                execution=execution, repository=orchestration,
+                parent_endpoint=parent_endpoint,
+                parent_tool_scope=parent_tool_scope,
+                child_policy_tools=set(child_policy.allowed_tools),
+                child_workspace_path=child_policy.workspace_path,
+            )
+        except OrchestrationInputError as error:
+            raise HTTPException(status_code=409, detail=f"Workflow plan rejected: {error.reason}") from error
+        except PlanningBrokerError as error:
+            raise HTTPException(status_code=503, detail="Planning broker unavailable") from error
+        for node in plan.nodes:
+            approval, _ = await approvals.create_request(ApprovalRequestDraft(
+                owner_id=principal.owner_id, run_id=run_id,
+                request_id=uuid.uuid5(uuid.NAMESPACE_URL, f"agent-office:workflow-approval:{run_id}:{node.node_id}"),
+                action_type="workflow.delegation", action_digest=node.canonical_digest(),
+                resource_ref=f"workflow:{run_id}:{node.node_id}", expires_at=approval_expiry(),
+            ))
+            await orchestration.bind_approval(principal.owner_id, run_id, node.node_id, approval.id)
+        controller = getattr(request.app.state, "workflow_controller", None)
+        if controller is not None:
+            await controller.run_once(principal.owner_id, run_id, plan, {node.node_id: "waiting_approval" for node in plan.nodes})
+        return WorkflowStartResponse(
+            parent_run_id=run_id, plan_digest=plan.plan_digest, plan_revision=plan.revision,
+            status="waiting_approval",
+            delegations=[{"node_id": node.node_id, "child_task_id": node.child_task_id, "child_revision": node.child_revision, "digest": node.canonical_digest(), "dependencies": list(node.dependencies), "status": "waiting_approval"} for node in plan.nodes],
+        )
+
     @application.get(
         "/api/v1/tasks/{task_id}/runs",
         response_model=list[RunResponse],
@@ -1897,6 +2223,113 @@ def create_http_app(
             created_at=result.created_at,
         )
 
+    @application.get(
+        "/api/v1/runs/{run_id}/workflow",
+        response_model=WorkflowDetailsResponse,
+    )
+    async def get_workflow_details(
+        run_id: UUID,
+        principal: OwnerPrincipal = Depends(require_owner),
+        runs: RunRepository = Depends(require_run_repository),
+        tasks: TaskRepository = Depends(require_task_repository),
+        instances: AgentInstanceRepository = Depends(require_agent_instance_repository),
+        definitions: AgentRegistryRepository = Depends(require_agent_registry_repository),
+        approvals: ApprovalRepository = Depends(require_approval_repository),
+        orchestration: OrchestrationRepository = Depends(require_orchestration_repository),
+    ) -> WorkflowDetailsResponse:
+        if await runs.get_for_owner(principal.owner_id, run_id) is None:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        plan = await orchestration.get_plan(principal.owner_id, run_id)
+        if plan is None:
+            raise HTTPException(status_code=404, detail="Workflow plan is not available")
+        states = await orchestration.delegation_states(principal.owner_id, run_id)
+        state_by_node = {str(item["node_id"]): item for item in states}
+        approval_records = await approvals.list_for_run(principal.owner_id, run_id, limit=200)
+        approval_by_ref = {
+            approval.resource_ref: approval
+            for approval in (approval_records or [])
+            if approval.action_type == "workflow.delegation"
+        }
+        checkpoint = await orchestration.get_checkpoint(principal.owner_id, run_id)
+        node_statuses = {node.node_id: str(state_by_node.get(node.node_id, {}).get("status", "unknown")) for node in plan.nodes}
+        terminal_states = {"succeeded", "failed", "rejected", "expired", "invalid", "blocked", "unknown"}
+        all_terminal = bool(node_statuses) and all(value in terminal_states for value in node_statuses.values())
+        if checkpoint is None:
+            status = (
+                "succeeded" if all(value == "succeeded" for value in node_statuses.values())
+                else "failed" if all_terminal
+                else "blocked"
+            )
+        else:
+            try:
+                checkpoint = validate_parent_runtime_checkpoint(checkpoint, plan)
+            except OrchestrationInputError:
+                status = "blocked"
+            else:
+                status = checkpoint["status"]
+                if status == "canceled":
+                    status = "failed"
+                if status in {"succeeded", "failed"} and not all_terminal:
+                    status = "blocked"
+        delegations: list[WorkflowDelegationResponse] = []
+        for node in plan.nodes:
+            state = state_by_node.get(node.node_id, {})
+            revisions = await tasks.list_revisions_for_owner(
+                principal.owner_id, node.child_task_id, limit=200, offset=0,
+            )
+            child_task = next(
+                (item for item in (revisions or []) if item.revision == node.child_revision),
+                None,
+            )
+            if child_task is None:
+                raise HTTPException(status_code=409, detail="Persisted child Task revision is unavailable")
+            instance = await instances.get_for_owner(principal.owner_id, node.instance_id)
+            definition = await definitions.get_for_owner(
+                principal.owner_id, node.definition_id, version=node.definition_version,
+            )
+            approval = approval_by_ref.get(f"workflow:{run_id}:{node.node_id}")
+            delegations.append(WorkflowDelegationResponse(
+                node_id=node.node_id,
+                child_task_id=node.child_task_id,
+                child_revision=node.child_revision,
+                child_task={
+                    "title": child_task.title,
+                    "goal": child_task.goal,
+                    "input_text": child_task.input_text,
+                    "acceptance_criteria": list(child_task.acceptance_criteria),
+                    "resource_refs": list(child_task.resource_refs),
+                    "output_schema": child_task.output_schema,
+                },
+                definition_id=node.definition_id,
+                definition_version=node.definition_version,
+                definition_name=definition.name if definition is not None else None,
+                instance_id=node.instance_id,
+                instance_name=instance.display_name if instance is not None else None,
+                project_id=node.project_id or child_task.project_id,
+                workspace_path=node.workspace_path,
+                input_payload=node.input_payload,
+                resource_refs=list(node.resource_refs),
+                dependencies=list(node.dependencies),
+                output_schema=node.output_schema,
+                model_scope=node.model_scope,
+                tool_scope=list(node.tool_scope),
+                limits=node.limits,
+                digest=node.canonical_digest(),
+                status=str(state.get("status", "unknown")),
+                approval_id=approval.id if approval is not None else None,
+                approval_digest=approval.action_digest if approval is not None else None,
+                approval_expires_at=approval.expires_at if approval is not None else None,
+                approval_decision=approval.decision if approval is not None else None,
+                child_run_id=state.get("child_run_id"),
+                output=state.get("output"),
+            ))
+        return WorkflowDetailsResponse(
+            parent_run_id=run_id,
+            plan_digest=plan.plan_digest,
+            plan_revision=plan.revision,
+            status=status,
+            delegations=delegations,
+        )
 
     @application.get(
         "/api/v1/activity/snapshot",
@@ -2004,12 +2437,17 @@ def create_http_app(
                 "approval_expired",
                 "approval_not_expired",
                 "decision_conflict",
+                "workflow_state_conflict",
             }:
                 raise HTTPException(
                     status_code=409,
                     detail="Approval is no longer valid for this action",
                 ) from error
             raise HTTPException(status_code=422, detail="Invalid approval decision") from error
+        if approval.action_type == "workflow.delegation":
+            controller = getattr(request.app.state, "workflow_controller", None)
+            if controller is not None:
+                await controller.resume(principal.owner_id, approval.run_id)
         return _approval_response(approval)
 
     @application.get(

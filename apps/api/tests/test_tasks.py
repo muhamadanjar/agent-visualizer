@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -33,6 +34,8 @@ class StoredTask:
     created_at: datetime
     updated_at: datetime
     revision_created_at: datetime
+    output_schema: dict[str, object] | None = None
+    tool_scope: tuple[str, ...] | None = None
 
 
 class MemoryTaskRepository:
@@ -60,6 +63,7 @@ class MemoryTaskRepository:
             blocked_by_task_ids=spec.blocked_by_task_ids,
             max_duration_minutes=spec.max_duration_minutes,
             max_child_runs=spec.max_child_runs, stage="Backlog",
+            output_schema=spec.output_schema, tool_scope=spec.tool_scope,
             created_at=created_at, updated_at=updated_at,
             revision_created_at=updated_at,
         )
@@ -111,6 +115,8 @@ class MemoryTaskRepository:
             blocked_by_task_ids=current.blocked_by_task_ids,
             max_duration_minutes=current.max_duration_minutes,
             max_child_runs=current.max_child_runs,
+            output_schema=current.output_schema,
+            tool_scope=current.tool_scope,
         )
         if current_spec == spec:
             return current
@@ -242,3 +248,48 @@ def test_reordered_task_dependencies_do_not_create_revision() -> None:
         )
         assert reordered_response.status_code == 200
         assert reordered_response.json()["revision"] == 1
+
+
+def test_task_update_preserves_internal_delegation_tool_scope() -> None:
+    project = Project(uuid4(), "owner", "Atlas", "Delegation tool scope test", datetime.now(UTC))
+    projects = MemoryProjectRepository()
+    projects.seed(project)
+    tasks = MemoryTaskRepository({project.id: project.name})
+    task = asyncio.run(tasks.create(
+        "owner",
+        TaskSpec(
+            project_id=project.id,
+            agent_instance_id=None,
+            title="Scoped delegated task",
+            goal="Use only approved workspace tools.",
+            input_text="",
+            resource_refs=(),
+            acceptance_criteria=("Stay inside the approved tool scope.",),
+            blocked_by_task_ids=(),
+            max_duration_minutes=30,
+            max_child_runs=None,
+            tool_scope=("read_file",),
+        ),
+    ))
+
+    with make_client(projects, tasks) as client:
+        assert login(client).status_code == 200
+        response = client.put(
+            f"/api/v1/tasks/{task.id}",
+            json={
+                "project_id": str(project.id),
+                "agent_instance_id": None,
+                "title": "Updated delegated task",
+                "goal": "Keep the approved scope after editing.",
+                "input_text": "",
+                "resource_refs": [],
+                "acceptance_criteria": ["Do not widen delegated tool privileges."],
+                "blocked_by_task_ids": [],
+                "max_duration_minutes": 30,
+                "max_child_runs": None,
+                "output_schema": None,
+            },
+            headers={"origin": ORIGIN},
+        )
+    assert response.status_code == 200
+    assert response.json()["tool_scope"] == ["read_file"]

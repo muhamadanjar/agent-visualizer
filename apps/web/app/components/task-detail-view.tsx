@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { requestTask, requestTaskPreflight, requestTaskRevisions, type Task, type TaskPreflight } from "../lib/tasks";
 import { TaskRunHistory } from "./run-list";
 import { PageHeader, StatusPill } from "./workspace-components";
+import { WorkflowStartPanel } from "./workflow-ui";
 
 function RevisionContents({ task }: { task: Task }) {
   return (
@@ -284,6 +285,7 @@ export function TaskDetailView({ taskId }: { taskId: string }) {
             </dl>
           </section>
           <TaskPreflightPanel key={task.id} taskId={task.id} />
+          <WorkflowStartPanel key={`workflow-${task.id}`} task={task} />
           <section className="content-section">
             <h2>Run / Attempt history</h2>
             <p>Run / Attempt records preserve immutable configuration snapshots. Starting a Run queues it after preflight; persisted lifecycle events appear on Run detail. Task-stage transitions are not implemented.</p>

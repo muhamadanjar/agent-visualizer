@@ -18,6 +18,8 @@ class TaskSpec:
     blocked_by_task_ids: tuple[UUID, ...]
     max_duration_minutes: int | None
     max_child_runs: int | None
+    output_schema: dict[str, object] | None = None
+    tool_scope: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +43,8 @@ class Task:
     created_at: datetime
     updated_at: datetime
     revision_created_at: datetime
+    output_schema: dict[str, object] | None = None
+    tool_scope: tuple[str, ...] | None = None
 
 
 class TaskInputError(ValueError):

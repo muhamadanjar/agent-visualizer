@@ -3,11 +3,13 @@ from __future__ import annotations
 import re
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
+from uuid import UUID
 from contextlib import asynccontextmanager
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.domain.orchestration import WorkflowLeaseBinding, WorkflowLeaseLost
 
 _POSITIONAL_BIND = re.compile(r"\$(\d+)")
 _BIND_CAST = re.compile(r":(p\d+)::([a-zA-Z][a-zA-Z0-9_]*(?:\[\])?)")
@@ -87,6 +89,27 @@ class RawSQLExecutor:
         parameters = [self._statement(query, values)[1] for values in arguments]
         await self._session.execute(statement, parameters)
 
+
+
+async def require_workflow_lease(
+    connection: RawSQLExecutor, binding: WorkflowLeaseBinding, *,
+    owner_id: str, parent_run_id: UUID,
+) -> None:
+    if binding.owner_id != owner_id or binding.parent_run_id != parent_run_id:
+        raise WorkflowLeaseLost("workflow lease does not match mutation scope")
+    active = await connection.fetchval(
+        """
+        SELECT 1
+        FROM orchestration_leases
+        WHERE owner_id=$1 AND parent_run_id=$2 AND holder_id=$3
+          AND fencing_token=$4 AND expires_at>now()
+        FOR UPDATE
+        """,
+        binding.owner_id, binding.parent_run_id, binding.holder_id,
+        binding.fencing_token,
+    )
+    if active is None:
+        raise WorkflowLeaseLost("workflow lease lost")
 
 class RawSQLConnectionPool:
     """Session-backed compatibility boundary for specialized raw SQL repositories."""

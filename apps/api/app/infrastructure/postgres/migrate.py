@@ -153,7 +153,8 @@ async def ensure_application_role(
                     'task_revision_dependencies', 'runs', 'provider_configs', 'model_endpoints',
                     'owner_event_cursors', 'activity_events', 'activity_event_outbox',
                     'run_activity_projections', 'approval_requests', 'approval_decisions',
-                    'artifacts', 'office_scene_versions', 'run_results', 'alembic_version'
+                    'artifacts', 'office_scene_versions', 'run_results', 'orchestration_delegations',
+                    'orchestration_checkpoints', 'orchestration_leases', 'alembic_version'
                 ]::text[])
                   AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
                   AND relowner = (SELECT oid FROM pg_roles WHERE rolname = $1)
@@ -263,7 +264,7 @@ async def ensure_application_role(
             role_name,
         )
         grant_approval_requests = await connection.fetchval(
-            "SELECT format('GRANT SELECT, INSERT ON TABLE approval_requests TO %I', $1::text)",
+            "SELECT format('GRANT SELECT, INSERT, UPDATE ON TABLE approval_requests TO %I', $1::text)",
             role_name,
         )
         grant_approval_decisions = await connection.fetchval(
@@ -293,6 +294,15 @@ async def ensure_application_role(
         grant_run_results = await connection.fetchval(
             "SELECT format('GRANT SELECT, INSERT ON TABLE run_results TO %I', $1::text)",
             role_name,
+        )
+        grant_orchestration_delegations = await connection.fetchval(
+            "SELECT format('GRANT SELECT, INSERT, UPDATE ON TABLE orchestration_delegations TO %I', $1::text)", role_name
+        )
+        grant_orchestration_checkpoints = await connection.fetchval(
+            "SELECT format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE orchestration_checkpoints TO %I', $1::text)", role_name
+        )
+        grant_orchestration_leases = await connection.fetchval(
+            "SELECT format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE orchestration_leases TO %I', $1::text)", role_name
         )
         for statement in (
             revoke_public_create,
@@ -326,6 +336,9 @@ async def ensure_application_role(
             grant_runner_connections,
             grant_run_dispatches,
             grant_run_results,
+            grant_orchestration_delegations,
+            grant_orchestration_checkpoints,
+            grant_orchestration_leases,
             grant_office_scene_versions,
         ):
             await connection.execute(statement)

@@ -96,6 +96,8 @@ def _domain_task(
         blocked_by_task_ids=tuple(blocked_by_task_ids),
         max_duration_minutes=revision.max_duration_minutes,
         max_child_runs=revision.max_child_runs,
+        output_schema=revision.output_schema,
+        tool_scope=None if revision.tool_scope is None else tuple(revision.tool_scope),
         created_at=task.created_at,
         updated_at=task.updated_at,
         revision_created_at=revision.created_at,
@@ -215,6 +217,8 @@ class PostgresTaskRepository:
                 acceptance_criteria=list(spec.acceptance_criteria),
                 max_duration_minutes=spec.max_duration_minutes,
                 max_child_runs=spec.max_child_runs,
+                output_schema=spec.output_schema,
+                tool_scope=None if spec.tool_scope is None else list(spec.tool_scope),
             )
         )
         await session.flush()
@@ -331,6 +335,8 @@ class PostgresTaskRepository:
                 blocked_by_task_ids=current.blocked_by_task_ids,
                 max_duration_minutes=current.max_duration_minutes,
                 max_child_runs=current.max_child_runs,
+                output_schema=current.output_schema,
+                tool_scope=current.tool_scope,
             )
             if current_spec == spec:
                 return current

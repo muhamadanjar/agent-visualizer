@@ -298,6 +298,8 @@ class TaskRevisionTable(SQLModel, table=True):
         CheckConstraint("cardinality(acceptance_criteria) BETWEEN 1 AND 100"),
         CheckConstraint("max_duration_minutes BETWEEN 1 AND 1440 OR max_duration_minutes IS NULL"),
         CheckConstraint("max_child_runs BETWEEN 0 AND 100 OR max_child_runs IS NULL"),
+        CheckConstraint("output_schema IS NULL OR jsonb_typeof(output_schema) = 'object'"),
+        CheckConstraint("tool_scope IS NULL OR (cardinality(tool_scope) <= 3 AND tool_scope <@ ARRAY['list_files', 'read_file', 'write_file']::text[])", name="task_revisions_tool_scope_check"),
         PrimaryKeyConstraint("task_id", "revision"),
         UniqueConstraint("owner_id", "task_id", "revision"),
         UniqueConstraint(
@@ -332,6 +334,8 @@ class TaskRevisionTable(SQLModel, table=True):
     acceptance_criteria: list[str] = Field(sa_column=Column(ARRAY(Text), nullable=False))
     max_duration_minutes: int | None = Field(default=None, sa_column=Column(Integer))
     max_child_runs: int | None = Field(default=None, sa_column=Column(Integer))
+    output_schema: dict[str, Any] | None = Field(default=None, sa_column=Column(JSONB(none_as_null=True)))
+    tool_scope: list[str] | None = Field(default=None, sa_column=Column(ARRAY(Text)))
     created_at: datetime = Field(
         sa_column=Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     )
@@ -486,16 +490,16 @@ class ActivityEventTable(SQLModel, table=True):
         CheckConstraint(
             "event_type IN ('run.started', 'run.working', 'run.tool_started', "
             "'run.reviewing', 'run.waiting_input', 'run.waiting_approval', "
-            "'run.blocked', 'run.tool_action', 'run.cancellation_pending', "
+            "'run.waiting_children', 'run.blocked', 'run.tool_action', 'run.cancellation_pending', "
             "'run.succeeded', 'run.failed', 'run.canceled', 'run.unknown', "
             "'session.heartbeat', 'approval.requested', 'approval.approved', "
-            "'approval.rejected')",
+            "'approval.rejected', 'approval.expired')",
             name="activity_events_event_type_check",
         ),
         CheckConstraint(
-            "(event_type IN ('approval.requested', 'approval.approved', 'approval.rejected') "
+            "(event_type IN ('approval.requested', 'approval.approved', 'approval.rejected', 'approval.expired') "
             "AND approval_id IS NOT NULL) OR "
-            "(event_type NOT IN ('approval.requested', 'approval.approved', 'approval.rejected') "
+            "(event_type NOT IN ('approval.requested', 'approval.approved', 'approval.rejected', 'approval.expired') "
             "AND approval_id IS NULL)",
             name="activity_events_approval_id_check",
         ),
@@ -598,7 +602,7 @@ class RunActivityProjectionTable(SQLModel, table=True):
         CheckConstraint("task_revision >= 1"),
         CheckConstraint("char_length(source_id) BETWEEN 1 AND 128"),
         CheckConstraint(
-            "status IN ('running', 'waiting_input', 'waiting_approval', 'blocked', "
+            "status IN ('running', 'waiting_input', 'waiting_approval', 'waiting_children', 'blocked', "
             "'succeeded', 'failed', 'canceled', 'unknown')"
         ),
         CheckConstraint("last_event_cursor >= 1"),
@@ -882,3 +886,77 @@ class RunDispatchTable(SQLModel, table=True):
     updated_at: datetime = Field(
         sa_column=Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     )
+
+
+class OrchestrationDelegationTable(SQLModel, table=True):
+    __tablename__ = "orchestration_delegations"
+    __table_args__ = (
+        CheckConstraint("char_length(owner_id) BETWEEN 1 AND 128"),
+        CheckConstraint("child_revision >= 1 AND definition_version >= 1"),
+        CheckConstraint("status IN ('planned', 'waiting_approval', 'approved', 'rejected', 'expired', 'queued', 'running', 'succeeded', 'failed', 'invalid', 'blocked', 'unknown')"),
+        CheckConstraint("char_length(canonical_digest) = 64"),
+        PrimaryKeyConstraint("owner_id", "id"),
+        UniqueConstraint("owner_id", "parent_run_id", "node_id"),
+        UniqueConstraint("owner_id", "parent_run_id", "node_id", "revision"),
+        ForeignKeyConstraint(["owner_id", "parent_run_id"], ["runs.owner_id", "runs.id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(["owner_id", "child_task_id"], ["tasks.owner_id", "tasks.id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(["owner_id", "definition_id"], ["agent_definitions.owner_id", "agent_definitions.id"], ondelete="RESTRICT"),
+        ForeignKeyConstraint(["owner_id", "instance_id"], ["agent_instances.owner_id", "agent_instances.id"], ondelete="RESTRICT"),
+        Index("orchestration_delegations_parent_idx", "owner_id", "parent_run_id", "node_id"),
+    )
+
+    owner_id: str = Field(sa_column=Column(Text, nullable=False))
+    id: UUID = Field(sa_column=Column(PGUUID(as_uuid=True), nullable=False))
+    parent_run_id: UUID = Field(sa_column=Column(PGUUID(as_uuid=True), nullable=False))
+    node_id: str = Field(sa_column=Column(Text, nullable=False))
+    revision: int = Field(sa_column=Column(Integer, nullable=False, server_default=text("1")))
+    child_task_id: UUID = Field(sa_column=Column(PGUUID(as_uuid=True), nullable=False))
+    child_revision: int = Field(sa_column=Column(Integer, nullable=False))
+    definition_id: UUID = Field(sa_column=Column(PGUUID(as_uuid=True), nullable=False))
+    definition_version: int = Field(sa_column=Column(Integer, nullable=False))
+    instance_id: UUID = Field(sa_column=Column(PGUUID(as_uuid=True), nullable=False))
+    project_id: UUID | None = Field(default=None, sa_column=Column(PGUUID(as_uuid=True)))
+    workspace_path: str = Field(sa_column=Column(Text, nullable=False))
+    input_payload: dict[str, Any] = Field(sa_column=Column(JSONB, nullable=False))
+    resource_refs: list[str] = Field(sa_column=Column(JSONB, nullable=False, server_default=text("'[]'::jsonb")))
+    dependencies: list[str] = Field(sa_column=Column(JSONB, nullable=False, server_default=text("'[]'::jsonb")))
+    output_schema: dict[str, Any] | None = Field(default=None, sa_column=Column(JSONB(none_as_null=True)))
+    model_scope: dict[str, Any] = Field(sa_column=Column(JSONB, nullable=False))
+    tool_scope: list[str] = Field(sa_column=Column(JSONB, nullable=False, server_default=text("'[]'::jsonb")))
+    limits: dict[str, Any] = Field(sa_column=Column(JSONB, nullable=False))
+    canonical_digest: str = Field(sa_column=Column(Text, nullable=False))
+    plan_digest: str = Field(sa_column=Column(Text, nullable=False))
+    approval_id: UUID | None = Field(default=None, sa_column=Column(PGUUID(as_uuid=True)))
+    child_run_id: UUID | None = Field(default=None, sa_column=Column(PGUUID(as_uuid=True)))
+    output: dict[str, Any] | None = Field(default=None, sa_column=Column(JSONB))
+    status: str = Field(sa_column=Column(Text, nullable=False, server_default=text("'planned'")))
+    created_at: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False, server_default=text("now()")))
+    updated_at: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False, server_default=text("now()")))
+
+
+class OrchestrationCheckpointTable(SQLModel, table=True):
+    __tablename__ = "orchestration_checkpoints"
+    __table_args__ = (
+        PrimaryKeyConstraint("owner_id", "parent_run_id"),
+        ForeignKeyConstraint(["owner_id", "parent_run_id"], ["runs.owner_id", "runs.id"], ondelete="RESTRICT"),
+    )
+    owner_id: str = Field(sa_column=Column(Text, nullable=False))
+    parent_run_id: UUID = Field(sa_column=Column(PGUUID(as_uuid=True), nullable=False))
+    version: int = Field(sa_column=Column(Integer, nullable=False))
+    state: dict[str, Any] = Field(sa_column=Column(JSONB, nullable=False))
+    updated_at: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False, server_default=text("now()")))
+
+
+class OrchestrationLeaseTable(SQLModel, table=True):
+    __tablename__ = "orchestration_leases"
+    __table_args__ = (
+        PrimaryKeyConstraint("owner_id"),
+        UniqueConstraint("owner_id", "parent_run_id"),
+        ForeignKeyConstraint(["owner_id", "parent_run_id"], ["runs.owner_id", "runs.id"], ondelete="RESTRICT"),
+    )
+    owner_id: str = Field(sa_column=Column(Text, nullable=False))
+    parent_run_id: UUID = Field(sa_column=Column(PGUUID(as_uuid=True), nullable=False))
+    holder_id: UUID = Field(sa_column=Column(PGUUID(as_uuid=True), nullable=False))
+    fencing_token: int = Field(sa_column=Column(BigInteger, nullable=False))
+    expires_at: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False))
+    updated_at: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False, server_default=text("now()")))

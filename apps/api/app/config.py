@@ -127,6 +127,8 @@ class Settings:
     login_rate_limit_attempts: int = 5
     login_rate_limit_window_seconds: int = 900
     runner_shared_token: str | None = None
+    orchestration_inference_token: str | None = None
+    orchestration_planning_url: str = "http://runtime-launcher:8001/internal/planning/chat-completions"
     redis_url: str = "redis://localhost:6379/0"
     def __post_init__(self) -> None:
         self._validate()
@@ -167,6 +169,12 @@ class Settings:
             raise ConfigError("LOGIN_RATE_LIMIT_WINDOW_SECONDS must be between 60 and 3600")
         if self.runner_shared_token is not None and len(self.runner_shared_token) < 32:
             raise ConfigError("RUNNER_SHARED_TOKEN must be at least 32 characters when set")
+        if self.orchestration_inference_token is not None and len(self.orchestration_inference_token) < 32:
+            raise ConfigError("ORCHESTRATION_INFERENCE_TOKEN must be at least 32 characters when set")
+        if self.orchestration_planning_url:
+            planning = urlsplit(self.orchestration_planning_url)
+            if planning.scheme not in {"http", "https"} or not planning.hostname or planning.username or planning.password:
+                raise ConfigError("ORCHESTRATION_PLANNING_URL must be an HTTP(S) URL")
         redis = urlsplit(self.redis_url)
         if redis.scheme not in {"redis", "rediss"} or not redis.hostname:
             raise ConfigError("REDIS_URL must use redis or rediss and include a host")
@@ -192,6 +200,8 @@ class Settings:
                 env, "LOGIN_RATE_LIMIT_WINDOW_SECONDS", 900, 60, 3600
             ),
             runner_shared_token=(env.get("RUNNER_SHARED_TOKEN") or "").strip() or None,
+            orchestration_inference_token=(env.get("ORCHESTRATION_INFERENCE_TOKEN") or "").strip() or None,
+            orchestration_planning_url=(env.get("ORCHESTRATION_PLANNING_URL") or "http://runtime-launcher:8001/internal/planning/chat-completions").strip(),
             redis_url=(env.get("REDIS_URL") or "redis://localhost:6379/0").strip(),
         )
 

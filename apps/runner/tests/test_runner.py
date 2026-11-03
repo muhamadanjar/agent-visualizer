@@ -797,7 +797,7 @@ def test_heartbeat_acknowledgement_failure_propagates_from_langchain_callback(
         outbox.close()
 
 
-def test_runner_executes_without_any_workspace_tools(tmp_path: Path) -> None:
+def test_runner_respects_empty_delegated_tool_scope(tmp_path: Path) -> None:
     requests: list[dict[str, object]] = []
 
     class ProviderHandler(BaseHTTPRequestHandler):
@@ -812,7 +812,7 @@ def test_runner_executes_without_any_workspace_tools(tmp_path: Path) -> None:
                     "choices": [
                         {
                             "index": 0,
-                            "message": {"role": "assistant", "content": "No tools required."},
+                            "message": {"role": "assistant", "content": '{"summary":"done"}'},
                             "finish_reason": "stop",
                         }
                     ],
@@ -854,14 +854,29 @@ def test_runner_executes_without_any_workspace_tools(tmp_path: Path) -> None:
     api = AcknowledgingAPI()
     outbox = EventOutbox(tmp_path / "state" / "events.sqlite3")
     job = {
-        "run_id": "run-no-tools",
+        "run_id": "run-no-delegated-tools",
         "workspace_path": "project",
         "allowed_tools": ["read_file"],
         "max_duration_seconds": 30,
         "max_inference_turns": 1,
         "max_tool_calls": 1,
         "configuration_snapshot": {
-            "task": {"title": "Answer", "goal": "Answer without tools.", "max_duration_minutes": 1},
+            "task": {
+                "title": "Answer",
+                "goal": "Answer without tools.",
+                "max_duration_minutes": 1,
+                "tool_scope": [],
+                "resource_refs": ["briefs/goal.md"],
+                "dependency_outputs": {"research": {"summary": "Use existing API."}},
+                "workflow_output": {
+                    "node_id": "research",
+                    "output_schema": {
+                        "type": "object",
+                        "properties": {"summary": {"type": "string"}},
+                        "required": ["summary"],
+                    },
+                },
+            },
             "agent_instance": {"display_name": "Mira"},
             "agent_definition": {
                 "configuration": {
@@ -871,7 +886,7 @@ def test_runner_executes_without_any_workspace_tools(tmp_path: Path) -> None:
                     "temperature": None,
                     "max_iterations": 1,
                     "execution_timeout_seconds": 30,
-                    "allowed_tools": [],
+                    "allowed_tools": ["read_file"],
                 }
             },
             "model_endpoint": {
@@ -892,6 +907,12 @@ def test_runner_executes_without_any_workspace_tools(tmp_path: Path) -> None:
         with patch("runner._check_provider_endpoint", return_value=endpoint):
             execute_job(job, api, outbox, "runner-1", settings)  # type: ignore[arg-type]
         assert requests[0].get("tools", []) == []
+        prompt = requests[0]["messages"][1]["content"]
+        assert "briefs/goal.md" in prompt
+        assert '"research":{"summary":"Use existing API."}' in prompt
+        assert "untrusted JSON data" in prompt
+        assert "Workflow output contract" in prompt
+        assert '"required":["summary"]' in prompt
         assert [event["event_type"] for event in api.events] == [
             "run.working",
             "session.heartbeat",
