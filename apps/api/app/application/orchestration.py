@@ -187,7 +187,7 @@ async def create_workflow_plan(
                 "output_description": "acceptance criteria",
                 "tool_scope": ["subset of eligible agent tools"],
                 "dependencies": ["node_id values"],
-                "output_schema": "optional Draft 2020-12 object schema",
+                "output_schema": "required Draft 2020-12 object schema describing the exact JSON output",
             }],
         },
     })
@@ -201,7 +201,7 @@ async def create_workflow_plan(
         },
         "max_tokens": 4096,
         "messages": [
-            {"role": "system", "content": "Plan a bounded DAG of child Tasks. Select only agents and privileges in eligible_agents; never invent identifiers, endpoints, tools, dependencies, or credentials. Return JSON only."},
+            {"role": "system", "content": "Plan a bounded DAG of child Tasks. Select only agents and privileges in eligible_agents; never invent identifiers, endpoints, tools, dependencies, or credentials. Every child must return structured JSON, so provide a Draft 2020-12 object schema for every node, including outputs consumed by dependencies. Return JSON only."},
             {"role": "user", "content": prompt},
         ],
         "response_format": {"type": "json_object"},
@@ -273,7 +273,7 @@ async def create_workflow_plan(
         ):
             raise OrchestrationInputError("node")
         schema = raw_node.get("output_schema")
-        if schema is not None and not isinstance(schema, dict):
+        if not isinstance(schema, dict):
             raise OrchestrationInputError("schema")
         child_task_id = uuid4()
         task_specs[child_task_id] = TaskSpec(

@@ -115,7 +115,7 @@ services:
     environment:
       RUNTIME_LAUNCHER_TOKEN: ${RUNTIME_LAUNCHER_TOKEN:?set RUNTIME_LAUNCHER_TOKEN in .env}
       ORCHESTRATION_INFERENCE_TOKEN: ${ORCHESTRATION_INFERENCE_TOKEN:-}
-      ORCHESTRATION_PLANNING_ALLOWED_ENDPOINTS: ${ORCHESTRATION_PLANNING_ALLOWED_ENDPOINTS:-http://localhost:20128/proxy/v1,http://127.0.0.1:20128/proxy/v1}
+      ORCHESTRATION_PLANNING_ALLOWED_ENDPOINTS: ${ORCHESTRATION_PLANNING_ALLOWED_ENDPOINTS:-http://localhost:20128/proxy/v1,http://127.0.0.1:20128/proxy/v1,http://localhost:20128/v1,http://127.0.0.1:20128/v1}
       RUN_WORKER_IMAGE: agent-office-runner:local
       RUNTIME_PROXY_IMAGE: agent-office-runtime-launcher:local
       RUNTIME_EGRESS_NETWORK: agent-office-runtime-egress

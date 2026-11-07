@@ -280,7 +280,7 @@ exist:
   keep both secret. `NINEROUTER_KEY` supplies the credential for the selected
   Model Endpoint. The Runtime Launcher sends it for planning only to complete
   base URLs in `ORCHESTRATION_PLANNING_ALLOWED_ENDPOINTS` (default: the local
-  NineRouter endpoints on port `20128` with the configured API path). Add a
+  NineRouter endpoints on port `20128` with `/proxy/v1` or `/v1` API paths). Add
   complete public provider base URL only after confirming it is controlled and
   authorized to receive this key. Endpoint records store the URL and
   allowlisted environment-variable name, never the key value.

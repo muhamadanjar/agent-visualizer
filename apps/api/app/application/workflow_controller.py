@@ -33,6 +33,8 @@ class ControllerState(TypedDict, total=False):
     owner_id: str
     parent_run_id: UUID
     plan: WorkflowPlan
+    plan_digest: str
+    plan_revision: int
     statuses: dict[str, str]
     active_children: int
     spent_child_runs: int
@@ -446,6 +448,8 @@ class WorkflowController:
                 "owner_id": owner_id,
                 "parent_run_id": parent_run_id,
                 "plan": plan,
+                "plan_digest": checkpoint["plan_digest"],
+                "plan_revision": checkpoint["plan_revision"],
                 "statuses": statuses,
                 "active_children": 0,
                 "spent_child_runs": 0,

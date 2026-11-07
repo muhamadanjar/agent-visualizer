@@ -367,7 +367,8 @@ def test_planning_provider_rejects_caller_selected_path_under_allowed_origin(mon
         server._planning_provider_request(payload, "secret")
 
 
-def test_planning_local_ninerouter_maps_only_fixed_host_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_planning_local_ninerouter_maps_default_allowlisted_paths_to_fixed_host_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ORCHESTRATION_PLANNING_ALLOWED_ENDPOINTS", raising=False)
     requests: list[tuple[str, str, int, dict[str, str]]] = []
 
     class Connection:
@@ -380,15 +381,20 @@ def test_planning_local_ninerouter_maps_only_fixed_host_endpoint(monkeypatch: py
         def close(self) -> None: pass
 
     monkeypatch.setattr(server.http.client, "HTTPConnection", Connection)
-    for alias in ("localhost", "127.0.0.1"):
+    for alias, api_path in (
+        ("localhost", "/proxy/v1"),
+        ("127.0.0.1", "/proxy/v1"),
+        ("localhost", "/v1"),
+        ("127.0.0.1", "/v1"),
+    ):
         payload = server._validate_planning_payload({
-            "endpoint": {"credential_env": "NINEROUTER_KEY", "endpoint_url": f"http://{alias}:20128/proxy/v1", "model_id": "model"},
+            "endpoint": {"credential_env": "NINEROUTER_KEY", "endpoint_url": f"http://{alias}:20128{api_path}", "model_id": "model"},
             "messages": [{"role": "user", "content": "Plan."}], "max_tokens": 1,
         })
         server._planning_provider_request(payload, "launcher-key")
-    assert requests[0][:3] == ("host.docker.internal", "/proxy/v1/chat/completions", 20128)
-    assert requests[0][3]["Host"] == "host.docker.internal:20128"
-    assert requests[1][:3] == requests[0][:3]
+        assert requests[-1][:3] == ("host.docker.internal", f"{api_path}/chat/completions", 20128)
+        assert requests[-1][3]["Host"] == "host.docker.internal:20128"
+
     for endpoint_url in ("http://localhost:20129/v1", "http://private.example/v1", "https://attacker.example/v1"):
         payload["endpoint"]["endpoint_url"] = endpoint_url
         with pytest.raises(server.LauncherError):

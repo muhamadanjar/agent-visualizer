@@ -123,7 +123,7 @@ trap 'rm -f "$tmp"' EXIT
     printf 'ORCHESTRATION_PLANNING_URL=%s\n' \
         "${ORCHESTRATION_PLANNING_URL:-http://runtime-launcher:8001/internal/planning/chat-completions}"
     printf 'ORCHESTRATION_PLANNING_ALLOWED_ENDPOINTS=%s\n' \
-        "${ORCHESTRATION_PLANNING_ALLOWED_ENDPOINTS:-http://localhost:20128/proxy/v1,http://127.0.0.1:20128/proxy/v1}"
+        "${ORCHESTRATION_PLANNING_ALLOWED_ENDPOINTS:-http://localhost:20128/proxy/v1,http://127.0.0.1:20128/proxy/v1,http://localhost:20128/v1,http://127.0.0.1:20128/v1}"
     printf 'RUNNER_UID=%s\n' "$runner_uid"
     printf 'RUNNER_GID=%s\n' "$runner_gid"
     printf 'DOCKER_GID=%s\n' "$docker_gid"

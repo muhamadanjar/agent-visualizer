@@ -33,7 +33,8 @@ MAX_PLANNING_TOKENS = 4096
 MAX_PLANNING_BODY_BYTES = 256 * 1024
 PLANNING_REQUEST_TIMEOUT_SECONDS = 60
 DEFAULT_ORCHESTRATION_PLANNING_ALLOWED_ENDPOINTS = (
-    "http://localhost:20128/proxy/v1,http://127.0.0.1:20128/proxy/v1"
+    "http://localhost:20128/proxy/v1,http://127.0.0.1:20128/proxy/v1,"
+    "http://localhost:20128/v1,http://127.0.0.1:20128/v1"
 )
 _DNS_RESOLUTION_LOCK = threading.Lock()
 _DNS_RESOLUTION_THREAD: threading.Thread | None = None

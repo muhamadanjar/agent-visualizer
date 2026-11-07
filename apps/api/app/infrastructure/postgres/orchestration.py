@@ -8,11 +8,12 @@ from contextlib import asynccontextmanager
 from typing import Any, Mapping
 from uuid import UUID, uuid4
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.domain.orchestration import DelegationSpec, OrchestrationInputError, OrchestrationRepository, WorkflowLeaseBinding, WorkflowLimits, WorkflowPlan, digest, parent_runtime_checkpoint, validate_output
 from app.domain.tasks import TaskSpec
-from app.infrastructure.postgres.models import TaskRevisionDependencyTable, TaskRevisionTable, TaskTable
+from app.infrastructure.postgres.models import OrchestrationCheckpointTable, OrchestrationDelegationTable, TaskRevisionDependencyTable, TaskRevisionTable, TaskTable
 from app.infrastructure.postgres.raw_sql import RawSQLConnectionPool, RawSQLExecutor, require_workflow_lease
 
 
@@ -125,14 +126,35 @@ class PostgresOrchestrationRepository(OrchestrationRepository):
                 session.add_all(TaskRevisionDependencyTable(owner_id=owner_id, task_id=node.child_task_id, revision=1, blocked_by_task_id=dep) for dep in spec.blocked_by_task_ids)
             await session.flush()
             for node in plan.nodes:
-                await raw.execute("""
-                    INSERT INTO orchestration_delegations(owner_id,id,parent_run_id,node_id,revision,child_task_id,child_revision,definition_id,definition_version,instance_id,project_id,workspace_path,input_payload,resource_refs,dependencies,output_schema,model_scope,tool_scope,limits,canonical_digest,plan_digest,status)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,'waiting_approval')
-                """, owner_id, uuid4(), plan.parent_run_id, node.node_id, plan.revision, node.child_task_id, node.child_revision, node.definition_id, node.definition_version, node.instance_id, node.project_id, node.workspace_path, node.input_payload, list(node.resource_refs), list(node.dependencies), node.output_schema, node.model_scope, list(node.tool_scope), node.limits, node.canonical_digest(), plan.plan_digest)
-            await raw.execute(
-                "INSERT INTO orchestration_checkpoints(owner_id,parent_run_id,version,state) VALUES ($1,$2,1,$3)",
-                owner_id, plan.parent_run_id,
-                parent_runtime_checkpoint({
+                session.add(OrchestrationDelegationTable(
+                    owner_id=owner_id,
+                    id=uuid4(),
+                    parent_run_id=plan.parent_run_id,
+                    node_id=node.node_id,
+                    revision=plan.revision,
+                    child_task_id=node.child_task_id,
+                    child_revision=node.child_revision,
+                    definition_id=node.definition_id,
+                    definition_version=node.definition_version,
+                    instance_id=node.instance_id,
+                    project_id=node.project_id,
+                    workspace_path=node.workspace_path,
+                    input_payload=node.input_payload,
+                    resource_refs=list(node.resource_refs),
+                    dependencies=list(node.dependencies),
+                    output_schema=node.output_schema,
+                    model_scope=node.model_scope,
+                    tool_scope=list(node.tool_scope),
+                    limits=node.limits,
+                    canonical_digest=node.canonical_digest(),
+                    plan_digest=plan.plan_digest,
+                    status="waiting_approval",
+                ))
+            session.add(OrchestrationCheckpointTable(
+                owner_id=owner_id,
+                parent_run_id=plan.parent_run_id,
+                version=1,
+                state=parent_runtime_checkpoint({
                     "plan_digest": plan.plan_digest,
                     "plan_revision": plan.revision,
                     "active_children": 0,
@@ -140,8 +162,8 @@ class PostgresOrchestrationRepository(OrchestrationRepository):
                     "status": "waiting_approval",
                     "status_sequence": -1,
                 }),
-            )
-
+            ))
+            await session.flush()
     async def save_plan(self, owner_id: str, plan: WorkflowPlan) -> None:
         raise RuntimeError("workflow plans must be persisted with child task revisions")
 
@@ -253,7 +275,9 @@ class PostgresOrchestrationRepository(OrchestrationRepository):
                                     raise ValueError("artifact is outside child Run")
                             await connection.execute(
                                 "UPDATE orchestration_delegations SET output=$3,status='succeeded',updated_at=now() WHERE owner_id=$1 AND parent_run_id=$2 AND node_id=$4",
-                                owner_id, parent_run_id, valid, node_id,
+                                owner_id, parent_run_id,
+                                json.dumps(valid, ensure_ascii=False, allow_nan=False, separators=(",", ":")),
+                                node_id,
                             )
                             status = "succeeded"
                         except (ValueError, TypeError, OrchestrationInputError, json.JSONDecodeError, RecursionError):
@@ -312,23 +336,37 @@ class PostgresOrchestrationRepository(OrchestrationRepository):
         self, owner_id: str, parent_run_id: UUID, state: Mapping[str, Any], *,
         terminal: bool = False, workflow_lease: WorkflowLeaseBinding,
     ) -> None:
-        async with self._pool.acquire() as connection:
-            async with connection.transaction():
-                await require_workflow_lease(
-                    connection, workflow_lease, owner_id=owner_id,
-                    parent_run_id=parent_run_id,
-                )
-                if terminal:
-                    await connection.execute(
-                        "DELETE FROM orchestration_checkpoints WHERE owner_id=$1 AND parent_run_id=$2",
-                        owner_id, parent_run_id,
+        async with self._sessions.begin() as session:
+            connection = RawSQLExecutor(session)
+            await require_workflow_lease(
+                connection, workflow_lease, owner_id=owner_id,
+                parent_run_id=parent_run_id,
+            )
+            checkpoint = (
+                await session.execute(
+                    select(OrchestrationCheckpointTable)
+                    .where(
+                        OrchestrationCheckpointTable.owner_id == owner_id,
+                        OrchestrationCheckpointTable.parent_run_id == parent_run_id,
                     )
-                    return
-                await connection.execute("""
-                    INSERT INTO orchestration_checkpoints(owner_id,parent_run_id,version,state)
-                    VALUES ($1,$2,COALESCE((SELECT version+1 FROM orchestration_checkpoints WHERE owner_id=$1 AND parent_run_id=$2),1),$3)
-                    ON CONFLICT (owner_id,parent_run_id) DO UPDATE SET version=orchestration_checkpoints.version+1,state=EXCLUDED.state,updated_at=now()
-                """, owner_id, parent_run_id, parent_runtime_checkpoint(state))
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if terminal:
+                if checkpoint is not None:
+                    await session.delete(checkpoint)
+                return
+            if checkpoint is None:
+                checkpoint = OrchestrationCheckpointTable(
+                    owner_id=owner_id, parent_run_id=parent_run_id,
+                    version=1, state=parent_runtime_checkpoint(state),
+                )
+                session.add(checkpoint)
+            else:
+                checkpoint.version += 1
+                checkpoint.updated_at = func.now()
+                checkpoint.state = parent_runtime_checkpoint(state)
+            await session.flush()
 
     async def get_checkpoint(self, owner_id: str, parent_run_id: UUID) -> Any | None:
         row = await self._pool.fetchrow("SELECT state FROM orchestration_checkpoints WHERE owner_id=$1 AND parent_run_id=$2", owner_id, parent_run_id)

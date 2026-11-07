@@ -15,8 +15,80 @@ from app.domain.orchestration import (
     WorkflowLimits,
     WorkflowPlan,
     digest,
+    parent_runtime_checkpoint,
 )
 
+
+def test_resume_preserves_plan_identity_for_checkpoint_updates() -> None:
+    async def scenario() -> None:
+        parent_run_id = uuid4()
+        node = DelegationSpec(
+            node_id="child",
+            child_task_id=uuid4(),
+            child_revision=1,
+            definition_id=uuid4(),
+            definition_version=1,
+            instance_id=uuid4(),
+            project_id=uuid4(),
+            workspace_path="workspace",
+            input_payload={},
+            resource_refs=(),
+            dependencies=(),
+            output_schema={"type": "object"},
+            model_scope={},
+            tool_scope=("list_files", "read_file"),
+            limits={},
+        )
+        plan = WorkflowPlan(
+            parent_run_id=parent_run_id,
+            plan_digest=digest({"nodes": [node.canonical_digest()]}),
+            revision=1,
+            nodes=(node,),
+            limits=WorkflowLimits(),
+        )
+        checkpoint = {
+            "plan_digest": plan.plan_digest,
+            "plan_revision": plan.revision,
+            "active_children": 0,
+            "spent_child_runs": 0,
+            "status": "waiting_approval",
+            "status_sequence": 0,
+            "last_emitted_status": "waiting_approval",
+        }
+
+        class Repository:
+            async def acquire_lease(self, *_args: object, **_kwargs: object) -> int:
+                return 1
+
+            async def get_checkpoint(self, *_args: object):
+                return checkpoint
+
+            async def delegation_states(self, *_args: object):
+                return [{
+                    "node_id": "child", "status": "waiting_approval",
+                    "approval_id": uuid4(),
+                }]
+
+            async def release_lease(self, *_args: object) -> None:
+                return None
+
+        class Graph:
+            async def ainvoke(self, state):
+                return state
+
+        controller = WorkflowController(
+            Repository(), None, None, None, None, None,  # type: ignore[arg-type]
+        )
+        controller.graph = lambda: Graph()  # type: ignore[method-assign]
+        result = await controller.run_once(
+            "owner", parent_run_id, plan, {"child": "waiting_approval"},
+        )
+        persisted = parent_runtime_checkpoint(result)
+
+        assert persisted["plan_digest"] == plan.plan_digest
+        assert persisted["plan_revision"] == plan.revision
+
+    asyncio.run(scenario())
 
 def test_workflow_active_limit_pauses_during_owner_approval(monkeypatch) -> None:
     now = datetime(2026, 1, 1, tzinfo=UTC)
