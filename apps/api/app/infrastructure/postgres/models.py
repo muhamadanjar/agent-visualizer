@@ -960,3 +960,35 @@ class OrchestrationLeaseTable(SQLModel, table=True):
     fencing_token: int = Field(sa_column=Column(BigInteger, nullable=False))
     expires_at: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False))
     updated_at: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False, server_default=text("now()")))
+
+
+class WorkflowReconciliationAuditTable(SQLModel, table=True):
+    __tablename__ = "workflow_reconciliation_audits"
+    __table_args__ = (
+        CheckConstraint("char_length(owner_id) BETWEEN 1 AND 128"),
+        CheckConstraint("actor_owner_id = owner_id"),
+        CheckConstraint("outcome = 'abandoned_unknown'"),
+        CheckConstraint("checkpoint_version IS NULL OR checkpoint_version >= 1"),
+        CheckConstraint("jsonb_typeof(delegations_snapshot) = 'array'"),
+        CheckConstraint("event_cursor >= 1"),
+        PrimaryKeyConstraint("owner_id", "parent_run_id"),
+        ForeignKeyConstraint(
+            ["owner_id", "parent_run_id"], ["runs.owner_id", "runs.id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["owner_id", "event_cursor"], ["activity_events.owner_id", "activity_events.cursor"],
+            ondelete="RESTRICT",
+        ),
+    )
+    owner_id: str = Field(sa_column=Column(Text, nullable=False))
+    parent_run_id: UUID = Field(sa_column=Column(PGUUID(as_uuid=True), nullable=False))
+    actor_owner_id: str = Field(sa_column=Column(Text, nullable=False))
+    outcome: str = Field(sa_column=Column(Text, nullable=False))
+    checkpoint_version: int | None = Field(default=None, sa_column=Column(Integer))
+    checkpoint_snapshot: Any | None = Field(default=None, sa_column=Column(JSONB))
+    delegations_snapshot: list[dict[str, Any]] = Field(sa_column=Column(JSONB, nullable=False))
+    event_cursor: int = Field(sa_column=Column(BigInteger, nullable=False))
+    created_at: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    )

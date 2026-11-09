@@ -93,6 +93,10 @@ from app.domain.run_results import (
 )
 from app.domain.tasks import Task, TaskInputError, TaskRepository, TaskSpec
 from app.domain.orchestration import MAX_CHILD_RUNS, MAX_DURATION_MINUTES, OrchestrationInputError, OrchestrationRepository, WorkflowLimits, approval_expiry, validate_local_schema, validate_parent_runtime_checkpoint
+from app.domain.workflow_reconciliation import (
+    WorkflowReconciliationConflict,
+    WorkflowReconciliationNotFound,
+)
 
 SESSION_COOKIE = "agent_office_session"
 CORRELATION_HEADER = "X-Correlation-ID"
@@ -589,6 +593,19 @@ class WorkflowDetailsResponse(BaseModel):
     status: Literal["waiting_approval", "waiting_children", "succeeded", "failed", "blocked"]
     delegations: list[WorkflowDelegationResponse]
 
+
+
+class WorkflowReconciliationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirm_abandon: Literal[True]
+
+
+class WorkflowReconciliationResponse(BaseModel):
+    parent_run_id: UUID
+    status: Literal["unknown"]
+    event_id: UUID
+    event_cursor: int
 
 
 class ModelEndpointWrite(BaseModel):
@@ -2148,6 +2165,41 @@ def create_http_app(
             parent_run_id=run_id, plan_digest=plan.plan_digest, plan_revision=plan.revision,
             status="waiting_approval",
             delegations=[{"node_id": node.node_id, "child_task_id": node.child_task_id, "child_revision": node.child_revision, "digest": node.canonical_digest(), "dependencies": list(node.dependencies), "status": "waiting_approval"} for node in plan.nodes],
+        )
+
+    @application.post(
+        "/api/v1/runs/{parent_run_id}/workflow/reconcile",
+        response_model=WorkflowReconciliationResponse,
+    )
+    async def reconcile_workflow(
+        parent_run_id: UUID,
+        body: WorkflowReconciliationRequest,
+        request: Request,
+        principal: OwnerPrincipal = Depends(require_owner),
+    ) -> WorkflowReconciliationResponse:
+        require_origin(request.headers.get("origin"))
+        reconciliation = getattr(request.app.state, "workflow_reconciliation", None)
+        if reconciliation is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Workflow reconciliation is not ready",
+            )
+        try:
+            receipt = await reconciliation.abandon_as_unknown(
+                principal.owner_id, parent_run_id,
+            )
+        except WorkflowReconciliationNotFound as error:
+            raise HTTPException(status_code=404, detail="Resource not found") from error
+        except WorkflowReconciliationConflict as error:
+            raise HTTPException(
+                status_code=409,
+                detail="Workflow cannot be reconciled in its current state",
+            ) from error
+        return WorkflowReconciliationResponse(
+            parent_run_id=receipt.parent_run_id,
+            status="unknown",
+            event_id=receipt.event_id,
+            event_cursor=receipt.event_cursor,
         )
 
     @application.get(

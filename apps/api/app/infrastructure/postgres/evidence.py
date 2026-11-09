@@ -88,6 +88,28 @@ class PostgresActivityEventRepository:
             RawSQLExecutor(session), event, terminal_runner_id=None
         )
 
+    async def append_manual_reconciliation_event_in_transaction(
+        self,
+        session: AsyncSession,
+        event: ActivityEventDraft,
+        *,
+        workflow_lease: WorkflowLeaseBinding,
+    ) -> tuple[ActivityEvent, bool]:
+        if (
+            event.event_type != "run.unknown"
+            or event.source_id != "orchestration-controller"
+        ):
+            raise EvidenceInputError("manual_reconciliation_event")
+        if not session.in_transaction():
+            raise RuntimeError("Activity Event insertion requires an existing transaction")
+        event.validate()
+        return await self._append_event_on_connection(
+            RawSQLExecutor(session),
+            event,
+            terminal_runner_id=None,
+            workflow_lease=workflow_lease,
+        )
+
     async def _append_event(
         self, event: ActivityEventDraft, *, terminal_runner_id: UUID | None,
         workflow_lease: WorkflowLeaseBinding | None = None,
@@ -801,7 +823,7 @@ class PostgresApprovalRepository:
                 ).where(
                     ApprovalRequestTable.expires_at <= now,
                     ApprovalDecisionTable.approval_id.is_(None),
-                ).with_for_update(skip_locked=True)
+                ).with_for_update(skip_locked=True, of=ApprovalRequestTable)
             )).scalars().all()
             for request in rows:
                 decision = ApprovalDecisionTable(owner_id=request.owner_id, approval_id=request.id, decision="expired", decided_at=now)

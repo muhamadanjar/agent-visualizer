@@ -483,6 +483,150 @@ def test_planning_response_strips_provider_metadata_and_redacts_credential() -> 
         "provider-key",
     ) == {"choices": [{"message": {"content": '{"token":"[REDACTED]"}'}}]}
 
+def test_planning_response_redacts_unicode_escaped_credential_in_plan() -> None:
+    assert server._planning_response(
+        {
+            "choices": [{
+                "message": {
+                    "content": '{"nodes":[{"input_text":"\\u0066ixture-secret"}]}',
+                },
+            }],
+        },
+        "fixture-secret",
+    ) == {"choices": [{"message": {"content": '{"nodes":[{"input_text":"[REDACTED]"}]}'}}]}
+
+
+@pytest.mark.parametrize(
+    ("secret", "content"),
+    [
+        ("REDACTED", '{"nodes":[{"input_text":"REDACTED"}]}'),
+        ("12345", '{"nodes":[{"output_schema":{"const":12345}}]}'),
+        ("token", '{"nodes":[],"token":1,"[REDACTED]":2}'),
+        ("true", '{"nodes":[],"enabled":true}'),
+        ("null", '{"nodes":[],"value":null}'),
+    ],
+)
+def test_planning_response_rejects_secrets_that_survive_redaction(secret: str, content: str) -> None:
+    with pytest.raises(server.LauncherError, match="response is invalid"):
+        server._planning_response(
+            {"choices": [{"message": {"content": content}}]},
+            secret,
+        )
+
+
+def test_planning_response_rejects_credential_recreated_across_redaction() -> None:
+    secret = 'a"[REDACTED]'
+    content = json.dumps(
+        {"nodes": [{"input_text": 'a"a"[REDACTED]'}]},
+        separators=(",", ":"),
+    )
+    with pytest.raises(server.LauncherError, match="response is invalid"):
+        server._planning_response(
+            {"choices": [{"message": {"content": content}}]},
+            secret,
+        )
+
+
+def test_planning_response_accepts_quote_credential_absent_from_plan() -> None:
+    content = '{"nodes":[]}'
+    assert server._planning_response(
+        {"choices": [{"message": {"content": content}}]},
+        '"',
+    ) == {"choices": [{"message": {"content": content}}]}
+
+
+def test_planning_response_rejects_redaction_expansion_over_limit() -> None:
+    content = json.dumps({"nodes": [{"input_text": "x" * 30_000}]}, separators=(",", ":"))
+    assert len(content.encode("utf-8")) < server.MAX_PLANNING_RESPONSE_BYTES
+    with pytest.raises(server.LauncherError, match="response is invalid"):
+        server._planning_response(
+            {"choices": [{"message": {"content": content}}]},
+            "x",
+        )
+
+
+def test_planning_response_rejects_surrogate_created_by_json_decoding() -> None:
+    with pytest.raises(server.LauncherError, match="response is invalid"):
+        server._planning_response(
+            {"choices": [{"message": {"content": '{"nodes":[{"input_text":"\\ud800"}]}'}}]},
+            "provider-key",
+        )
+
+
+@pytest.mark.parametrize("number", ["NaN", "Infinity", "-Infinity", "1e400", "-1e400"])
+def test_planning_response_rejects_nonfinite_plan_values(number: str) -> None:
+    content = '{"nodes":[],"value":' + number + "}"
+    with pytest.raises(server.LauncherError, match="response is invalid"):
+        server._planning_response(
+            {"choices": [{"message": {"content": content}}]},
+            "provider-key",
+        )
+
+
+def test_planning_response_preserves_finite_json_float() -> None:
+    content = '{"nodes":[],"threshold":0.25}'
+    assert server._planning_response(
+        {"choices": [{"message": {"content": content}}]},
+        "provider-key",
+    ) == {"choices": [{"message": {"content": content}}]}
+
+
+@pytest.mark.parametrize("number", ["NaN", "Infinity", "-Infinity", "1e400", "-1e400"])
+def test_planning_http_request_rejects_nonfinite_provider_envelope(number: str) -> None:
+    body = ('{"choices":[{"message":{"content":"{}"}}],"usage":{"value":' + number + "}}").encode()
+
+    class Connection:
+        def request(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def getresponse(self) -> object:
+            return type("Response", (), {
+                "status": 200,
+                "read": lambda _self, _limit: body,
+            })()
+
+        def close(self) -> None:
+            pass
+
+    request = {
+        "endpoint": {"model_id": "model"},
+        "messages": [{"role": "user", "content": "Plan."}],
+        "max_tokens": 1,
+    }
+    with pytest.raises(server.LauncherError, match="Planning response is invalid"):
+        server._planning_http_request(Connection(), "/v1/chat/completions", request, {}, secret="provider-key")
+
+
+def test_planning_http_request_rejects_deep_provider_envelope() -> None:
+    body = (
+        b'{"choices":[{"message":{"content":"{}"}}],"ignored":'
+        + b"[" * 1100
+        + b"0"
+        + b"]" * 1100
+        + b"}"
+    )
+
+    class Connection:
+        def request(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def getresponse(self) -> object:
+            return type("Response", (), {
+                "status": 200,
+                "read": lambda _self, _limit: body,
+            })()
+
+        def close(self) -> None:
+            pass
+
+    request = {
+        "endpoint": {"model_id": "model"},
+        "messages": [{"role": "user", "content": "Plan."}],
+        "max_tokens": 1,
+    }
+    with pytest.raises(server.LauncherError, match="Planning response is invalid"):
+        server._planning_http_request(Connection(), "/v1/chat/completions", request, {}, secret="provider-key")
+
 
 def test_planning_response_rejects_success_envelopes_without_message_content() -> None:
     with pytest.raises(server.LauncherError, match="response is invalid"):

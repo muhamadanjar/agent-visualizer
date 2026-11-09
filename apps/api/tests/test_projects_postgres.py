@@ -135,7 +135,7 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
             await apply_alembic_migrations(dsn)
             assert await connection.fetchval(
                 "SELECT version_num FROM alembic_version"
-            ) == "orchestration_0023"
+            ) == "orchestration_0024"
             backfilled_areas = await connection.fetch(
                 "SELECT id, office_area FROM agent_instances "
                 "WHERE owner_id = $1 AND id = ANY($2::uuid[])",
@@ -1990,6 +1990,7 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
                         runner_id,
                         expiry,
                     )
+                await connection.execute("DROP TABLE workflow_reconciliation_audits")
                 await connection.execute("DROP TABLE orchestration_delegations")
                 await connection.execute("DROP TABLE orchestration_checkpoints")
                 await connection.execute("DROP TABLE orchestration_leases")
@@ -2086,7 +2087,7 @@ def test_postgres_migrations_and_project_owner_scope() -> None:
             ) == "blocked"
             assert await connection.fetchval(
                 "SELECT version_num FROM alembic_version"
-            ) == "orchestration_0023"
+            ) == "orchestration_0024"
         finally:
             if restricted_pool is not None:
                 await restricted_pool.close()

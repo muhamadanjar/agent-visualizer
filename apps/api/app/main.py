@@ -25,6 +25,7 @@ from app.domain.runs import RunRepository
 from app.domain.run_results import RunResultRepository
 from app.domain.orchestration import OrchestrationRepository
 from app.application.workflow_controller import WorkflowController, controller_loop
+from app.application.workflow_reconciliation import WorkflowReconciliation
 from app.domain.skills import SkillRepository
 from app.domain.tasks import TaskRepository
 from app.infrastructure.postgres.evidence import (
@@ -41,6 +42,7 @@ from app.infrastructure.postgres.registry import PostgresAgentRegistryRepository
 from app.infrastructure.postgres.runs import PostgresRunRepository
 from app.infrastructure.postgres.run_results import PostgresRunResultRepository
 from app.infrastructure.postgres.orchestration import PostgresOrchestrationRepository
+from app.infrastructure.postgres.workflow_reconciliation import PostgresWorkflowReconciliationRepository
 from app.infrastructure.postgres.skills import PostgresSkillRepository
 from app.infrastructure.postgres.tasks import PostgresTaskRepository
 from app.infrastructure.redis.activity_stream import (
@@ -141,6 +143,14 @@ def create_app(
         application.state.office_scene_repository = PostgresOfficeSceneRepository(sessions)
         application.state.run_result_repository = PostgresRunResultRepository(sessions)
         application.state.orchestration_repository = PostgresOrchestrationRepository(sessions)
+        reconciliation_repository = PostgresWorkflowReconciliationRepository(
+            sessions, activity_events,
+        )
+        application.state.workflow_reconciliation = WorkflowReconciliation(
+            application.state.orchestration_repository,
+            application.state.run_repository,
+            reconciliation_repository,
+        )
         redis = Redis.from_url(
             configured.redis_url,
             decode_responses=True,

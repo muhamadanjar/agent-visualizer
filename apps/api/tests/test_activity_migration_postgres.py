@@ -130,7 +130,7 @@ def test_postgres_activity_phase_migration_round_trips_safely() -> None:
                 async with engine.connect() as connection:
                     assert await connection.scalar(
                         text("SELECT version_num FROM alembic_version")
-                    ) == "orchestration_0023"
+                    ) == "orchestration_0024"
             finally:
                 await engine.dispose()
         finally:

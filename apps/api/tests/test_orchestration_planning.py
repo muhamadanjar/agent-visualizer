@@ -1,3 +1,5 @@
+import asyncio
+
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -7,8 +9,7 @@ from app.application.orchestration import create_workflow_plan
 from app.domain.orchestration import OrchestrationInputError, WorkflowLimits
 
 
-@pytest.mark.asyncio
-async def test_planner_rejects_child_output_without_schema() -> None:
+def test_planner_rejects_child_output_without_schema() -> None:
     instance_id = uuid4()
     definition_id = uuid4()
     endpoint_id = uuid4()
@@ -66,7 +67,7 @@ async def test_planner_rejects_child_output_without_schema() -> None:
             raise AssertionError("invalid plan must not be persisted")
 
     with pytest.raises(OrchestrationInputError, match="schema"):
-        await create_workflow_plan(
+        asyncio.run(create_workflow_plan(
             owner_id="owner", parent_run_id=uuid4(), parent_project_id=uuid4(),
             goal="Inventory services", input_refs=(), limits=WorkflowLimits(),
             broker=Broker(), instances=Instances(), definitions=Definitions(),
@@ -74,4 +75,4 @@ async def test_planner_rejects_child_output_without_schema() -> None:
             parent_endpoint={"credential_env": "provider", "endpoint_url": "http://localhost/v1", "model_id": "model"},
             parent_tool_scope={"list_files"}, child_policy_tools={"list_files"},
             child_workspace_path="workspace",
-        )
+        ))

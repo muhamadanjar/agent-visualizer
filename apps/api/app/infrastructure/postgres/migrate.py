@@ -154,7 +154,8 @@ async def ensure_application_role(
                     'owner_event_cursors', 'activity_events', 'activity_event_outbox',
                     'run_activity_projections', 'approval_requests', 'approval_decisions',
                     'artifacts', 'office_scene_versions', 'run_results', 'orchestration_delegations',
-                    'orchestration_checkpoints', 'orchestration_leases', 'alembic_version'
+                    'orchestration_checkpoints', 'orchestration_leases',
+                    'workflow_reconciliation_audits', 'alembic_version'
                 ]::text[])
                   AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
                   AND relowner = (SELECT oid FROM pg_roles WHERE rolname = $1)
@@ -304,6 +305,10 @@ async def ensure_application_role(
         grant_orchestration_leases = await connection.fetchval(
             "SELECT format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE orchestration_leases TO %I', $1::text)", role_name
         )
+        grant_workflow_reconciliation_audits = await connection.fetchval(
+            "SELECT format('GRANT SELECT, INSERT ON TABLE workflow_reconciliation_audits TO %I', $1::text)",
+            role_name,
+        )
         for statement in (
             revoke_public_create,
             revoke_app_schema,
@@ -339,6 +344,7 @@ async def ensure_application_role(
             grant_orchestration_delegations,
             grant_orchestration_checkpoints,
             grant_orchestration_leases,
+            grant_workflow_reconciliation_audits,
             grant_office_scene_versions,
         ):
             await connection.execute(statement)

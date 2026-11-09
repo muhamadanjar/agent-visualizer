@@ -45,6 +45,7 @@ EXPECTED_APPLICATION_TABLES = {
     "orchestration_delegations",
     "orchestration_checkpoints",
     "orchestration_leases",
+    "workflow_reconciliation_audits",
 }
 
 

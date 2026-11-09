@@ -5,6 +5,7 @@ import http.client
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import socket
@@ -79,6 +80,17 @@ class LauncherError(ValueError):
     def __init__(self, message: str, status_code: int = 400) -> None:
         super().__init__(message)
         self.status_code = status_code
+
+
+def _reject_nonfinite_json_constant(_: str) -> None:
+    raise ValueError("Planning response contains a non-finite JSON number")
+
+
+def _parse_finite_json_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("Planning response contains a non-finite JSON number")
+    return number
 
 
 class EngineError(RuntimeError):
@@ -1136,7 +1148,48 @@ def _planning_response(result: object, secret: str) -> dict[str, object]:
     except UnicodeEncodeError as error:
         raise LauncherError("Planning response is invalid", 502) from error
     if secret:
-        content = content.replace(secret, "[REDACTED]")
+        try:
+            parsed = json.loads(
+                content,
+                parse_constant=_reject_nonfinite_json_constant,
+                parse_float=_parse_finite_json_float,
+            )
+
+            def redact(value: object) -> object:
+                if isinstance(value, str):
+                    sanitized_value = value.replace(secret, "[REDACTED]")
+                    if secret in sanitized_value:
+                        raise ValueError("provider credential remains in planning response")
+                    return sanitized_value
+                if isinstance(value, list):
+                    return [redact(item) for item in value]
+                if isinstance(value, dict):
+                    sanitized: dict[str, object] = {}
+                    for key, item in value.items():
+                        sanitized_key = key.replace(secret, "[REDACTED]")
+                        if secret in sanitized_key or sanitized_key in sanitized:
+                            raise ValueError("redacted planning keys are invalid")
+                        sanitized[sanitized_key] = redact(item)
+                    return sanitized
+                if value is None or isinstance(value, (bool, int, float)):
+                    if secret in json.dumps(value, allow_nan=False):
+                        raise ValueError("provider credential remains in planning response")
+                return value
+
+            if not isinstance(parsed, dict):
+                raise ValueError("planning response is not an object")
+            sanitized_content = json.dumps(
+                redact(parsed),
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            )
+            encoded_content = sanitized_content.encode("utf-8")
+            if len(encoded_content) > MAX_PLANNING_RESPONSE_BYTES:
+                raise ValueError("sanitized planning response is invalid")
+            content = sanitized_content
+        except (ValueError, RecursionError) as error:
+            raise LauncherError("Planning response is invalid", 502) from error
     return {"choices": [{"message": {"content": content}}]}
 
 
@@ -1231,8 +1284,12 @@ def _planning_http_request(
         if len(data) > MAX_PLANNING_RESPONSE_BYTES:
             raise LauncherError("Planning response exceeded size limit", 502)
         try:
-            result = json.loads(data)
-        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            result = json.loads(
+                data,
+                parse_constant=_reject_nonfinite_json_constant,
+                parse_float=_parse_finite_json_float,
+            )
+        except (ValueError, UnicodeDecodeError, RecursionError) as error:
             raise LauncherError("Planning response is invalid", 502) from error
         sanitized = _planning_response(result, secret)
         check_deadline()
